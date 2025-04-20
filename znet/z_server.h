@@ -1,0 +1,44 @@
+// Copyright (C) 2023 Team overLOAD.
+// For licensing information see LICENSE at the root of this distribution.
+#pragma once
+
+#include <base/memory/unique_pointer.h>
+#include <network/zeta/z_transport.h>
+
+#undef SendMessage
+
+namespace tx::network {
+
+class ZServer final : public ZAsyncTransportLayer {
+ public:
+  bool Begin(u16 port);
+
+  bool Update();
+  void SendMessage(ZPeerId id, const std::string& data);
+
+  // Fetches the next packet from the queue
+  bool Poll(PacketChannelType t, IncomingPacket& p) {
+    for (u8 i = (u8)PacketChannelType::Control; i < (u8)PacketChannelType::Data;
+         ++i) {
+      if (packet_queue_.Pop((PacketChannelType)i, p)) {
+        if (IsSystemMessage(p.type)) {
+          ProcessSystemMessage(p);
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // add a package to the queue, priority etc are decided based on the data in
+  // outgoing packet
+  void Push(OutgoingPacket&& p) {
+    if (state_ != State::kConnected)
+      return;
+    packet_queue_.Push(base::move(p));
+  }
+
+  void ProcessSystemMessage(const IncomingPacket& p);
+  void SendServerHello(ZPeerId);
+};
+}  // namespace tx::network
