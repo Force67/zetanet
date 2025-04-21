@@ -4,6 +4,7 @@
 
 #include <base/memory/unique_pointer.h>
 
+#include <znet/z_abi.h>
 #include <znet/z_peer.h>
 #include <znet/z_transport.h>
 
@@ -11,7 +12,7 @@
 
 namespace tx::network {
 
-class ZClient final : public ZAsyncTransportLayer {
+class ZNET_API ZClient final : public ZAsyncTransportLayer {
  public:
   bool Connect(const base::StringRef address, u16 port);
   void Disconnect();

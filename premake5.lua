@@ -24,6 +24,10 @@ filter("language:C++")
 
 defines("OS_WIN")
 defines("PROJECT_NAME=\"Zetanet\"")
+
+buildoptions({
+    "/utf-8",
+  })
     
 workspace("Zetanet")
     targetdir("bin")

@@ -11,14 +11,18 @@
 
 namespace tx::network {
 static constexpr char kLogTag[] = "z-packet-queue";
+static constexpr char kOutoingThreadName[] =
+    "tx::network::OutgoingPacketQueueThread";
+static constexpr char kIncomingThreadName[] =
+    "tx::network::IncomingPacketQueueThread";
 
 ZPacketQueue::ZPacketQueue(ZSocket& socket,
                            ZPeerMapping& peer_list,
                            bool& stop_token)
     : awaiting_ack_packets_(200),
-      outgoing_thread_("tx::network::OutgoingPacketQueueThread",
+      outgoing_thread_(kOutoingThreadName,
                        {this, &ZPacketQueue::ProcessOutgoingPackets}),
-      incoming_thread_("tx::network::IncomingPacketQeueueThread",
+      incoming_thread_(kIncomingThreadName,
                        {this, &ZPacketQueue::ProcessReceiving}),
       socket_(socket),
       peer_list_(peer_list),

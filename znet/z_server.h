@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#include <znet/z_abi.h>
 #include <base/memory/unique_pointer.h>
 #include <znet/z_transport.h>
 
@@ -9,7 +10,7 @@
 
 namespace tx::network {
 
-class ZServer final : public ZAsyncTransportLayer {
+class ZNET_API ZServer final : public ZAsyncTransportLayer {
  public:
   bool Begin(u16 port);
 

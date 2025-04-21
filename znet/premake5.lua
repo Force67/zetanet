@@ -18,6 +18,4 @@ project("zetanet")
         "fmtlib",
         "lz4",
     })
-    buildoptions({
-    "/utf-8",
-  })
+    

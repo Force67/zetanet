@@ -1,11 +1,6 @@
-project "DllHost"
+project "SimpleClient"
     language "C++"
-    kind "WindowedApp"
-	optimize "Speed"
-	flags "NoManifest"
-    optimize("Off")
-	editandcontinue "Off" -- this breaks our custom section ordering in the launcher, and is kind of annoying otherwise
-    flags { "NoIncrementalLink" } 
+    kind "ConsoleApp"
     vpaths
     {
         ["*"] = "premake5.lua"
@@ -14,12 +9,18 @@ project "DllHost"
     includedirs
     {
         ".",
-        "../../../",
+        "../../",
+        "../../vendor/equilibrium",
+        "../../vendor/fmtlib/include",
+        "../../vendor/lz4/lib",
     }
 
     links
     {
-		"ntloader"
+		"zetanet",
+        "base",
+        "fmtlib",
+        "lz4",
     }
 
     files

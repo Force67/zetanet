@@ -2,17 +2,15 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#if defined(_WIN32)
-#if defined(COMPILE_DLL)
-#define ZNET_API __declspec(dllexport)
-#else
-#define ZNET_API __declspec(dllimport)
-#endif
-#else
-#define ZNET_API
-#endif
+#include <znet/z_abi.h>
 
 namespace tx::network {
 
 ZNET_API void *ZCreateContext();
+
+ZNET_API void SetBaseLogHandlerFwd(void *user_pointer,
+                                   void (*callback)(void *user_pointer,
+                                                    const char *channel_name,
+                                                    int level,
+                                                    const char *msg));
 }  // namespace tx::network
