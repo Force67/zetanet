@@ -1,0 +1,12 @@
+[submodule "vendor/equilibrium"]
+	path = vendor/equilibrium
+	url = https://github.com/Force67/equilibrium
+[submodule "vendor/fmtlib"]
+	path = vendor/fmtlib
+	url = https://github.com/fmtlib/fmt
+[submodule "vendor/mbedtls"]
+	path = vendor/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls
+[submodule "vendor/lz4"]
+	path = vendor/lz4
+	url = https://github.com/lz4/lz4.git

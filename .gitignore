@@ -23,3 +23,6 @@ ntloader/ntloader.vcxproj.user
 *.id2
 *.nam
 *.til
+/samples/simple_client/obj
+/vendor/obj
+/znet/obj

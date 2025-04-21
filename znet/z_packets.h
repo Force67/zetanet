@@ -101,7 +101,7 @@ struct IncomingPacket {
   u32 source_peer_id;          // 4 bytes
   u32 acknowledgement_number;  // 4 bytes
   u32 sequence_number;         // 4 bytes
-  std::string data;
+  base::String data;
 };
 
 class OutgoingPacket {

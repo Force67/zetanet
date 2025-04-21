@@ -5,7 +5,19 @@ project("zetanet")
         "*.cc",
         "*.h"
     })
+    defines("COMPILE_DLL")
     includedirs({
         ".",
-        "../"
+        "../",
+        "../vendor/equilibrium",
+        "../vendor/fmtlib/include",
+        "../vendor/lz4/lib",
     })
+    links({
+        "base",
+        "fmtlib",
+        "lz4",
+    })
+    buildoptions({
+    "/utf-8",
+  })

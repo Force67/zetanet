@@ -3,6 +3,10 @@
 #include "z_socket.h"
 #include <base/logging.h>
 
+#if defined(_WIN32)
+#pragma comment(lib, "Ws2_32.lib")
+#endif
+
 namespace tx::network {
 static constexpr char kLogTag[] = "z-socket";
 

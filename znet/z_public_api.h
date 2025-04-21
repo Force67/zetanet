@@ -2,7 +2,17 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#if defined(_WIN32)
+#if defined(COMPILE_DLL)
+#define ZNET_API __declspec(dllexport)
+#else
+#define ZNET_API __declspec(dllimport)
+#endif
+#else
+#define ZNET_API
+#endif
+
 namespace tx::network {
 
-void *ZCreateContext();
+ZNET_API void *ZCreateContext();
 }  // namespace tx::network

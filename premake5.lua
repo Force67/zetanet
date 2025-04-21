@@ -21,6 +21,9 @@ filter("language:C or C++")
 
 filter("language:C++")
     cppdialect("C++20")
+
+defines("OS_WIN")
+defines("PROJECT_NAME=\"Zetanet\"")
     
 workspace("Zetanet")
     targetdir("bin")
@@ -33,5 +36,6 @@ workspace("Zetanet")
       "MultiProcessorCompile"
     }
     defines("NOMINMAX")
+    include("./vendor")
     include("./znet")
     include("./samples")

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <map>
+#include <string>
 #include <base/filesystem/path.h>
 
 namespace tx::network {
