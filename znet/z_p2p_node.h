@@ -1,8 +1,8 @@
-// Copyright (C) 2023 Team overLOAD.
+// Copyright (C) 2023-2025 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <network/zeta/z_transport.h>
+#include <znet/z_transport.h>
 
 namespace tx::network {
 

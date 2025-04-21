@@ -1,8 +1,8 @@
-// Copyright (C) 2023 Team overLOAD.
+// Copyright (C) 2023-2025 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <network/zeta/z_packets.h>
+#include <znet/z_packets.h>
 #include <base/containers/mpsc_queue.h>
 
 namespace tx::network {

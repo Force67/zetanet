@@ -1,8 +1,10 @@
+// Copyright (C) 2023-2025 Vincent Hengel
+// For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
 #include <base/containers/vector.h>
 #include <base/containers/id_set.h>
-#include <network/zeta/z_peer.h>
+#include <znet/z_peer.h>
 
 namespace tx::network {
 

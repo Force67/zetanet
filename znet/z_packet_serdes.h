@@ -1,15 +1,15 @@
-// Copyright (C) 2023 Team overLOAD.
+// Copyright (C) 2023-2025 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <network/zeta/z_crypto_wrapper.h>
-#include <network/zeta/z_compression_wrapper.h>
+#include <znet/z_crypto_wrapper.h>
+#include <znet/z_compression_wrapper.h>
 #include <base/containers/vector.h>
 #include <base/time/time.h>
 #include <base/logging.h>
 
-#include <network/zeta/z_packets.h>
-#include <network/zeta/z_packet_bin_fmt.h>
+#include <znet/z_packets.h>
+#include <znet/z_packet_bin_fmt.h>
 
 namespace tx::network {
 

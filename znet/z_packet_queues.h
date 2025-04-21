@@ -1,20 +1,20 @@
-// Copyright (C) 2023 Vincent Hengel.
+// Copyright (C) 2023-2025 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <network/zeta/z_packets.h>
+#include <znet/z_packets.h>
 
 #include <base/memory/unique_pointer.h>
-#include <network/zeta/z_crypto_wrapper.h>
-#include <network/zeta/z_socket.h>
-#include <network/zeta/z_peer_mapping.h>
+#include <znet/z_crypto_wrapper.h>
+#include <znet/z_socket.h>
+#include <znet/z_peer_mapping.h>
 #include <base/containers/mpsc_queue.h>
 #include <base/containers/lock_free_ordered_concurrent_hashmap.h>
 #include <base/threading/thread.h>
 
-#include <network/zeta/z_packet_dispatcher.h>
-#include <network/zeta/z_packet_receiver.h>
-#include <network/zeta/z_packet_priority_queue.h>
+#include <znet/z_packet_dispatcher.h>
+#include <znet/z_packet_receiver.h>
+#include <znet/z_packet_priority_queue.h>
 
 namespace tx::network {
 

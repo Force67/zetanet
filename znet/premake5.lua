@@ -1,0 +1,11 @@
+project("zetanet")
+    language("C++")
+    kind("SharedLib")
+    files({
+        "*.cc",
+        "*.h"
+    })
+    includedirs({
+        ".",
+        "../"
+    })

@@ -1,9 +1,11 @@
+// Copyright (C) 2023-2025 Vincent Hengel
+// For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <network/zeta/z_socket.h>
-#include <network/zeta/z_packets.h>
-#include <network/zeta/z_peer_mapping.h>
-#include <network/zeta/z_packet_serdes.h>
+#include <znet/z_socket.h>
+#include <znet/z_packets.h>
+#include <znet/z_peer_mapping.h>
+#include <znet/z_packet_serdes.h>
 
 #include <base/atomic.h>
 #include <base/logging.h>

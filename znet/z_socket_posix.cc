@@ -1,5 +1,6 @@
-// Copyright (C) 2023 Team overLOAD.
+// Copyright (C) 2023-2025 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
+
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
