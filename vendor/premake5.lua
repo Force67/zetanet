@@ -1,4 +1,5 @@
 include("equilibrium/build/platform_files.lua")
+include("equilibrium/build/build_config.lua")
 
 project("fmtlib")
   language("C++")

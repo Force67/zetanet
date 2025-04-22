@@ -25,7 +25,7 @@ class PacketDispatcher {
   void DispatchPacket(
       ZCryptoContext* crypto,
       OutgoingPacket& packet,
-      base::OrderedLockFreeHashMap<u32, OutgoingPacket>& receipt_queue) {
+      base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
     tx::network::PacketBuilder builder(crypto);
 
     if (packet.destination_peer_id == ZPeerId::to_server) {
@@ -51,7 +51,7 @@ class PacketDispatcher {
       ZPeer& peer,
       OutgoingPacket& packet,
       PacketBuilder& builder,
-      base::OrderedLockFreeHashMap<u32, OutgoingPacket>& receipt_queue) {
+      base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
     auto bytes = builder.BuildPacket(packet, next_outgoing_sequence_number_);
     socket_.Send(peer.address, bytes);
     AddReceiptIfNeeded(packet, receipt_queue);
@@ -61,7 +61,7 @@ class PacketDispatcher {
   void DispatchToServer(
       OutgoingPacket& packet,
       PacketBuilder& builder,
-      base::OrderedLockFreeHashMap<u32, OutgoingPacket>& receipt_queue) {
+      base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
     auto bytes = builder.BuildPacket(packet, next_outgoing_sequence_number_);
     socket_.SendtoServer(bytes);
     AddReceiptIfNeeded(packet, receipt_queue);
@@ -70,7 +70,7 @@ class PacketDispatcher {
 
   void AddReceiptIfNeeded(
       OutgoingPacket& packet,
-      base::OrderedLockFreeHashMap<u32, OutgoingPacket>& receipt_queue) {
+      base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
     if (packet.flags.reliable) {
       packet.flags.awaiting_ack = true;
       packet.last_send_time = static_cast<u32>(base::GetUnixTimeStamp());

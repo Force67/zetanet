@@ -9,7 +9,7 @@ project "SimpleServer"
     includedirs
     {
         ".",
-        "../../../",
+        "../../",
         "../../vendor/equilibrium",
         "../../vendor/fmtlib/include",
         "../../vendor/lz4/lib",

@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#include <map>
 #include <znet/z_packets.h>
 
 #include <base/memory/unique_pointer.h>
@@ -73,7 +74,7 @@ class ZPacketQueue {
   std::map<PacketChannelType, PriorityMPSCQueue<IncomingPacket>>
       channel_incoming_queues_;
 
-  base::OrderedLockFreeHashMap<u32, OutgoingPacket> awaiting_ack_packets_;
+  base::LockFreeOrderedHashMap<u32, OutgoingPacket> awaiting_ack_packets_;
 
   PacketDispatcher dispatcher_;
   PacketReceiver receiver_;

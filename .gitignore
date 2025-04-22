@@ -26,3 +26,5 @@ ntloader/ntloader.vcxproj.user
 /samples/simple_client/obj
 /vendor/obj
 /znet/obj
+/samples/simple_server/obj
+*.idb
