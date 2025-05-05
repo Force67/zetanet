@@ -11,11 +11,18 @@
 #include <znet/z_peer_mapping.h>
 #include <base/containers/mpsc_queue.h>
 #include <base/containers/lock_free_ordered_concurrent_hashmap.h>
-#include <base/threading/thread.h>
 
 #include <znet/z_packet_dispatcher.h>
 #include <znet/z_packet_receiver.h>
 #include <znet/z_packet_priority_queue.h>
+
+//#define USE_BASE_THREADS
+
+#if defined(USE_BASE_THREADS)
+#include <base/threading/thread.h>
+#else
+#include <thread>
+#endif
 
 namespace tx::network {
 
@@ -66,8 +73,13 @@ class ZPacketQueue {
   tx::network::ZPeerMapping& peer_list_;
   ZCryptoContext* crypto_context_{nullptr};
 
+  #if defined(USE_BASE_THREADS)
   base::Thread outgoing_thread_;
   base::Thread incoming_thread_;
+  #else
+  std::thread outgoing_thread_;
+  std::thread incoming_thread_;
+  #endif
 
   std::map<PacketChannelType, PriorityMPSCQueue<OutgoingPacket>>
       channel_outgoing_queues_;

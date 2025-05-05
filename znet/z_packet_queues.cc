@@ -20,19 +20,37 @@ ZPacketQueue::ZPacketQueue(ZSocket& socket,
                            ZPeerMapping& peer_list,
                            bool& stop_token)
     : awaiting_ack_packets_(200),
+#if defined(USE_BASE_THREADS)
       outgoing_thread_(kOutoingThreadName,
                        {this, &ZPacketQueue::ProcessOutgoingPackets}),
       incoming_thread_(kIncomingThreadName,
                        {this, &ZPacketQueue::ProcessReceiving}),
+#else
+      outgoing_thread_(
+          std::thread(&ZPacketQueue::ProcessOutgoingPackets, this)),
+      incoming_thread_(
+          std::thread(&ZPacketQueue::ProcessReceiving, this)),
+#endif
       socket_(socket),
       peer_list_(peer_list),
       stop_threads_(stop_token),
       dispatcher_(socket, peer_list),
-      receiver_(socket, peer_list) {}
+      receiver_(socket, peer_list) {
+    channel_outgoing_queues_.emplace(PacketChannelType::Control,
+                               PriorityMPSCQueue<OutgoingPacket>());
+    channel_outgoing_queues_.emplace(PacketChannelType::Data, PriorityMPSCQueue<OutgoingPacket>());
+}
 
 bool ZPacketQueue::StartThreads() {
+#if defined(USE_BASE_THREADS)
   return outgoing_thread_.Start(base::Thread::Priority::kNormal) &&
          incoming_thread_.Start(base::Thread::Priority::kNormal);
+#else
+  outgoing_thread_.detach();
+  incoming_thread_.detach();
+
+  return true;
+#endif
 }
 
 void ZPacketQueue::ProcessOutgoingPackets() {
@@ -53,6 +71,9 @@ void ZPacketQueue::ProcessOutgoingPackets() {
           awaiting_ack_packets_.remove(seqNum);
         }
       }
+#ifndef USE_BASE_THREADS
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
     }
   }
 }

@@ -6,12 +6,12 @@
 #include <znet/z_packets.h>
 #include <znet/z_peer_mapping.h>
 #include <znet/z_packet_serdes.h>
+#include <znet/fancy_queue.h>
 
 #include <base/atomic.h>
 #include <base/logging.h>
 #include <base/time/time.h>
 #include <base/containers/vector.h>
-#include <base/containers/lock_free_ordered_concurrent_hashmap.h>
 
 namespace tx::network {
 

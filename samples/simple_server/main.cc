@@ -14,6 +14,7 @@ void LogHandler(void* user_pointer, const char* channel_name,
 
 #if defined(_WIN32)
   ::OutputDebugStringA(buffer);
+  std::cout << buffer;
 #endif
 }
 
@@ -21,13 +22,16 @@ int main(int argc, char** argv) {
   tx::network::SetBaseLogHandlerFwd(
       nullptr, reinterpret_cast<void (*)(void*, const char*, int, const char*)>(
                    LogHandler));
+  std::cout << "Log handler set!" << std::endl;
 
   tx::network::ZServer server;
   bool result = server.Begin(1337);
   if (!result) {
+   // std::print("HI");
     std::cerr << "Failed to start server" << std::endl;
     return -1;
   }
+  std::cout << "Server is up" << std::endl;
 
   while (true) {
     bool wants_quit = server.Update();
