@@ -4,6 +4,8 @@
 #include "z_server.h"
 #include "z_system_command.h"
 
+#include <cstdlib>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -16,11 +18,13 @@ static constexpr char kSelfAddress[] =
     "127.0.0.1";
 
 bool ZServer::Begin(u16 port) {
+  const char* encryption_env = std::getenv("ZNET_ENABLE_ENCRYPTION");
+  const bool use_encryption = encryption_env && encryption_env[0] != '0';
   const ZAsyncTransportLayer::InitOptions options{
       .ip = kSelfAddress,
       .port = port,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kServer,
-      .use_encryption = false,
+      .use_encryption = use_encryption,
       .use_compression = false,
       .allow_ipv6 = false};
   bool result = ZAsyncTransportLayer::Init(options);
@@ -56,8 +60,9 @@ bool ZServer::Update() {
 }
 
 void ZServer::SendMessage(ZPeerId id, const std::string& data) {
+  const u8 use_encryption = crypto_context_ ? 1 : 0;
   const PackageFlags flags{.reliable = 1,
-                           .encrypted = 0,
+                           .encrypted = use_encryption,
                            .compressed = 0,
                            .priority = (u8)PacketPriority::Medium,
                            .acknowledged = 0,
@@ -99,9 +104,11 @@ void ZServer::SendServerHello(ZPeerId dest) {
     }
     if (foundAesCBC) {
       const auto key = crypto_context_->GetPublicKey();
-      public_key_data.resize(key.length());
-      std::memcpy(public_key_data.data(), key.data(), key.length());
-      pub_key_list_len = 1;
+      if (!key.empty()) {
+        public_key_data.resize(key.length());
+        std::memcpy(public_key_data.data(), key.data(), key.length());
+        pub_key_list_len = 1;
+      }
     }
   }
 

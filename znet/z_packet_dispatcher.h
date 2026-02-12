@@ -57,7 +57,14 @@ class PacketDispatcher {
       PacketBuilder& builder,
       base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
     auto bytes = builder.BuildPacket(packet, next_outgoing_sequence_number_);
-    socket_.Send(peer.address, bytes);
+    if (bytes.empty()) {
+      BASE_LOGE(kLogTag, "Failed to build outgoing packet");
+      return;
+    }
+    if (socket_.Send(peer.address, bytes) <= 0) {
+      BASE_LOGE(kLogTag, "Failed to send packet to peer {}", peer.identifier.id);
+      return;
+    }
     AddReceiptIfNeeded(packet, receipt_queue);
     next_outgoing_sequence_number_++;
   }
@@ -67,7 +74,14 @@ class PacketDispatcher {
       PacketBuilder& builder,
       base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
     auto bytes = builder.BuildPacket(packet, next_outgoing_sequence_number_);
-    socket_.SendtoServer(bytes);
+    if (bytes.empty()) {
+      BASE_LOGE(kLogTag, "Failed to build outgoing packet");
+      return;
+    }
+    if (socket_.SendtoServer(bytes) <= 0) {
+      BASE_LOGE(kLogTag, "Failed to send packet to server");
+      return;
+    }
     AddReceiptIfNeeded(packet, receipt_queue);
     next_outgoing_sequence_number_++;
   }
@@ -75,7 +89,7 @@ class PacketDispatcher {
   void AddReceiptIfNeeded(
       OutgoingPacket& packet,
       base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
-    if (packet.flags.reliable) {
+    if (packet.flags.reliable && packet.type != PacketType::Acknowledgement) {
       packet.flags.awaiting_ack = true;
       packet.last_send_time = static_cast<u32>(base::GetUnixTimeStamp());
       receipt_queue.insert(next_outgoing_sequence_number_, std::move(packet));

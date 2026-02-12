@@ -41,7 +41,11 @@ bool ZAsyncTransportLayer::Init(const InitOptions& options) {
 
   if (options.use_encryption) {
     crypto_context_ = base::MakeUnique<ZCryptoContext>();
-    crypto_context_->InitializeKeyExchange();
+    if (!crypto_context_->InitializeKeyExchange()) {
+      BASE_LOGE(kLogTag, "Failed to initialize crypto key exchange context");
+      state_ = State::kDisconnected;
+      return false;
+    }
     packet_queue_.SetCryptoProvider(
         crypto_context_.Get_UseOnlyIfYouKnowWhatYouareDoing());
     BASE_LOGI(kLogTag, "Encryption support is enabled");

@@ -4,6 +4,8 @@
 #include "z_client.h"
 #include "z_system_command.h"
 
+#include <cstdlib>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -14,11 +16,13 @@ namespace tx::network {
 static constexpr char kLogTag[] = "z-client";
 
 bool ZClient::Connect(const base::StringRef address, u16 port) {
+  const char* encryption_env = std::getenv("ZNET_ENABLE_ENCRYPTION");
+  const bool use_encryption = encryption_env && encryption_env[0] != '0';
   const ZAsyncTransportLayer::InitOptions options{
       .ip = address,
       .port = port,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kClient,
-      .use_encryption = false,
+      .use_encryption = use_encryption,
       .use_compression = false,
       .allow_ipv6 = false};
   bool result = ZAsyncTransportLayer::Init(options);
@@ -56,8 +60,9 @@ void ZClient::Update() {
   }
 }
 void ZClient::SendMessage(const ZPeerId id, const std::string& data) {
+  const u8 use_encryption = crypto_context_ ? 1 : 0;
   const PackageFlags flags{.reliable = 1,
-                           .encrypted = 0,
+                           .encrypted = use_encryption,
                            .compressed = 0,
                            .priority = (u8)PacketPriority::Medium,
                            .acknowledged = 0,

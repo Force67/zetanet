@@ -91,8 +91,9 @@ void ZPacketQueue::ProcessReceiving() {
 void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
                                         u32 sequence_number,
                                         u32 ack_number) {
+  const u8 use_encryption = crypto_context_ ? 1 : 0;
   const PackageFlags flags{.reliable = 0,
-                           .encrypted = 0,
+                           .encrypted = use_encryption,
                            .compressed = 0,
                            .priority = (u8)PacketPriority::High,
                            .acknowledged = 1,

@@ -3,8 +3,6 @@
 #pragma once
 
 #include <znet/z_crypto_wrapper.h>
-#include <znet/z_compression_wrapper.h>
-
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -31,22 +29,51 @@ class PacketBuilder {
 
   void FillPacketHeader(const base::Span<byte> outgoing_data,
                         const OutgoingPacket& packet_info,
+                        u32 payload_size,
                         u32 next_sequence_number);
 
-  void EncryptPayloadIfNeeded(OutgoingPacket& packet_info) {
-    if (packet_info.flags.encrypted && packet_info.heap_data_size > 0 &&
-        crypto_context_) {
-      crypto_context_->EncryptPayload(packet_info.payload.data,
-                                      packet_info.heap_data_size);
+  bool EncryptPayloadIfNeeded(const OutgoingPacket& packet_info,
+                              u32 next_sequence_number,
+                              base::Vector<byte>& payload) {
+    if (!packet_info.flags.encrypted) {
+      return true;
     }
-  }
+    if (!crypto_context_) {
+      return false;
+    }
+    base::Vector<byte> aad(12);
+    const u8 flags =
+        (packet_info.flags.reliable ? 1 : 0) |
+        (packet_info.flags.encrypted ? (1 << 1) : 0) |
+        (packet_info.flags.compressed ? (1 << 2) : 0) |
+        ((packet_info.flags.priority & 0x3) << 4);
+    const u32 sequence = packet_info.flags.reliable ? next_sequence_number : 0;
+    const u32 acknowledgement =
+        (packet_info.flags.reliable && packet_info.type == PacketType::Acknowledgement)
+            ? static_cast<u32>(packet_info.payload.scalar)
+            : 0;
+    aad[0] = static_cast<u8>(static_cast<u16>(packet_info.type) & 0xFFu);
+    aad[1] = static_cast<u8>((static_cast<u16>(packet_info.type) >> 8) & 0xFFu);
+    aad[2] = static_cast<u8>(packet_info.channel);
+    aad[3] = flags;
+    aad[4] = static_cast<u8>(sequence & 0xFFu);
+    aad[5] = static_cast<u8>((sequence >> 8) & 0xFFu);
+    aad[6] = static_cast<u8>((sequence >> 16) & 0xFFu);
+    aad[7] = static_cast<u8>((sequence >> 24) & 0xFFu);
+    aad[8] = static_cast<u8>(acknowledgement & 0xFFu);
+    aad[9] = static_cast<u8>((acknowledgement >> 8) & 0xFFu);
+    aad[10] = static_cast<u8>((acknowledgement >> 16) & 0xFFu);
+    aad[11] = static_cast<u8>((acknowledgement >> 24) & 0xFFu);
 
-  void CompressPayloadIfNeeded(OutgoingPacket& packet_info,
-                               base::Vector<char>& compressed_data) {
-    if (packet_info.flags.compressed && packet_info.heap_data_size > 0) {
-      compressed_data = ZCompressionContext::Compress(base::Span<char>(
-          (char*)packet_info.payload.data, packet_info.heap_data_size));
+    base::Vector<byte> encrypted_payload;
+    if (!crypto_context_->EncryptPayload(
+            base::Span<byte>(payload.data(), payload.size()),
+            base::Span<byte>(aad.data(), aad.size()),
+            encrypted_payload)) {
+      return false;
     }
+    payload = std::move(encrypted_payload);
+    return true;
   }
 };
 
@@ -89,12 +116,43 @@ class PacketUnpacker {
     return header.type != static_cast<u16>(PacketType::Invalid);
   }
 
-  void DecryptPayloadIfNeeded(byte* data,
-                              size_t size,
-                              const PacketHeader* header) {
-    if (header->flags.is_encrypted && size > 0 && crypto_context_) {
-      crypto_context_->DecryptPayload(data, size);
+  bool DecryptPayloadIfNeeded(base::Vector<byte>& payload,
+                              u32 sequence_number,
+                              u32 acknowledgement_number,
+                              const PacketHeader& header) {
+    if (!header.flags.is_encrypted) {
+      return true;
     }
+    if (!crypto_context_) {
+      return false;
+    }
+    base::Vector<byte> aad(12);
+    const u8 flags =
+        (header.flags.is_reliable ? 1 : 0) |
+        (header.flags.is_encrypted ? (1 << 1) : 0) |
+        (header.flags.is_compressed ? (1 << 2) : 0) |
+        ((header.flags.priority & 0x3) << 4);
+    aad[0] = static_cast<u8>(header.type & 0xFFu);
+    aad[1] = static_cast<u8>((header.type >> 8) & 0xFFu);
+    aad[2] = header.channel_id;
+    aad[3] = flags;
+    aad[4] = static_cast<u8>(sequence_number & 0xFFu);
+    aad[5] = static_cast<u8>((sequence_number >> 8) & 0xFFu);
+    aad[6] = static_cast<u8>((sequence_number >> 16) & 0xFFu);
+    aad[7] = static_cast<u8>((sequence_number >> 24) & 0xFFu);
+    aad[8] = static_cast<u8>(acknowledgement_number & 0xFFu);
+    aad[9] = static_cast<u8>((acknowledgement_number >> 8) & 0xFFu);
+    aad[10] = static_cast<u8>((acknowledgement_number >> 16) & 0xFFu);
+    aad[11] = static_cast<u8>((acknowledgement_number >> 24) & 0xFFu);
+
+    base::Vector<byte> plaintext;
+    if (!crypto_context_->DecryptPayload(
+            base::Span<byte>(payload.data(), payload.size()),
+            base::Span<byte>(aad.data(), aad.size()), plaintext)) {
+      return false;
+    }
+    payload = std::move(plaintext);
+    return true;
   }
 };
 }  // namespace tx::network

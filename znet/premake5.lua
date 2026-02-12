@@ -25,7 +25,9 @@ project("zetanet")
       })
       -- Link pthread on Linux
       filter("system:linux")
-        links({ "pthread" })
+        links({ "pthread", "crypto", "ssl" })
+      filter("system:macosx")
+        links({ "crypto", "ssl" })
       filter({})
     else
       defines("COMPILE_DLL")
@@ -41,4 +43,9 @@ project("zetanet")
           "fmtlib",
           "lz4",
       })
+      filter("system:linux")
+        links({ "crypto", "ssl" })
+      filter("system:macosx")
+        links({ "crypto", "ssl" })
+      filter({})
     end
