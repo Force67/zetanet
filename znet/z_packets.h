@@ -122,9 +122,27 @@ class OutgoingPacket {
   } payload;
 
  public:
-  OutgoingPacket() { memset(this, 0, sizeof(OutgoingPacket)); }
+  OutgoingPacket()
+      : channel(PacketChannelType::Data),
+        flags{},
+        type(PacketType::Invalid),
+        heap_data_size(0),
+        last_send_time(0),
+        destination_peer_id(0) {
+    payload.scalar = 0;
+  }
 
-  STRONG_INLINE OutgoingPacket(OutgoingPacket&& other)
+  STRONG_INLINE OutgoingPacket(const OutgoingPacket& other)
+      : channel(other.channel),
+        flags(other.flags),
+        type(other.type),
+        heap_data_size(0),
+        last_send_time(other.last_send_time),
+        destination_peer_id(other.destination_peer_id) {
+    CopyPayloadFrom(other);
+  }
+
+  STRONG_INLINE OutgoingPacket(OutgoingPacket&& other) noexcept
       : channel(other.channel),
         flags(other.flags),
         type(other.type),
@@ -132,7 +150,7 @@ class OutgoingPacket {
         last_send_time(other.last_send_time),
         destination_peer_id(other.destination_peer_id),
         payload(other.payload) {
-    other.payload.data = nullptr;
+    other.payload.scalar = 0;
     other.heap_data_size = 0;
   }
   // with data
@@ -147,8 +165,11 @@ class OutgoingPacket {
         heap_data_size(static_cast<u32>(data.size())),
         last_send_time(0),
         destination_peer_id(peer_id) {
-    payload.data = new byte[data.size()];
-    memcpy(payload.data, data.data(), data.size());
+    payload.data = nullptr;
+    if (heap_data_size > 0) {
+      payload.data = new byte[data.size()];
+      memcpy(payload.data, data.data(), data.size());
+    }
   }
   // without data
   STRONG_INLINE OutgoingPacket(const u32 peer_id,
@@ -161,30 +182,57 @@ class OutgoingPacket {
         heap_data_size(0),
         last_send_time(0),
         destination_peer_id(peer_id) {
-    payload.data = nullptr;
+    payload.scalar = 0;
   }
-  STRONG_INLINE ~OutgoingPacket() {
-    // after moving out a moved element it is nilled
-    if (heap_data_size > 0 && payload.data)
-      delete[] payload.data;
-  }
+  STRONG_INLINE ~OutgoingPacket() { ReleasePayload(); }
   // copy operator
   STRONG_INLINE OutgoingPacket& operator=(const OutgoingPacket& other) {
     if (this == &other)
       return *this;
+    ReleasePayload();
+    type = other.type;
+    flags = other.flags;
+    channel = other.channel;
+    last_send_time = other.last_send_time;
+    destination_peer_id = other.destination_peer_id;
+    CopyPayloadFrom(other);
+    return *this;
+  }
+
+  STRONG_INLINE OutgoingPacket& operator=(OutgoingPacket&& other) noexcept {
+    if (this == &other)
+      return *this;
+    ReleasePayload();
     type = other.type;
     flags = other.flags;
     channel = other.channel;
     heap_data_size = other.heap_data_size;
     last_send_time = other.last_send_time;
     destination_peer_id = other.destination_peer_id;
-    if (heap_data_size > 0) {
+    payload = other.payload;
+    other.payload.scalar = 0;
+    other.heap_data_size = 0;
+    return *this;
+  }
+
+ private:
+  STRONG_INLINE void ReleasePayload() {
+    if (heap_data_size > 0 && payload.data) {
+      delete[] payload.data;
+    }
+    heap_data_size = 0;
+    payload.scalar = 0;
+  }
+
+  STRONG_INLINE void CopyPayloadFrom(const OutgoingPacket& other) {
+    if (other.heap_data_size > 0 && other.payload.data) {
+      heap_data_size = other.heap_data_size;
       payload.data = new byte[heap_data_size];
       memcpy(payload.data, other.payload.data, heap_data_size);
-    } else {
-      payload.data = other.payload.data;
+      return;
     }
-    return *this;
+    heap_data_size = 0;
+    payload.scalar = other.payload.scalar;
   }
 };
 static_assert(sizeof(OutgoingPacket) == 24, "OutgoingPacket is not 24 bytes");

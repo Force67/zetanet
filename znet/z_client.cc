@@ -77,12 +77,38 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
       if (state_ == State::kConnecting) {
         PacketReader reader((byte*)p.data.data(), p.data.size());
         system_commands::ServerHello response;
-        reader.Read(response);
+        if (!reader.Read(response)) {
+          BASE_LOGE(kLogTag, "Malformed ServerHello: missing header");
+          return;
+        }
         BASE_LOGI(kLogTag, "ServerHello: {}",
                   response.compression_algo_list_len);
 
+        base::Vector<byte> encryption_algorithms(
+            response.encryption_algo_list_len);
+        if (!reader.ReadS(encryption_algorithms)) {
+          BASE_LOGE(kLogTag,
+                    "Malformed ServerHello: invalid encryption algorithm list");
+          return;
+        }
+
+        base::Vector<byte> compression_algorithms(
+            response.compression_algo_list_len);
+        if (!reader.ReadS(compression_algorithms)) {
+          BASE_LOGE(
+              kLogTag,
+              "Malformed ServerHello: invalid compression algorithm list");
+          return;
+        }
+
         base::Vector<byte> key;
-        reader.ReadList(key);
+        if (!reader.ReadList(key)) {
+          BASE_LOGE(kLogTag, "Malformed ServerHello: invalid public key list");
+          return;
+        }
+        if (reader.position() != p.data.size()) {
+          BASE_LOGW(kLogTag, "ServerHello has trailing bytes");
+        }
 
         if (crypto_context_) {
           crypto_context_->ProcessServerKey(

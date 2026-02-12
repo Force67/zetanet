@@ -30,14 +30,17 @@ class ZPeerMapping;
 
 class ZPacketQueue {
  public:
-  ZPacketQueue(ZSocket&, ZPeerMapping&, bool& stop_token);
+  ZPacketQueue(ZSocket&, ZPeerMapping&, base::Atomic<bool>& stop_token);
 
   bool StartThreads();
   void StopThreads() {
-	stop_threads_ = true;
-	if (outgoing_thread_.joinable())
+	stop_threads_.store(true);
+	const auto current_thread_id = std::this_thread::get_id();
+	if (outgoing_thread_.joinable() &&
+	    outgoing_thread_.get_id() != current_thread_id)
 	  outgoing_thread_.join();
-	if (incoming_thread_.joinable())
+	if (incoming_thread_.joinable() &&
+	    incoming_thread_.get_id() != current_thread_id)
 	  incoming_thread_.join();
   }
 
@@ -89,7 +92,7 @@ class ZPacketQueue {
   PacketDispatcher dispatcher_;
   PacketReceiver receiver_;
 
-  bool& stop_threads_;
+  base::Atomic<bool>& stop_threads_;
 
   byte incomingbuffer[4096]{};
 };

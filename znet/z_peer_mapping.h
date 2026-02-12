@@ -15,12 +15,20 @@ namespace tx::network {
 
 class ZPeerMapping {
  public:
+  static constexpr mem_size kMaxPeers = 2048;
+
   ZPeerMapping() = default;
   ~ZPeerMapping() = default;
 
-  ZPeer& CreatePeer(const ZSocket::Address& addr) {
+  ZPeer* CreatePeer(const ZSocket::Address& addr) {
+    if (peer_list_.size() >= kMaxPeers) {
+      return nullptr;
+    }
     u32 id = z_peer_ids_.GenerateId();
-    return peer_list_.emplace_back(ZPeer{ZPeerId(id), addr});
+    if (id == ZPeerId::invalid_id) {
+      return nullptr;
+    }
+    return &peer_list_.emplace_back(ZPeer{ZPeerId(id), addr});
   }
 
   bool DestroyPeer(ZPeerId id) {
@@ -49,7 +57,7 @@ class ZPeerMapping {
         return &peer;
       }
     }
-    return &CreatePeer(addr);
+    return CreatePeer(addr);
   }
 
   ZPeer* GetPeerByAddress(const ZSocket::Address& addr) {

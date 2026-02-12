@@ -88,11 +88,28 @@ void ZServer::SendServerHello(ZPeerId dest) {
   constexpr CompressionAlgorithm compression_algorithms[] = {
       CompressionAlgorithm::LZ4};
 
+  base::Vector<byte> public_key_data;
+  u8 pub_key_list_len = 0;
+  if (crypto_context_) {
+    bool foundAesCBC = false;
+    for (u8 i = 0; i < (u8)_countof(encryption_algorithms); i++) {
+      if (encryption_algorithms[i] == EncryptionAlgorithm::AESCBC128) {
+        foundAesCBC = true;
+      }
+    }
+    if (foundAesCBC) {
+      const auto key = crypto_context_->GetPublicKey();
+      public_key_data.resize(key.length());
+      std::memcpy(public_key_data.data(), key.data(), key.length());
+      pub_key_list_len = 1;
+    }
+  }
+
   PacketWriter writer;
   system_commands::ServerHello request{
       .encryption_algo_list_len = (u8)_countof(encryption_algorithms),
       .compression_algo_list_len = (u8)_countof(compression_algorithms),
-      .pub_key_list_len = 1};
+      .pub_key_list_len = pub_key_list_len};
   writer.Put(request);
 
   for (int i = 0; i < request.encryption_algo_list_len; i++) {
@@ -102,19 +119,8 @@ void ZServer::SendServerHello(ZPeerId dest) {
     writer.Put((u8)compression_algorithms[i]);
   }
 
-  if (crypto_context_) {
-    bool foundAesCBC = false;
-    for (int i = 0; i < request.encryption_algo_list_len; i++) {
-      if (encryption_algorithms[i] == EncryptionAlgorithm::AESCBC128) {
-        foundAesCBC = true;
-      }
-    }
-    if (foundAesCBC) {
-      const auto key = crypto_context_->GetPublicKey();
-      writer.PutList(base::Span<byte>((const byte*)key.data(),
-                                      key.length()));
-    }
-  }
+  writer.PutList(
+      base::Span<byte>(public_key_data.data(), public_key_data.size()));
 
   const PackageFlags flags{.reliable = 1,
                            .encrypted = 0,

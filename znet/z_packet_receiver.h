@@ -24,9 +24,9 @@ class PacketReceiver {
  public:
   static constexpr char kLogTag[] = "packet-receiver";
 
-  static constexpr const mem_size InitialBufferSize = 1024;
+  static constexpr const mem_size InitialBufferSize = 65507;
   static constexpr const mem_size MaxBufferSize =
-      0xffffffff;  // Set a reasonable max buffer size
+      65507;  // Maximum UDP payload size
   static constexpr const mem_size MinimumBufferSize = 512;  // Min buffer size
   static constexpr float ResizeDownThreshold = 0.5f;  // Threshold for downsizing
   static constexpr float Alpha = 0.1f;  // Smoothing factor for moving average
@@ -58,9 +58,9 @@ class PacketReceiver {
       return ReceiveResult::Error;
     }
 
-    const auto* header =
-        reinterpret_cast<const PacketHeader*>(incoming_buffer_.data());
-    const u32 packet_size = header->total_packet_data_size;
+    PacketHeader header{};
+    std::memcpy(&header, incoming_buffer_.data(), sizeof(PacketHeader));
+    const u32 packet_size = header.total_packet_data_size;
     if (packet_size > MaxBufferSize || packet_size < sizeof(PacketHeader)) {
       BASE_LOGE(kLogTag, "Invalid packet size");
       return ReceiveResult::Error;
@@ -92,8 +92,10 @@ class PacketReceiver {
     // find the peer associated with this address
     ZPeer* peer = peer_list_.GetOrCreatePeer(address);
     if (!peer) {
-      BASE_LOGE(kLogTag, "ZPacketQueue::IngestPacket(): Dropped unknown packet : {}",
-                (u16)incoming.type);
+      BASE_LOGE(
+          kLogTag,
+          "Dropped packet: peer table full or peer allocation failed for type {}",
+          (u16)incoming.type);
       return false;
     }
     // the peer list manages the peers unique identifier, so we apply it here to
@@ -101,8 +103,7 @@ class PacketReceiver {
     incoming.source_peer_id = peer->identifier.id;
 
     // dont shove acks into the queue.. we know it succeeded.
-    PacketHeader* pheader = reinterpret_cast<PacketHeader*>(buffer);
-    if ((PacketType)pheader->type == PacketType::Acknowledgement) {
+    if (incoming.type == PacketType::Acknowledgement) {
       return false;
     }
 

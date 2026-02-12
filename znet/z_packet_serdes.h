@@ -60,11 +60,33 @@ class PacketUnpacker {
  private:
   ZCryptoContext* crypto_context_;
 
-  bool ValidatePacketHeader(const PacketHeader* header, size_t size) const {
-    if (header->magic != PacketHeader::kMagic || size < sizeof(PacketHeader)) {
+  bool ValidatePacketHeader(const PacketHeader& header, size_t size) const {
+    if (size < sizeof(PacketHeader)) {
       return false;
     }
-    return true;
+    if (header.magic != PacketHeader::kMagic) {
+      return false;
+    }
+    if (header.version != kProtocolVersion) {
+      return false;
+    }
+    if (header.total_packet_data_size != size) {
+      return false;
+    }
+    if (header.flags.reserved != 0 || header.flags.is_fragmented) {
+      return false;
+    }
+    if (header.flags.is_compressed) {
+      // Compression receive path is not fully implemented yet; reject for safety.
+      return false;
+    }
+    if (header.channel_id > static_cast<u8>(PacketChannelType::Data)) {
+      return false;
+    }
+    if (header.flags.priority > static_cast<u8>(PacketPriority::Critical)) {
+      return false;
+    }
+    return header.type != static_cast<u16>(PacketType::Invalid);
   }
 
   void DecryptPayloadIfNeeded(byte* data,
@@ -74,13 +96,5 @@ class PacketUnpacker {
       crypto_context_->DecryptPayload(data, size);
     }
   }
-
-  void DecompressPayloadIfNeeded(byte* data,
-                                 size_t size,
-                                 const PacketHeader* header) {
-    if (header->flags.is_compressed && size > 0) {
-      ZCompressionContext::Decompress(data, size, 1337);
-    }
-  };
 };
 }  // namespace tx::network

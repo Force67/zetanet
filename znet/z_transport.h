@@ -5,6 +5,7 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/atomic.h>
 #include <base/memory/unique_pointer.h>
 #endif
 
@@ -40,7 +41,7 @@ class ZAsyncTransportLayer {
 
  private:
   tx::network::ZSocket socket_;
-  bool stop_threads;
+  base::Atomic<bool> stop_threads{false};
 
  protected:
   State state_{State::kDisconnected};

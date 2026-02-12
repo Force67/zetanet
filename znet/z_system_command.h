@@ -2,6 +2,8 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#include <limits>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -25,7 +27,7 @@ class PacketWriter {
       return false;
     }
 
-    *reinterpret_cast<T*>(buffer_ + offset_) = value;
+    std::memcpy(buffer_ + offset_, &value, sizeof(T));
     offset_ += sizeof(T);
     return true;
   }
@@ -45,18 +47,24 @@ class PacketWriter {
     return true;
   }
 
-  void PutS(const base::Span<byte>& data) {
+  bool PutS(const base::Span<byte>& data) {
     if (offset_ + data.size() > capacity_) {
-      return;
+      return false;
     }
 
     std::memcpy(buffer_ + offset_, data.data(), data.size());
     offset_ += data.size();
+    return true;
   }
 
-  void PutList(const base::Span<byte>& data) {
-    Put<u16>(static_cast<u16>(data.size()));
-    PutS(data);
+  bool PutList(const base::Span<byte>& data) {
+    if (data.size() > std::numeric_limits<u16>::max()) {
+      return false;
+    }
+    if (!Put<u16>(static_cast<u16>(data.size()))) {
+      return false;
+    }
+    return PutS(data);
   }
 
   const base::Span<byte> data() const {
@@ -86,7 +94,7 @@ class PacketReader {
       return false;
     }
 
-    value = *reinterpret_cast<const T*>(buffer_ + offset_);
+    std::memcpy(&value, buffer_ + offset_, sizeof(T));
     offset_ += sizeof(T);
     return true;
   }
@@ -121,6 +129,9 @@ class PacketReader {
     if (!Read<u16>(size)) {
       return false;
     }
+    if (offset_ + size > capacity_) {
+      return false;
+    }
     data.resize(size);
     return ReadS(data);
   }
@@ -145,7 +156,7 @@ struct ClientHello {
   u8 compression_algo_list_len;
 
   static void Build(PacketWriter& builder, ClientHello& packet) {
-    builder.Put<u8>(packet.compression_algo_list_len);
+    builder.Put<u8>(packet.encryption_algo_list_len);
     builder.Put<u8>(packet.compression_algo_list_len);
   }
 };

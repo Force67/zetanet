@@ -3,6 +3,8 @@
 
 #include "z_packet_serdes.h"
 
+#include <limits>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -17,14 +19,16 @@ static constexpr u32 kTimeshift =
 
 base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
                                               const u32 next_sequence_number) {
-  auto unix_timestamp = base::GetUnixTimeStamp();
-
   u32 payload_size = packet_info.heap_data_size;
   u32 size_of_headers =
       sizeof(PacketHeader) +
       (packet_info.flags.reliable * sizeof(ReliableHeader)) +
       (packet_info.flags.compressed * sizeof(CompressedPayloadHeader)) +
       ((!packet_info.flags.compressed) * sizeof(UncompressedPayloadHeader));
+  if (size_of_headers > std::numeric_limits<u32>::max() - payload_size) {
+    BASE_LOGE(kLogTag, "Packet size overflow");
+    return {};
+  }
 
   base::Vector<byte> packet(size_of_headers + payload_size);
 
@@ -100,34 +104,72 @@ void PacketBuilder::FillPacketHeader(const base::Span<byte> outgoing_data,
 bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
                                   size_t in_size,
                                   IncomingPacket& out) {
-  const auto* header = reinterpret_cast<const PacketHeader*>(in_buffer);
+  if (!in_buffer || in_size < sizeof(PacketHeader)) {
+    BASE_LOGE(kLogTag, "Invalid packet buffer");
+    return false;
+  }
+
+  PacketHeader header{};
+  std::memcpy(&header, in_buffer, sizeof(PacketHeader));
   if (!ValidatePacketHeader(header, in_size)) {
     BASE_LOGE(kLogTag, "Invalid packet header");
     return false;
   }
-  mem_size offset = sizeof(PacketHeader);
 
-  if (header->flags.is_reliable) {
-    const auto* reliable_header =
-        reinterpret_cast<const ReliableHeader*>(&in_buffer[offset]);
-    out.sequence_number = reliable_header->sequence_number;
-    out.acknowledgement_number = reliable_header->acknowledgment_number;
-    offset += sizeof(ReliableHeader);
+  const PacketType packet_type = static_cast<PacketType>(header.type);
+  const PacketChannelType channel =
+      static_cast<PacketChannelType>(header.channel_id);
+  if (IsSystemMessage(packet_type) && channel != PacketChannelType::Control) {
+    BASE_LOGE(kLogTag, "System packet on non-control channel");
+    return false;
+  }
+  if (!IsSystemMessage(packet_type) && channel != PacketChannelType::Data) {
+    BASE_LOGE(kLogTag, "Data packet on non-data channel");
+    return false;
   }
 
-  if (header->flags.is_compressed) {
+  mem_size offset = sizeof(PacketHeader);
+
+  if (header.flags.is_reliable) {
+    if (offset + sizeof(ReliableHeader) > in_size) {
+      BASE_LOGE(kLogTag, "Truncated reliable header");
+      return false;
+    }
+    ReliableHeader reliable_header{};
+    std::memcpy(&reliable_header, in_buffer + offset, sizeof(ReliableHeader));
+    out.sequence_number = reliable_header.sequence_number;
+    out.acknowledgement_number = reliable_header.acknowledgment_number;
+    offset += sizeof(ReliableHeader);
+  } else {
+    out.sequence_number = 0;
+    out.acknowledgement_number = 0;
+  }
+
+  if (header.flags.is_compressed) {
+    if (offset + sizeof(CompressedPayloadHeader) > in_size) {
+      BASE_LOGE(kLogTag, "Truncated compressed payload header");
+      return false;
+    }
     offset += sizeof(CompressedPayloadHeader);
   } else {
+    if (offset + sizeof(UncompressedPayloadHeader) > in_size) {
+      BASE_LOGE(kLogTag, "Truncated uncompressed payload header");
+      return false;
+    }
     offset += sizeof(UncompressedPayloadHeader);
+  }
+  if (offset > in_size) {
+    BASE_LOGE(kLogTag, "Invalid payload offset");
+    return false;
   }
 
   size_t payload_size = in_size - offset;
-  out.type = (PacketType)header->type;
-  out.channel = (PacketChannelType)header->channel_id;
-  out.flags = {.reliable = header->flags.is_reliable,
-               .encrypted = header->flags.is_encrypted,
-               .compressed = 0,
-               .priority = header->flags.priority,
+  out.type = packet_type;
+  out.channel = channel;
+  out.flags = {.reliable = header.flags.is_reliable,
+               .encrypted = header.flags.is_encrypted,
+               .compressed = header.flags.is_compressed,
+               .priority = header.flags.priority,
                .acknowledged = 0,
                .awaiting_ack = 0,
                .reserved = 0};
@@ -136,8 +178,7 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
   std::string payload(reinterpret_cast<const char*>(in_buffer + offset),
                       payload_size);
 
-  DecryptPayloadIfNeeded((byte*)payload.data(), payload_size, header);
-  DecompressPayloadIfNeeded((byte*)payload.data(), payload_size, header);
+  DecryptPayloadIfNeeded((byte*)payload.data(), payload_size, &header);
 
   out.data = std::move(payload);
 
