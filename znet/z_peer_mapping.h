@@ -2,8 +2,13 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/containers/vector.h>
 #include <base/containers/id_set.h>
+#endif
+
 #include <znet/z_peer.h>
 
 namespace tx::network {
@@ -15,7 +20,7 @@ class ZPeerMapping {
 
   ZPeer& CreatePeer(const ZSocket::Address& addr) {
     u32 id = z_peer_ids_.GenerateId();
-    return peer_list_.emplace_back(id, addr);
+    return peer_list_.emplace_back(ZPeer{ZPeerId(id), addr});
   }
 
   bool DestroyPeer(ZPeerId id) {

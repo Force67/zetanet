@@ -4,83 +4,61 @@
 #include "z_packet_queues.h"
 #include "z_packet_serdes.h"
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/time/time.h>
+#endif
 
 #include "z_socket.h"
 #include "z_packet_serdes.h"
 
 namespace tx::network {
 static constexpr char kLogTag[] = "z-packet-queue";
-static constexpr char kOutoingThreadName[] =
-    "tx::network::OutgoingPacketQueueThread";
-static constexpr char kIncomingThreadName[] =
-    "tx::network::IncomingPacketQueueThread";
 
 ZPacketQueue::ZPacketQueue(ZSocket& socket,
                            ZPeerMapping& peer_list,
                            bool& stop_token)
     : awaiting_ack_packets_(200),
-#if defined(USE_BASE_THREADS)
-      outgoing_thread_(kOutoingThreadName,
-                       {this, &ZPacketQueue::ProcessOutgoingPackets}),
-      incoming_thread_(kIncomingThreadName,
-                       {this, &ZPacketQueue::ProcessReceiving}),
-#else
-      outgoing_thread_(
-          std::thread(&ZPacketQueue::ProcessOutgoingPackets, this)),
-      incoming_thread_(
-          std::thread(&ZPacketQueue::ProcessReceiving, this)),
-#endif
       socket_(socket),
       peer_list_(peer_list),
       stop_threads_(stop_token),
       dispatcher_(socket, peer_list),
       receiver_(socket, peer_list) {
-    channel_outgoing_queues_.emplace(PacketChannelType::Control,
-                               PriorityMPSCQueue<OutgoingPacket>());
-    channel_outgoing_queues_.emplace(PacketChannelType::Data, PriorityMPSCQueue<OutgoingPacket>());
+    // Default-construct queues via operator[] (PriorityMPSCQueue is not moveable due to mutex)
+    channel_outgoing_queues_[PacketChannelType::Control];
+    channel_outgoing_queues_[PacketChannelType::Data];
 }
 
 bool ZPacketQueue::StartThreads() {
-#if defined(USE_BASE_THREADS)
-  return outgoing_thread_.Start(base::Thread::Priority::kNormal) &&
-         incoming_thread_.Start(base::Thread::Priority::kNormal);
-#else
-  outgoing_thread_.detach();
-  incoming_thread_.detach();
-
+  outgoing_thread_ = std::thread(&ZPacketQueue::ProcessOutgoingPackets, this);
+  incoming_thread_ = std::thread(&ZPacketQueue::ProcessReceiving, this);
   return true;
-#endif
 }
 
 void ZPacketQueue::ProcessOutgoingPackets() {
   while (!stop_threads_) {
-    while (true) {
-      ProcessChannel(PacketChannelType::Control);
-      ProcessChannel(PacketChannelType::Data);
+    ProcessChannel(PacketChannelType::Control);
+    ProcessChannel(PacketChannelType::Data);
 
-      auto now = static_cast<u32>(base::GetUnixTimeStamp());
-      for (auto& [seqNum, packet] : awaiting_ack_packets_) {
-        if ((now - packet.last_send_time) > 1000) {
-          dispatcher_.DispatchPacket(crypto_context_, packet,
-                                     awaiting_ack_packets_);
-          packet.last_send_time = now;
-        }
-        // we waited too long, drop the packet to avoid flooding
-        if ((now - packet.last_send_time) > 5000) {
-          awaiting_ack_packets_.remove(seqNum);
-        }
+    auto now = static_cast<u32>(base::GetUnixTimeStamp());
+    for (auto& [seqNum, packet] : awaiting_ack_packets_) {
+      if ((now - packet.last_send_time) > 1000) {
+        dispatcher_.DispatchPacket(crypto_context_, packet,
+                                   awaiting_ack_packets_);
+        packet.last_send_time = now;
       }
-#ifndef USE_BASE_THREADS
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-#endif
+      // we waited too long, drop the packet to avoid flooding
+      if ((now - packet.last_send_time) > 5000) {
+        awaiting_ack_packets_.remove(seqNum);
+      }
     }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 }
 
 void ZPacketQueue::ProcessChannel(PacketChannelType channel) {
   auto& queue = channel_outgoing_queues_[channel];
-  OutgoingPacket packet;
   if (!queue.empty()) {
     OutgoingPacket packet;
     queue.dequeue(packet);
@@ -100,7 +78,7 @@ void ZPacketQueue::ProcessReceiving() {
         AddAwaitingAckPacket(pack.source_peer_id, pack.sequence_number,
                              pack.acknowledgement_number);
       }
-      channel_incoming_queues_[pack.channel].enqueue(base::move(pack), prio);
+      channel_incoming_queues_[pack.channel].enqueue(std::move(pack), prio);
     } else if (result == PacketReceiver::ReceiveResult::Goodbye) {
       StopThreads();
       BASE_LOGI(kLogTag, "Goodbye packet received, stopping threads");
@@ -123,7 +101,7 @@ void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
   // stash the number
   out.payload.scalar = sequence_number;
   auto& queue = channel_outgoing_queues_[PacketChannelType::Control];
-  queue.enqueue(base::move(out), PacketPriority::High);
+  queue.enqueue(std::move(out), PacketPriority::High);
   // safe to do. concurrent hash map.
   awaiting_ack_packets_.remove(ack_number);
 }

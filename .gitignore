@@ -28,3 +28,5 @@ ntloader/ntloader.vcxproj.user
 /znet/obj
 /samples/simple_server/obj
 *.idb
+/build
+/bin

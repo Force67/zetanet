@@ -2,7 +2,11 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/arch.h>
+#endif
 
 namespace tx::network {
 constexpr u8 kProtocolVersion = 1;

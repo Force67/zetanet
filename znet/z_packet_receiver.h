@@ -8,12 +8,16 @@
 #include <znet/z_packet_serdes.h>
 #include <znet/z_packet_priority_queue.h>
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/atomic.h>
 #include <base/logging.h>
 #include <base/time/time.h>
 #include <base/containers/vector.h>
 #include <base/optional.h>
 #include <base/containers/lock_free_ordered_concurrent_hashmap.h>
+#endif
 
 namespace tx::network {
 class PacketReceiver {
@@ -30,8 +34,7 @@ class PacketReceiver {
   explicit PacketReceiver(ZSocket& socket, ZPeerMapping& peer_list)
       : socket_(socket),
         peer_list_(peer_list),
-        incoming_buffer_(InitialBufferSize,
-                         base::VectorReservePolicy::kForData),
+        incoming_buffer_(InitialBufferSize),
         average_packet_size_(InitialBufferSize) {
     memset(incoming_buffer_.data(), 0, incoming_buffer_.size());
   }
@@ -40,34 +43,34 @@ class PacketReceiver {
 
   ReceiveResult ReceivePackets(ZCryptoContext* crypto,
                                IncomingPacket& incoming) {
-    // First, receive the fixed-size header
-    byte headerBuffer[sizeof(PacketHeader)];
-    i32 headerResult =
-        socket_.Receive(address, (char*)headerBuffer, sizeof(PacketHeader));
+    // UDP is datagram-based: receive the entire packet in one call.
+    // The buffer must be large enough for the largest expected datagram.
+    i32 recvResult =
+        socket_.Receive(address, (char*)incoming_buffer_.data(),
+                        static_cast<i32>(incoming_buffer_.size()));
 
-    if (headerResult <= 0) {
-      return HandleReceiveError(headerResult);
+    if (recvResult <= 0) {
+      return HandleReceiveError(recvResult);
     }
 
-    const auto* header = reinterpret_cast<const PacketHeader*>(headerBuffer);
+    if (static_cast<size_t>(recvResult) < sizeof(PacketHeader)) {
+      BASE_LOGE(kLogTag, "Received packet too small for header");
+      return ReceiveResult::Error;
+    }
+
+    const auto* header =
+        reinterpret_cast<const PacketHeader*>(incoming_buffer_.data());
     const u32 packet_size = header->total_packet_data_size;
     if (packet_size > MaxBufferSize || packet_size < sizeof(PacketHeader)) {
       BASE_LOGE(kLogTag, "Invalid packet size");
       return ReceiveResult::Error;
     }
 
-    // Resize buffer for the remaining packet content
-    ResizeBufferIfNeeded(packet_size);
-
-    // Then, receive the remaining packet based on the size from the header
-    i32 contentResult = socket_.Receive(address, (char*)incoming_buffer_.data(),
-                                        packet_size - sizeof(PacketHeader));
-    if (contentResult <= 0) {
-      return HandleReceiveError(contentResult);
+    if (static_cast<u32>(recvResult) < packet_size) {
+      BASE_LOGE(kLogTag, "Incomplete datagram: got {} expected {}",
+                recvResult, packet_size);
+      return ReceiveResult::Error;
     }
-
-    // Combine header and content for further processing
-    memcpy(incoming_buffer_.data(), headerBuffer, sizeof(PacketHeader));
 
     return IngestPacket(crypto, incoming, address, incoming_buffer_.data(),
                         packet_size)
@@ -98,11 +101,9 @@ class PacketReceiver {
     incoming.source_peer_id = peer->identifier.id;
 
     // dont shove acks into the queue.. we know it succeeded.
-    // TODO: this is a bit hacky, we should probably have a separate queue for
-    // receipt tickets
-    PacketHeader* header = reinterpret_cast<PacketHeader*>(buffer);
-    if ((PacketType)header->type == PacketType::Acknowledgement) {
-      return false;  // construct empty optional
+    PacketHeader* pheader = reinterpret_cast<PacketHeader*>(buffer);
+    if ((PacketType)pheader->type == PacketType::Acknowledgement) {
+      return false;
     }
 
     return true;
@@ -118,6 +119,10 @@ class PacketReceiver {
       if (error == ZSocket::Error::ConnectionReset) {
         BASE_LOGW(kLogTag, "Received a force reset");
         return ReceiveResult::Goodbye;
+      }
+      // For non-blocking sockets, EAGAIN/EWOULDBLOCK is normal
+      if (error == ZSocket::Error::Success) {
+        return ReceiveResult::Timeout;
       }
       BASE_LOGE(kLogTag, "Socket error: {}", ZSocket::GetErrorString(error));
       return ReceiveResult::Error;

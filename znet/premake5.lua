@@ -1,21 +1,44 @@
 project("zetanet")
     language("C++")
-    kind("SharedLib")
+    kind("StaticLib")
     files({
         "*.cc",
         "*.h"
     })
-    defines("COMPILE_DLL")
-    includedirs({
-        ".",
-        "../",
-        "../vendor/equilibrium",
-        "../vendor/fmtlib/include",
-        "../vendor/lz4/lib",
-    })
-    links({
-        "base",
-        "fmtlib",
-        "lz4",
-    })
-    
+
+    -- Exclude Windows-specific socket file on non-Windows
+    filter("system:not windows")
+      removefiles({ "z_socket_win.cc" })
+    filter("system:windows")
+      removefiles({ "z_socket_posix.cc" })
+    filter({})
+
+    if _OPTIONS["use-stl"] then
+      defines("COMPILE_DLL")
+      includedirs({
+          ".",
+          "../",
+          "../vendor/lz4/lib",
+      })
+      links({
+          "lz4",
+      })
+      -- Link pthread on Linux
+      filter("system:linux")
+        links({ "pthread" })
+      filter({})
+    else
+      defines("COMPILE_DLL")
+      includedirs({
+          ".",
+          "../",
+          "../vendor/equilibrium",
+          "../vendor/fmtlib/include",
+          "../vendor/lz4/lib",
+      })
+      links({
+          "base",
+          "fmtlib",
+          "lz4",
+      })
+    end

@@ -2,8 +2,12 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/arch.h>
 #include <base/containers/vector.h>
+#endif
 
 namespace tx::network {
 class PacketWriter {
@@ -18,7 +22,6 @@ class PacketWriter {
   typename std::enable_if<std::is_scalar<T>::value, bool>::type Put(
       const T value) {
     if (offset_ + sizeof(T) > capacity_) {
-      // Handle buffer overflow, e.g., expand buffer or return false
       return false;
     }
 
@@ -34,7 +37,6 @@ class PacketWriter {
                           bool>::type
   Put(const T& type) {
     if (offset_ + sizeof(T) > capacity_) {
-      // Handle buffer overflow
       return false;
     }
 
@@ -45,7 +47,6 @@ class PacketWriter {
 
   void PutS(const base::Span<byte>& data) {
     if (offset_ + data.size() > capacity_) {
-      // Handle buffer overflow
       return;
     }
 
@@ -82,7 +83,6 @@ class PacketReader {
   template <typename T>
   typename std::enable_if<std::is_scalar<T>::value, bool>::type Read(T& value) {
     if (offset_ + sizeof(T) > capacity_) {
-      // Handle buffer underflow
       return false;
     }
 
@@ -98,7 +98,6 @@ class PacketReader {
                           bool>::type
   Read(T& type) {
     if (offset_ + sizeof(T) > capacity_) {
-      // Handle buffer underflow
       return false;
     }
 
@@ -109,7 +108,6 @@ class PacketReader {
 
   bool ReadS(base::Vector<byte>& data) {
     if (offset_ + data.size() > capacity_) {
-      // Handle buffer underflow
       return false;
     }
 

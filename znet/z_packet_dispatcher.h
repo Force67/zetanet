@@ -8,10 +8,14 @@
 #include <znet/z_packet_serdes.h>
 #include <znet/fancy_queue.h>
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/atomic.h>
 #include <base/logging.h>
 #include <base/time/time.h>
 #include <base/containers/vector.h>
+#endif
 
 namespace tx::network {
 
@@ -80,7 +84,7 @@ class PacketDispatcher {
 
   ZSocket& socket_;
   ZPeerMapping& peer_list_;
-  base::Atomic<u32> next_outgoing_sequence_number_ = 0;
+  base::Atomic<u32> next_outgoing_sequence_number_{0};
 };
 
 }  // namespace tx::network

@@ -3,7 +3,12 @@
 #pragma once
 
 #include <znet/z_packets.h>
+
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/containers/mpsc_queue.h>
+#endif
 
 namespace tx::network {
 
@@ -14,16 +19,16 @@ class PriorityMPSCQueue {
   void enqueue(T&& item, PacketPriority priority) {
     switch (priority) {
       case PacketPriority::Critical:
-        critial_priority_queue_.enqueue(base::move(item));
+        critial_priority_queue_.enqueue(std::move(item));
         break;
       case PacketPriority::High:
-        high_priority_queue_.enqueue(base::move(item));
+        high_priority_queue_.enqueue(std::move(item));
         break;
       case PacketPriority::Medium:
-        medium_priority_queue_.enqueue(base::move(item));
+        medium_priority_queue_.enqueue(std::move(item));
         break;
       case PacketPriority::Low:
-        low_priority_queue_.enqueue(base::move(item));
+        low_priority_queue_.enqueue(std::move(item));
         break;
     }
   }

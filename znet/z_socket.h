@@ -2,11 +2,33 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <WinSock2.h>
-#include <Windows.h>
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/arch.h>
 #include <base/containers/span.h>
 #include <base/strings/string_ref.h>
+#endif
+
+// Platform-specific socket includes and typedefs
+#if defined(_WIN32)
+#include <WinSock2.h>
+#include <Windows.h>
+#include <ws2tcpip.h>
+using socket_t = SOCKET;
+#define ZNET_INVALID_SOCKET INVALID_SOCKET
+#define ZNET_SOCKET_ERROR SOCKET_ERROR
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+using socket_t = int;
+#define ZNET_INVALID_SOCKET (-1)
+#define ZNET_SOCKET_ERROR (-1)
+#endif
 
 namespace tx::network {
 class ZSocket {
@@ -24,7 +46,7 @@ class ZSocket {
     char ip[22]{};
     u16 port{};
 
-    bool operator==(const Address& other) {
+    bool operator==(const Address& other) const {
       if (port == other.port) {
         return memcmp(ip, other.ip, sizeof(ip)) == 0;
       }
@@ -62,15 +84,19 @@ class ZSocket {
   static Error GetLastError();
   static const char* GetErrorString(Error error);
 
-  inline static const char* GetErrorString() { return GetErrorString(GetLastError()); }
+  inline static const char* GetErrorString() {
+    return GetErrorString(GetLastError());
+  }
 
  private:
   i32 InternalSend(sockaddr_in&, const base::Span<byte> data);
   i32 InternalReceive(sockaddr_in& sender, char* buffer, size_t length);
 
  private:
+#if defined(_WIN32)
   WSADATA wsa_;
-  SOCKET socket_;
+#endif
+  socket_t socket_;
   struct sockaddr_in server_;
   int server_len_;
 };

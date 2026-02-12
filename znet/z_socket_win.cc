@@ -1,18 +1,23 @@
 // Copyright (C) 2023-2025 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
-#include "z_socket.h"
-#include <base/logging.h>
-
 #if defined(_WIN32)
-#pragma comment(lib, "Ws2_32.lib")
+
+#include "z_socket.h"
+
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
+#include <base/logging.h>
 #endif
+
+#pragma comment(lib, "Ws2_32.lib")
 
 namespace tx::network {
 static constexpr char kLogTag[] = "z-socket";
 
 bool ZSocket::InitSocket() {
   if (::WSAStartup(MAKEWORD(2, 2), &wsa_) != 0) {
-    BASE_LOGE(kLogTag , "Failed to initialize Winsock. Error Code : {}",
+    BASE_LOGE(kLogTag, "Failed to initialize Winsock. Error Code : {}",
               ZSocket::GetErrorString());
     return false;
   }
@@ -20,7 +25,10 @@ bool ZSocket::InitSocket() {
 }
 
 void ZSocket::DestroySocket() {
-  ::closesocket(socket_);
+  if (socket_ != ZNET_INVALID_SOCKET) {
+    ::closesocket(socket_);
+    socket_ = ZNET_INVALID_SOCKET;
+  }
   ::WSACleanup();
 }
 
@@ -57,3 +65,5 @@ ZSocket::Error ZSocket::GetLastError() {
   return Error::UnknownError;
 }
 }  // namespace tx::network
+
+#endif  // _WIN32

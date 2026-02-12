@@ -3,7 +3,12 @@
 
 #include "z_server.h"
 #include "z_system_command.h"
+
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/logging.h>
+#endif
 
 namespace tx::network {
 static constexpr char kLogTag[] = "z-server";
@@ -15,7 +20,7 @@ bool ZServer::Begin(u16 port) {
       .ip = kSelfAddress,
       .port = port,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kServer,
-      .use_encryption = true,
+      .use_encryption = false,
       .use_compression = false,
       .allow_ipv6 = false};
   bool result = ZAsyncTransportLayer::Init(options);
@@ -45,7 +50,7 @@ bool ZServer::Update() {
     case ZAsyncTransportLayer::State::kDisconnecting:
       BASE_LOGI(kLogTag, "Disconnecting");
       break;
-  }  
+  }
 
   return true;
 }
@@ -62,7 +67,7 @@ void ZServer::SendMessage(ZPeerId id, const std::string& data) {
       id.id, PacketType::Message, PacketChannelType::Data, flags,
       base::Span<byte>(reinterpret_cast<const byte*>(data.data()),
                        data.size()));
-  Push(base::move(out));
+  Push(std::move(out));
 }
 
 void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
@@ -72,6 +77,8 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
       SendServerHello(p.source_peer_id);
       break;
     }
+    default:
+      break;
   }
 }
 
@@ -83,12 +90,11 @@ void ZServer::SendServerHello(ZPeerId dest) {
 
   PacketWriter writer;
   system_commands::ServerHello request{
-      .encryption_algo_list_len = _countof(encryption_algorithms),
-      .compression_algo_list_len = _countof(compression_algorithms),
+      .encryption_algo_list_len = (u8)_countof(encryption_algorithms),
+      .compression_algo_list_len = (u8)_countof(compression_algorithms),
       .pub_key_list_len = 1};
   writer.Put(request);
 
-  // exchange the key list, so clients can know what to choose when uploading
   for (int i = 0; i < request.encryption_algo_list_len; i++) {
     writer.Put((u8)encryption_algorithms[i]);
   }
@@ -96,18 +102,18 @@ void ZServer::SendServerHello(ZPeerId dest) {
     writer.Put((u8)compression_algorithms[i]);
   }
 
-  // if we support aesCBC:
-  // check the list:
-  bool foundAesCBC = false;
-  for (int i = 0; i < request.encryption_algo_list_len; i++) {
-    if (encryption_algorithms[i] == EncryptionAlgorithm::AESCBC128) {
-      foundAesCBC = true;
+  if (crypto_context_) {
+    bool foundAesCBC = false;
+    for (int i = 0; i < request.encryption_algo_list_len; i++) {
+      if (encryption_algorithms[i] == EncryptionAlgorithm::AESCBC128) {
+        foundAesCBC = true;
+      }
     }
-  }
-  if (foundAesCBC) {
-    const auto key = crypto_context_->GetPublicKey();
-    writer.PutList(base::Span<byte>((const byte*)key.data(),
-                                    key.length()));  // list of characters
+    if (foundAesCBC) {
+      const auto key = crypto_context_->GetPublicKey();
+      writer.PutList(base::Span<byte>((const byte*)key.data(),
+                                      key.length()));
+    }
   }
 
   const PackageFlags flags{.reliable = 1,
@@ -119,6 +125,6 @@ void ZServer::SendServerHello(ZPeerId dest) {
                            .reserved = 0};
   OutgoingPacket out(dest.id, PacketType::ServerHello,
                      PacketChannelType::Control, flags, writer.data());
-  Push(base::move(out));
+  Push(std::move(out));
 }
 }  // namespace tx::network

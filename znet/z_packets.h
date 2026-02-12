@@ -2,10 +2,14 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/arch.h>
 #include <base/strings/xstring.h>
 #include <base/compiler.h>
 #include <base/containers/span.h>
+#endif
 
 namespace tx::network {
 
@@ -101,7 +105,7 @@ struct IncomingPacket {
   u32 source_peer_id;          // 4 bytes
   u32 acknowledgement_number;  // 4 bytes
   u32 sequence_number;         // 4 bytes
-  base::String data;
+  std::string data;
 };
 
 class OutgoingPacket {

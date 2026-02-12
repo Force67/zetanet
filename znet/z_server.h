@@ -3,7 +3,13 @@
 #pragma once
 
 #include <znet/z_abi.h>
+
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/memory/unique_pointer.h>
+#endif
+
 #include <znet/z_transport.h>
 
 #undef SendMessage
@@ -19,7 +25,7 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
 
   // Fetches the next packet from the queue
   bool Poll(PacketChannelType t, IncomingPacket& p) {
-    for (u8 i = (u8)PacketChannelType::Control; i < (u8)PacketChannelType::Data;
+    for (u8 i = (u8)PacketChannelType::Control; i <= (u8)PacketChannelType::Data;
          ++i) {
       if (packet_queue_.Pop((PacketChannelType)i, p)) {
         if (IsSystemMessage(p.type)) {
@@ -36,7 +42,7 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
   void Push(OutgoingPacket&& p) {
     if (state_ != State::kConnected)
       return;
-    packet_queue_.Push(base::move(p));
+    packet_queue_.Push(std::move(p));
   }
 
   void ProcessSystemMessage(const IncomingPacket& p);

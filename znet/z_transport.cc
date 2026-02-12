@@ -4,9 +4,13 @@
 #include "z_transport.h"
 #include "z_packet_serdes.h"
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/containers/vector.h>
 #include <base/logging.h>
 #include <base/time/time.h>
+#endif
 
 namespace tx::network {
 static constexpr char kLogTag[] = "z-async-transportlayer";
@@ -17,7 +21,7 @@ ZAsyncTransportLayer::ZAsyncTransportLayer()
       packet_queue_(socket_, peer_mapping_, stop_threads) {}
 
 ZAsyncTransportLayer::~ZAsyncTransportLayer() {
-  stop_threads = true;
+  Deinit();
 }
 
 bool ZAsyncTransportLayer::Init(const InitOptions& options) {
@@ -61,8 +65,9 @@ bool ZAsyncTransportLayer::Init(const InitOptions& options) {
 }
 
 void ZAsyncTransportLayer::Deinit() {
-  packet_queue_.StopThreads();
+  // Close socket first to unblock the receiver thread's recvfrom()
   socket_.DestroySocket();
+  packet_queue_.StopThreads();
   state_ = State::kDisconnected;
 }
 

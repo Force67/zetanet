@@ -3,7 +3,12 @@
 
 #include "z_client.h"
 #include "z_system_command.h"
+
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/logging.h>
+#endif
 
 namespace tx::network {
 static constexpr char kLogTag[] = "z-client";
@@ -13,7 +18,7 @@ bool ZClient::Connect(const base::StringRef address, u16 port) {
       .ip = address,
       .port = port,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kClient,
-      .use_encryption = true,
+      .use_encryption = false,
       .use_compression = false,
       .allow_ipv6 = false};
   bool result = ZAsyncTransportLayer::Init(options);
@@ -31,8 +36,10 @@ void ZClient::Disconnect() {
 
 void ZClient::Update() {
   IncomingPacket packet;
-  if (Poll(PacketChannelType::Data, packet)) {
-    BASE_LOGI(kLogTag, "Incoming data: {}", packet.data);
+  while (Poll(PacketChannelType::Data, packet)) {
+    if (!IsSystemMessage(packet.type)) {
+      BASE_LOGI(kLogTag, "Incoming data: {}", packet.data);
+    }
   }
   switch (state()) {
     case ZAsyncTransportLayer::State::kDisconnected:
@@ -60,7 +67,7 @@ void ZClient::SendMessage(const ZPeerId id, const std::string& data) {
       id.id, PacketType::Message, PacketChannelType::Data, flags,
       base::Span<byte>(reinterpret_cast<const byte*>(data.data()),
                        data.size()));
-  Push(base::move(out));
+  Push(std::move(out));
 }
 
 void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
@@ -68,7 +75,6 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
     case PacketType::ServerHello: {
       BASE_LOGI(kLogTag, "Received ServerHello");
       if (state_ == State::kConnecting) {
-        // oh boy, we're almost there
         PacketReader reader((byte*)p.data.data(), p.data.size());
         system_commands::ServerHello response;
         reader.Read(response);
@@ -78,12 +84,17 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
         base::Vector<byte> key;
         reader.ReadList(key);
 
-        crypto_context_->ProcessServerKey((const char*)key.data());
+        if (crypto_context_) {
+          crypto_context_->ProcessServerKey(
+              std::string((const char*)key.data(), key.size()));
+        }
 
         state_ = State::kConnected;
       }
       break;
     }
+    default:
+      break;
   }
 }
 void ZClient::SendClientHello() {
@@ -93,8 +104,8 @@ void ZClient::SendClientHello() {
       CompressionAlgorithm::LZ4};
 
   system_commands::ClientHello request{
-      .encryption_algo_list_len = _countof(encryption_algorithms),
-      .compression_algo_list_len = _countof(compression_algorithms)};
+      .encryption_algo_list_len = (u8)_countof(encryption_algorithms),
+      .compression_algo_list_len = (u8)_countof(compression_algorithms)};
   PacketWriter writer;
   writer.Put(request);
   for (int i = 0; i < request.encryption_algo_list_len; i++) {
@@ -113,6 +124,6 @@ void ZClient::SendClientHello() {
                            .reserved = 0};
   OutgoingPacket o(ZPeerId::to_server, PacketType::ClientHello,
                    PacketChannelType::Control, flags, writer.data());
-  Push(base::move(o));
+  Push(std::move(o));
 }
 }  // namespace tx::network

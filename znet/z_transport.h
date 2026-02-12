@@ -2,7 +2,11 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/memory/unique_pointer.h>
+#endif
 
 #include <znet/z_crypto_wrapper.h>
 #include <znet/z_packet_queues.h>

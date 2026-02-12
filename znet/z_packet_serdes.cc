@@ -3,6 +3,12 @@
 
 #include "z_packet_serdes.h"
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
+#include <base/logging.h>
+#endif
+
 namespace tx::network {
 
 static constexpr char kLogTag[] = "z-packet-serdes";
@@ -20,18 +26,14 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
       (packet_info.flags.compressed * sizeof(CompressedPayloadHeader)) +
       ((!packet_info.flags.compressed) * sizeof(UncompressedPayloadHeader));
 
-  base::Vector<byte> packet(size_of_headers + payload_size,
-                            base::VectorReservePolicy::kForData);
+  base::Vector<byte> packet(size_of_headers + payload_size);
 
-  // BUG BUG BUG: do something with the actual compressed data?
   base::Vector<char> compressed_data;
   CompressPayloadIfNeeded(packet_info, compressed_data);
-  // this should work in place
   EncryptPayloadIfNeeded(packet_info);
-  // last we fill the header
   FillPacketHeader(packet, packet_info, next_sequence_number);
 
-  // and we copy the payload to its appropiate place
+  // and we copy the payload to its appropriate place
   if (payload_size > 0) {
     memcpy(packet.data() + size_of_headers, packet_info.payload.data,
            payload_size);
@@ -48,7 +50,7 @@ void PacketBuilder::FillPacketHeader(const base::Span<byte> outgoing_data,
   // build core header.
   header->magic = PacketHeader::kMagic;
   header->header_checksum = 0;
-  header->total_packet_data_size = outgoing_data.length();
+  header->total_packet_data_size = outgoing_data.size();
   header->version = 1;
   header->flags = {.is_reliable = packet_info.flags.reliable,
                    .is_encrypted = packet_info.flags.encrypted,
@@ -114,12 +116,8 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
   }
 
   if (header->flags.is_compressed) {
-    const auto* compressed_header =
-        reinterpret_cast<const CompressedPayloadHeader*>(&in_buffer[offset]);
     offset += sizeof(CompressedPayloadHeader);
   } else {
-    const auto* uncompressed_header =
-        reinterpret_cast<const UncompressedPayloadHeader*>(&in_buffer[offset]);
     offset += sizeof(UncompressedPayloadHeader);
   }
 
@@ -128,6 +126,7 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
   out.channel = (PacketChannelType)header->channel_id;
   out.flags = {.reliable = header->flags.is_reliable,
                .encrypted = header->flags.is_encrypted,
+               .compressed = 0,
                .priority = header->flags.priority,
                .acknowledged = 0,
                .awaiting_ack = 0,
@@ -140,7 +139,7 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
   DecryptPayloadIfNeeded((byte*)payload.data(), payload_size, header);
   DecompressPayloadIfNeeded((byte*)payload.data(), payload_size, header);
 
-  out.data = std::move(payload);  // Move the processed payload to 'out'
+  out.data = std::move(payload);
 
   return true;
 }

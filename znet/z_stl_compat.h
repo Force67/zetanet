@@ -1,0 +1,383 @@
+// Copyright (C) 2023-2025 Vincent Hengel
+// For licensing information see LICENSE at the root of this distribution.
+//
+// STL compatibility layer: when ZNET_USE_STL is defined, this header provides
+// STL-based replacements for all equilibrium/base types used by zetanet.
+#pragma once
+
+#ifdef ZNET_USE_STL
+
+#include <cstdint>
+#include <cstddef>
+#include <cstring>
+#include <string>
+#include <string_view>
+#include <span>
+#include <vector>
+#include <memory>
+#include <atomic>
+#include <chrono>
+#include <queue>
+#include <mutex>
+#include <functional>
+#include <cstdio>
+#include <cstdarg>
+#include <utility>
+
+// ---------------------------------------------------------------------------
+// Primitive type aliases (matching equilibrium/base/arch.h)
+// ---------------------------------------------------------------------------
+using u8 = uint8_t;
+using u16 = uint16_t;
+using u32 = uint32_t;
+using u64 = uint64_t;
+using i8 = int8_t;
+using i16 = int16_t;
+using i32 = int32_t;
+using i64 = int64_t;
+using f32 = float;
+using f64 = double;
+using mem_size = size_t;
+using byte = unsigned char;
+
+// ---------------------------------------------------------------------------
+// Utility macros
+// ---------------------------------------------------------------------------
+#if defined(_MSC_VER)
+#define STRONG_INLINE __forceinline
+#else
+#define STRONG_INLINE inline __attribute__((always_inline))
+#endif
+
+#ifndef _countof
+template <typename T, size_t N>
+constexpr size_t _countof_impl(const T (&)[N]) noexcept {
+  return N;
+}
+#define _countof(arr) _countof_impl(arr)
+#endif
+
+#ifndef constinit
+#if __cpp_constinit >= 201907L
+// Already a keyword
+#else
+#define constinit
+#endif
+#endif
+
+// ---------------------------------------------------------------------------
+// base:: namespace shims
+// ---------------------------------------------------------------------------
+namespace base {
+
+// --- Strings ---
+using String = std::string;
+using StringRef = std::string_view;
+
+// --- Containers ---
+enum class VectorReservePolicy { kDefault, kForData };
+
+template <typename T>
+class Vector : public std::vector<T> {
+ public:
+  using std::vector<T>::vector;
+  Vector() = default;
+  explicit Vector(size_t count, VectorReservePolicy)
+      : std::vector<T>(count) {}
+
+  // equilibrium uses length() on vectors
+  size_t length() const { return this->size(); }
+
+  // equilibrium-style erase by index
+  void erase(size_t index) {
+    this->std::vector<T>::erase(this->begin() + index);
+  }
+};
+
+// --- Span ---
+template <typename T>
+class Span : public std::span<const T> {
+ public:
+  using std::span<const T>::span;
+  Span() : std::span<const T>() {}
+  Span(const T* data, size_t count) : std::span<const T>(data, count) {}
+
+  // equilibrium span has length()
+  size_t length() const { return this->size(); }
+};
+
+// --- Smart pointers ---
+template <typename T>
+class UniquePointer : public std::unique_ptr<T> {
+ public:
+  using std::unique_ptr<T>::unique_ptr;
+  T* Get_UseOnlyIfYouKnowWhatYouareDoing() const { return this->get(); }
+};
+
+template <typename T, typename... Args>
+UniquePointer<T> MakeUnique(Args&&... args) {
+  return UniquePointer<T>(new T(std::forward<Args>(args)...));
+}
+
+// --- Move ---
+template <typename T>
+constexpr std::remove_reference_t<T>&& move(T&& t) noexcept {
+  return std::move(t);
+}
+
+// --- Atomics ---
+template <typename T>
+using Atomic = std::atomic<T>;
+
+// --- Time ---
+inline u64 GetUnixTimeStamp() {
+  return static_cast<u64>(
+      std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+}
+
+// --- MPSC Queue (simple lock-based replacement) ---
+template <typename T>
+class MPSCQueue {
+ public:
+  void enqueue(T&& item) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.push(std::move(item));
+  }
+
+  bool dequeue(T& item) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.empty())
+      return false;
+    item = std::move(queue_.front());
+    queue_.pop();
+    return true;
+  }
+
+  bool empty() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_.empty();
+  }
+
+ private:
+  std::queue<T> queue_;
+  mutable std::mutex mutex_;
+};
+
+// --- IdSet (simple counter-based ID generator) ---
+template <typename T, T InvalidId, T MaxId>
+class IdSet {
+ public:
+  T GenerateId() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (next_id_ >= MaxId)
+      return InvalidId;
+    return next_id_++;
+  }
+
+  void ReleaseId(T) {
+    // Simple implementation: IDs are not reused
+  }
+
+ private:
+  T next_id_{0};
+  std::mutex mutex_;
+};
+
+// --- Logging ---
+enum class LogLevel : int {
+  kVerbose = 0,
+  kDebug = 1,
+  kInfo = 2,
+  kWarning = 3,
+  kError = 4,
+  kFatal = 5
+};
+
+using LogHandler = void (*)(void* user_pointer,
+                            const char* channel_name,
+                            int level,
+                            const char* msg);
+
+inline LogHandler g_log_handler = nullptr;
+inline void* g_log_user_pointer = nullptr;
+
+inline void SetLogHandler(LogHandler handler, void* user_pointer) {
+  g_log_handler = handler;
+  g_log_user_pointer = user_pointer;
+}
+
+inline const char* LogLevelToName(LogLevel level) {
+  switch (level) {
+    case LogLevel::kVerbose:
+      return "VERBOSE";
+    case LogLevel::kDebug:
+      return "DEBUG";
+    case LogLevel::kInfo:
+      return "INFO";
+    case LogLevel::kWarning:
+      return "WARNING";
+    case LogLevel::kError:
+      return "ERROR";
+    case LogLevel::kFatal:
+      return "FATAL";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+// Simple fmt-like formatting using snprintf with variadic templates.
+// Supports a single {} replacement per argument (like fmtlib basics).
+namespace detail {
+inline std::string format_one(const char* fmt) {
+  return std::string(fmt);
+}
+
+inline void append_value(std::string& out, const char* val) {
+  out += val;
+}
+inline void append_value(std::string& out, const std::string& val) {
+  out += val;
+}
+inline void append_value(std::string& out, std::string_view val) {
+  out.append(val.data(), val.size());
+}
+inline void append_value(std::string& out, char val) {
+  out += val;
+}
+template <typename T>
+inline std::enable_if_t<std::is_integral_v<T>> append_value(std::string& out,
+                                                             T val) {
+  char buf[32];
+  if constexpr (std::is_signed_v<T>)
+    std::snprintf(buf, sizeof(buf), "%lld", (long long)val);
+  else
+    std::snprintf(buf, sizeof(buf), "%llu", (unsigned long long)val);
+  out += buf;
+}
+template <typename T>
+inline std::enable_if_t<std::is_floating_point_v<T>> append_value(
+    std::string& out,
+    T val) {
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%f", (double)val);
+  out += buf;
+}
+
+template <typename T, typename... Args>
+inline std::string format_one(const char* fmt, T&& first, Args&&... rest) {
+  std::string result;
+  const char* p = fmt;
+  while (*p) {
+    if (*p == '{' && *(p + 1) == '}') {
+      append_value(result, std::forward<T>(first));
+      p += 2;
+      result += format_one(p, std::forward<Args>(rest)...);
+      return result;
+    }
+    result += *p++;
+  }
+  return result;
+}
+}  // namespace detail
+
+template <typename... Args>
+inline std::string Format(const char* fmt, Args&&... args) {
+  return detail::format_one(fmt, std::forward<Args>(args)...);
+}
+
+inline void LogMessage(const char* tag, LogLevel level, const std::string& msg) {
+  if (g_log_handler) {
+    g_log_handler(g_log_user_pointer, tag, static_cast<int>(level),
+                  msg.c_str());
+  } else {
+    std::fprintf(stderr, "[%s] %s: %s\n", tag, LogLevelToName(level),
+                 msg.c_str());
+  }
+}
+
+}  // namespace base (temporarily close for filesystem includes)
+
+#include <filesystem>
+#include <fstream>
+
+namespace base {  // reopen
+
+class Path {
+ public:
+  Path() = default;
+  Path(const std::string& p) : path_(p) {}
+  Path(const std::filesystem::path& p) : path_(p.string()) {}
+
+  const std::string& path() const { return path_; }
+  std::string ToAsciiString() const { return path_; }
+  Path BaseName() const {
+    return Path(std::filesystem::path(path_).filename().string());
+  }
+  Path DirName() const {
+    return Path(std::filesystem::path(path_).parent_path().string());
+  }
+
+ private:
+  std::string path_;
+};
+
+class File {
+ public:
+  static constexpr int FLAG_OPEN = 1;
+  static constexpr int FLAG_READ = 2;
+  static constexpr int FLAG_WRITE = 4;
+  static constexpr int FLAG_CREATE_ALWAYS = 8;
+
+  File(const Path& path, int flags) {
+    std::ios_base::openmode mode{};
+    if (flags & FLAG_READ)
+      mode |= std::ios::in | std::ios::binary;
+    if (flags & FLAG_WRITE)
+      mode |= std::ios::out | std::ios::binary;
+    if (flags & FLAG_CREATE_ALWAYS)
+      mode |= std::ios::trunc;
+    stream_.open(path.path(), mode);
+  }
+
+  bool IsValid() const { return stream_.is_open(); }
+
+  int64_t GetLength() {
+    auto pos = stream_.tellg();
+    stream_.seekg(0, std::ios::end);
+    auto len = stream_.tellg();
+    stream_.seekg(pos);
+    return static_cast<int64_t>(len);
+  }
+
+  int Read(int64_t offset, char* buffer, size_t count) {
+    stream_.seekg(offset);
+    stream_.read(buffer, count);
+    return static_cast<int>(stream_.gcount());
+  }
+
+  int WriteAtCurrentPos(const char* data, int size) {
+    stream_.write(data, size);
+    return stream_.good() ? size : -1;
+  }
+
+ private:
+  std::fstream stream_;
+};
+
+}  // namespace base
+
+// ---------------------------------------------------------------------------
+// Logging macros
+// ---------------------------------------------------------------------------
+#define BASE_LOGI(tag, fmt, ...) \
+  base::LogMessage(tag, base::LogLevel::kInfo, base::Format(fmt, ##__VA_ARGS__))
+#define BASE_LOGW(tag, fmt, ...) \
+  base::LogMessage(tag, base::LogLevel::kWarning, base::Format(fmt, ##__VA_ARGS__))
+#define BASE_LOGE(tag, fmt, ...) \
+  base::LogMessage(tag, base::LogLevel::kError, base::Format(fmt, ##__VA_ARGS__))
+#define BASE_LOGD(tag, fmt, ...) \
+  base::LogMessage(tag, base::LogLevel::kDebug, base::Format(fmt, ##__VA_ARGS__))
+
+#endif  // ZNET_USE_STL

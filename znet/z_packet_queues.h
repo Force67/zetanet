@@ -5,24 +5,23 @@
 #include <map>
 #include <znet/z_packets.h>
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/memory/unique_pointer.h>
+#include <base/containers/mpsc_queue.h>
+#include <base/containers/lock_free_ordered_concurrent_hashmap.h>
+#endif
+
 #include <znet/z_crypto_wrapper.h>
 #include <znet/z_socket.h>
 #include <znet/z_peer_mapping.h>
-#include <base/containers/mpsc_queue.h>
-#include <base/containers/lock_free_ordered_concurrent_hashmap.h>
 
 #include <znet/z_packet_dispatcher.h>
 #include <znet/z_packet_receiver.h>
 #include <znet/z_packet_priority_queue.h>
 
-//#define USE_BASE_THREADS
-
-#if defined(USE_BASE_THREADS)
-#include <base/threading/thread.h>
-#else
 #include <thread>
-#endif
 
 namespace tx::network {
 
@@ -36,6 +35,10 @@ class ZPacketQueue {
   bool StartThreads();
   void StopThreads() {
 	stop_threads_ = true;
+	if (outgoing_thread_.joinable())
+	  outgoing_thread_.join();
+	if (incoming_thread_.joinable())
+	  incoming_thread_.join();
   }
 
   void Push(OutgoingPacket&& package_move_in) {
@@ -73,13 +76,8 @@ class ZPacketQueue {
   tx::network::ZPeerMapping& peer_list_;
   ZCryptoContext* crypto_context_{nullptr};
 
-  #if defined(USE_BASE_THREADS)
-  base::Thread outgoing_thread_;
-  base::Thread incoming_thread_;
-  #else
   std::thread outgoing_thread_;
   std::thread incoming_thread_;
-  #endif
 
   std::map<PacketChannelType, PriorityMPSCQueue<OutgoingPacket>>
       channel_outgoing_queues_;

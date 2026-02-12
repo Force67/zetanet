@@ -2,7 +2,11 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/memory/unique_pointer.h>
+#endif
 
 #include <znet/z_abi.h>
 #include <znet/z_peer.h>
@@ -21,7 +25,7 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
 
   // Fetches the next packet from the queue
   inline bool Poll(PacketChannelType t, IncomingPacket& p) {
-    for (u8 i = (u8)PacketChannelType::Control; i < (u8)PacketChannelType::Data;
+    for (u8 i = (u8)PacketChannelType::Control; i <= (u8)PacketChannelType::Data;
          ++i) {
       if (packet_queue_.Pop((PacketChannelType)i, p)) {
         if (IsSystemMessage(p.type)) {
@@ -33,7 +37,7 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
     return false;
   }
 
-  inline void Push(OutgoingPacket&& p) { packet_queue_.Push(base::move(p)); }
+  inline void Push(OutgoingPacket&& p) { packet_queue_.Push(std::move(p)); }
 
   void ProcessSystemMessage(const IncomingPacket& p);
 

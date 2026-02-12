@@ -6,22 +6,41 @@ project "SimpleClient"
         ["*"] = "premake5.lua"
     }
 
-    includedirs
-    {
-        ".",
-        "../../",
-        "../../vendor/equilibrium",
-        "../../vendor/fmtlib/include",
-        "../../vendor/lz4/lib",
-    }
+    if _OPTIONS["use-stl"] then
+      includedirs
+      {
+          ".",
+          "../../",
+          "../../vendor/lz4/lib",
+      }
 
-    links
-    {
-		"zetanet",
-        "base",
-        "fmtlib",
-        "lz4",
-    }
+      links
+      {
+          "zetanet",
+          "lz4",
+      }
+
+      filter("system:linux")
+        links({ "pthread" })
+      filter({})
+    else
+      includedirs
+      {
+          ".",
+          "../../",
+          "../../vendor/equilibrium",
+          "../../vendor/fmtlib/include",
+          "../../vendor/lz4/lib",
+      }
+
+      links
+      {
+          "zetanet",
+          "base",
+          "fmtlib",
+          "lz4",
+      }
+    end
 
     files
     {

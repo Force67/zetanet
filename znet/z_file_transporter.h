@@ -4,7 +4,12 @@
 
 #include <map>
 #include <string>
+
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/filesystem/path.h>
+#endif
 
 namespace tx::network {
 class ZAsyncTransportLayer;

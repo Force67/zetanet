@@ -20,7 +20,7 @@ struct ZPeerId {
 
   ZPeerId() : id(invalid_id) {}
   ZPeerId(id_type id) : id(id) {}
-    
+
   bool operator==(const ZPeerId& other) const { return id == other.id; }
 };
 

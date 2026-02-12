@@ -4,9 +4,14 @@
 
 #include <znet/z_crypto_wrapper.h>
 #include <znet/z_compression_wrapper.h>
+
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
 #include <base/containers/vector.h>
 #include <base/time/time.h>
 #include <base/logging.h>
+#endif
 
 #include <znet/z_packets.h>
 #include <znet/z_packet_bin_fmt.h>
@@ -56,8 +61,6 @@ class PacketUnpacker {
   ZCryptoContext* crypto_context_;
 
   bool ValidatePacketHeader(const PacketHeader* header, size_t size) const {
-    // TODO: validate checksums
-    // Perform checks on the header
     if (header->magic != PacketHeader::kMagic || size < sizeof(PacketHeader)) {
       return false;
     }
