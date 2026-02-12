@@ -109,9 +109,12 @@ void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
     return;
   }
 
-  OutgoingPacket acknowledged_packet;
-  if (awaiting_ack_packets_.find(ack_number, acknowledged_packet) &&
-      acknowledged_packet.destination_peer_id == return_address.id) {
+  bool destination_matches = false;
+  const bool has_acknowledged_packet = awaiting_ack_packets_.with_value(
+      ack_number, [&](const OutgoingPacket& packet) {
+        destination_matches = (packet.destination_peer_id == return_address.id);
+      });
+  if (has_acknowledged_packet && destination_matches) {
     awaiting_ack_packets_.remove(ack_number);
   }
 }

@@ -10,6 +10,7 @@
 #include <base/compiler.h>
 #include <base/containers/span.h>
 #endif
+#include <znet/z_network_allocator.h>
 
 namespace tx::network {
 
@@ -167,7 +168,8 @@ class OutgoingPacket {
         destination_peer_id(peer_id) {
     payload.data = nullptr;
     if (heap_data_size > 0) {
-      payload.data = new byte[data.size()];
+      payload.data = reinterpret_cast<byte*>(
+          PacketBufferPool::Instance().Allocate(data.size()));
       memcpy(payload.data, data.data(), data.size());
     }
   }
@@ -218,7 +220,8 @@ class OutgoingPacket {
  private:
   STRONG_INLINE void ReleasePayload() {
     if (heap_data_size > 0 && payload.data) {
-      delete[] payload.data;
+      PacketBufferPool::Instance().Release(
+          reinterpret_cast<unsigned char*>(payload.data));
     }
     heap_data_size = 0;
     payload.scalar = 0;
@@ -227,8 +230,9 @@ class OutgoingPacket {
   STRONG_INLINE void CopyPayloadFrom(const OutgoingPacket& other) {
     if (other.heap_data_size > 0 && other.payload.data) {
       heap_data_size = other.heap_data_size;
-      payload.data = new byte[heap_data_size];
-      memcpy(payload.data, other.payload.data, heap_data_size);
+      payload.data = other.payload.data;
+      PacketBufferPool::Instance().Retain(
+          reinterpret_cast<unsigned char*>(payload.data));
       return;
     }
     heap_data_size = 0;

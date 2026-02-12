@@ -31,20 +31,33 @@ project("lz4")
   })
 
 if not _OPTIONS["use-stl"] then
-  project("mbedtls")
-    kind("StaticLib")
-    language("C")
-    includedirs({
-      "mbedtls/include",
-      "mbedtls/library"
-    })
-    defines({
-      "MBEDTLS_ALLOW_PRIVATE_ACCESS"
-    })
-    files({
-      "mbedtls/library/*.c",
-      "mbedtls/library/*.h",
-    })
+  -- Some mbedtls revisions require generated headers that are not always
+  -- present in this checkout. Build it only when those files exist.
+  local has_mbedtls_generated_headers =
+      os.isfile("mbedtls/library/common.h") and
+      os.isfile("mbedtls/include/mbedtls/config_psa.h")
+
+  if has_mbedtls_generated_headers then
+    project("mbedtls")
+      kind("StaticLib")
+      language("C")
+      includedirs({
+        "mbedtls",
+        "mbedtls/include",
+        "mbedtls/library",
+        "mbedtls/tf-psa-crypto/include",
+        "mbedtls/tf-psa-crypto/core"
+      })
+      defines({
+        "MBEDTLS_ALLOW_PRIVATE_ACCESS"
+      })
+      files({
+        "mbedtls/library/*.c",
+        "mbedtls/library/*.h",
+      })
+  else
+    print("Warning: skipping mbedtls project; missing generated headers (library/common.h, include/mbedtls/config_psa.h).")
+  end
 
   local function base_project()
     warnings("High")

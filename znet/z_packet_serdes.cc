@@ -46,26 +46,36 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
     return {};
   }
 
-  base::Vector<byte> payload;
+  const byte* payload_source = nullptr;
+  u32 payload_size = 0;
   if (packet_info.heap_data_size > 0) {
     if (!packet_info.payload.data) {
       BASE_LOGE(kLogTag, "Payload pointer is null while size is non-zero");
       return {};
     }
-    payload.resize(packet_info.heap_data_size);
-    std::memcpy(payload.data(), packet_info.payload.data, payload.size());
+    payload_source = packet_info.payload.data;
+    payload_size = packet_info.heap_data_size;
   }
 
-  if (!EncryptPayloadIfNeeded(packet_info, next_sequence_number, payload)) {
-    BASE_LOGE(kLogTag, "Failed to encrypt outgoing payload");
-    return {};
+  base::Vector<byte> encrypted_payload;
+  if (packet_info.flags.encrypted) {
+    encrypted_payload.resize(payload_size);
+    if (payload_size > 0) {
+      std::memcpy(encrypted_payload.data(), payload_source, payload_size);
+    }
+    if (!EncryptPayloadIfNeeded(packet_info, next_sequence_number,
+                                encrypted_payload)) {
+      BASE_LOGE(kLogTag, "Failed to encrypt outgoing payload");
+      return {};
+    }
+    if (encrypted_payload.size() > std::numeric_limits<u32>::max()) {
+      BASE_LOGE(kLogTag, "Payload exceeds protocol size limit");
+      return {};
+    }
+    payload_size = static_cast<u32>(encrypted_payload.size());
+    payload_source = payload_size > 0 ? encrypted_payload.data() : nullptr;
   }
 
-  if (payload.size() > std::numeric_limits<u32>::max()) {
-    BASE_LOGE(kLogTag, "Payload exceeds protocol size limit");
-    return {};
-  }
-  const u32 payload_size = static_cast<u32>(payload.size());
   u32 size_of_headers =
       sizeof(PacketHeader) +
       (packet_info.flags.reliable * sizeof(ReliableHeader)) +
@@ -81,7 +91,7 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
 
   // and we copy the payload to its appropriate place
   if (payload_size > 0) {
-    std::memcpy(packet.data() + size_of_headers, payload.data(), payload_size);
+    std::memcpy(packet.data() + size_of_headers, payload_source, payload_size);
   }
 
   if (packet.size() < sizeof(PacketHeader)) {
@@ -278,21 +288,30 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
                .awaiting_ack = 0,
                .reserved = 0};
 
-  base::Vector<byte> payload_data(payload_size);
-  if (payload_size > 0) {
-    std::memcpy(payload_data.data(), in_buffer + offset, payload_size);
-  }
-  if (!DecryptPayloadIfNeeded(payload_data, out.sequence_number,
-                              out.acknowledgement_number, header)) {
-    BASE_LOGE(kLogTag, "Encrypted payload authentication/decryption failed");
-    return false;
+  if (header.flags.is_encrypted) {
+    base::Vector<byte> payload_data(payload_size);
+    if (payload_size > 0) {
+      std::memcpy(payload_data.data(), in_buffer + offset, payload_size);
+    }
+    if (!DecryptPayloadIfNeeded(payload_data, out.sequence_number,
+                                out.acknowledgement_number, header)) {
+      BASE_LOGE(kLogTag, "Encrypted payload authentication/decryption failed");
+      return false;
+    }
+    if (payload_data.empty()) {
+      out.data.clear();
+    } else {
+      out.data.assign(reinterpret_cast<const char*>(payload_data.data()),
+                      payload_data.size());
+    }
+    return true;
   }
 
-  if (payload_data.empty()) {
+  if (payload_size == 0) {
     out.data.clear();
   } else {
-    out.data.assign(reinterpret_cast<const char*>(payload_data.data()),
-                    payload_data.size());
+    out.data.assign(reinterpret_cast<const char*>(in_buffer + offset),
+                    payload_size);
   }
 
   return true;

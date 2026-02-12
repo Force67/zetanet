@@ -30,3 +30,4 @@ ntloader/ntloader.vcxproj.user
 *.idb
 /build
 /bin
+/samples/allocator_bench/obj

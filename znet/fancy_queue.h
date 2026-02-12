@@ -416,6 +416,18 @@ class LockFreeOrderedHashMap {
     return false;
   }
 
+  template <typename Callback>
+  bool with_value(const Key& key, Callback&& callback) const {
+    ::std::atomic<Node*>* ignore_prev = nullptr;
+    Node* node = find_in_bucket(key, ignore_prev);
+
+    if (node && !node->is_deleted.load(::std::memory_order_acquire)) {
+      callback(node->keyValue.second);
+      return true;
+    }
+    return false;
+  }
+
   // Marks the node as deleted and unlinks from bucket chain.
   // Does NOT unlink from order chain.
   bool remove(const Key& key) {

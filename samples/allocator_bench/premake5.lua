@@ -1,4 +1,4 @@
-project "SimpleClient"
+project "AllocatorBench"
     language "C++"
     kind "ConsoleApp"
     vpaths

@@ -21,7 +21,9 @@ project "SimpleServer"
       }
 
       filter("system:linux")
-        links({ "pthread" })
+        links({ "pthread", "crypto", "ssl" })
+      filter("system:macosx")
+        links({ "crypto", "ssl" })
       filter({})
     else
       includedirs
