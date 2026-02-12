@@ -1,8 +1,13 @@
 # Zetanet
 
-A library for high throughput, low latency networking in C++.
+High performance game networking library.
 
-I wrote this library a long time ago for another project. Now I decided to open source it. It is a work in progress and not yet ready for production use. It is not well documented, but the code is clean and easy to read. 
-I will add documentation later. Contributions are welcome!
+After a decade of making various multiplayer game mods, i wrote this library as a replacement for raknet in 2023. Its more high level than alternatives like enet, and less cumbersome than alternatives such as gamenetworkingsockets. This library was originally intended for a project that didnt come to fruition.
 
-## Building
+Cool features:
+- Peer to peer hosting with proper session host transition management
+- Support for classical client <-> server flow
+- Speed and Performance!!! This library is intended to handle high throughput with many concurrent players. I tested it with 64 players at once, connecting to a single server.
+- Inbuilt file transfer utils: You can send files such as assets for UGC directly over the library
+- Mixed transfer modes: Make important packets behave tcp-like while the rest is still UDP.
+- Fast encryption and compression support
