@@ -21,6 +21,7 @@ bool ZClient::Connect(const base::StringRef address, u16 port) {
   const ZAsyncTransportLayer::InitOptions options{
       .ip = address,
       .port = port,
+      .local_bind_port = 0,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kClient,
       .use_encryption = use_encryption,
       .use_compression = false,

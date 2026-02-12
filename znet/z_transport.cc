@@ -29,7 +29,8 @@ bool ZAsyncTransportLayer::Init(const InitOptions& options) {
 
   bool result = false;
   if (options.setup_type == ConnectionType::kClient) {
-    result = socket_.CreateClient(options.ip, options.port, options.allow_ipv6);
+    result = socket_.CreateClient(options.ip, options.port, options.allow_ipv6,
+                                  options.local_bind_port);
   } else {
     result = socket_.CreateServer(options.port, options.allow_ipv6);
   }

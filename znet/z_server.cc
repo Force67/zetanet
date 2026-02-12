@@ -23,6 +23,7 @@ bool ZServer::Begin(u16 port) {
   const ZAsyncTransportLayer::InitOptions options{
       .ip = kSelfAddress,
       .port = port,
+      .local_bind_port = 0,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kServer,
       .use_encryption = use_encryption,
       .use_compression = false,

@@ -48,6 +48,11 @@ ZSocket::Error ZSocket::GetLastError() {
       return Error::NetworkUnreachable;
     case ENOTCONN:
       return Error::NotConnected;
+    case EBADF:
+#if defined(ENOTSOCK)
+    case ENOTSOCK:
+#endif
+      return Error::NotConnected;
     case EINPROGRESS:
       return Error::OperationInProgress;
     case ETIMEDOUT:

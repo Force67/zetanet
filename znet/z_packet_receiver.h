@@ -121,6 +121,9 @@ class PacketReceiver {
         BASE_LOGW(kLogTag, "Received a force reset");
         return ReceiveResult::Goodbye;
       }
+      if (error == ZSocket::Error::NotConnected) {
+        return ReceiveResult::Goodbye;
+      }
       // For non-blocking sockets, EAGAIN/EWOULDBLOCK is normal
       if (error == ZSocket::Error::Success) {
         return ReceiveResult::Timeout;

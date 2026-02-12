@@ -40,7 +40,10 @@ class ZSocket {
   void DestroySocket();
 
   bool CreateServer(u16 port, bool ipv6 = false);
-  bool CreateClient(const base::StringRef ip, int port, bool ipv6 = false);
+  bool CreateClient(const base::StringRef ip,
+                    int port,
+                    bool ipv6 = false,
+                    u16 local_bind_port = 0);
 
   struct Address {
     char ip[22]{};

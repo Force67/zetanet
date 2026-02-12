@@ -27,6 +27,7 @@ class ZAsyncTransportLayer {
   struct InitOptions {
     const base::StringRef ip;
     u16 port;
+    u16 local_bind_port;
     ConnectionType setup_type;
     bool use_encryption;
     bool use_compression;

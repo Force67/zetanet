@@ -69,7 +69,10 @@ bool ZSocket::CreateServer(u16 port, bool ipv6) {
   return true;
 }
 
-bool ZSocket::CreateClient(const base::StringRef ip, int port, bool ipv6) {
+bool ZSocket::CreateClient(const base::StringRef ip,
+                           int port,
+                           bool ipv6,
+                           u16 local_bind_port) {
   if (!InitSocket()) {
     BASE_LOGE(kLogTag, "InitSocket failed");
     return false;
@@ -101,6 +104,20 @@ bool ZSocket::CreateClient(const base::StringRef ip, int port, bool ipv6) {
               ZSocket::GetErrorString());
     DestroySocket();
     return false;
+  }
+
+  if (local_bind_port != 0) {
+    sockaddr_in local_addr{};
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_addr.s_addr = INADDR_ANY;
+    local_addr.sin_port = htons(local_bind_port);
+    if (::bind(socket_, reinterpret_cast<sockaddr*>(&local_addr),
+               sizeof(local_addr)) == ZNET_SOCKET_ERROR) {
+      BASE_LOGE(kLogTag, "Client bind({}) failed with error : {}",
+                local_bind_port, ZSocket::GetErrorString());
+      DestroySocket();
+      return false;
+    }
   }
 
 #if ZSOCKET_ASYNC

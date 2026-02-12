@@ -36,7 +36,8 @@ class PacketDispatcher {
       DispatchToServer(packet, builder, receipt_queue);
     } else if (packet.destination_peer_id == ZPeerId::to_all) {
       for (auto& peer : peer_list_.GetPeerList()) {
-        DispatchToOne(peer, packet, builder, receipt_queue);
+        OutgoingPacket fanout_packet = packet;
+        DispatchToOne(peer, fanout_packet, builder, receipt_queue);
       }
     } else {
       ZPeer* peer = peer_list_.GetPeer(packet.destination_peer_id);

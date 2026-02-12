@@ -31,3 +31,4 @@ ntloader/ntloader.vcxproj.user
 /build
 /bin
 /samples/allocator_bench/obj
+/samples/p2p_smoke/obj
