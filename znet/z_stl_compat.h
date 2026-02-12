@@ -112,6 +112,7 @@ class UniquePointer : public std::unique_ptr<T> {
  public:
   using std::unique_ptr<T>::unique_ptr;
   T* Get_UseOnlyIfYouKnowWhatYouareDoing() const { return this->get(); }
+  void Reset(T* p = nullptr) { this->reset(p); }
 };
 
 template <typename T, typename... Args>
@@ -144,6 +145,7 @@ class MPSCQueue {
   void enqueue(T&& item) {
     std::lock_guard<std::mutex> lock(mutex_);
     queue_.push(std::move(item));
+    approx_size_.fetch_add(1, std::memory_order_relaxed);
   }
 
   bool dequeue(T& item) {
@@ -152,6 +154,7 @@ class MPSCQueue {
       return false;
     item = std::move(queue_.front());
     queue_.pop();
+    approx_size_.fetch_sub(1, std::memory_order_relaxed);
     return true;
   }
 
@@ -160,8 +163,13 @@ class MPSCQueue {
     return queue_.empty();
   }
 
+  size_t size_approx() const {
+    return approx_size_.load(std::memory_order_relaxed);
+  }
+
  private:
   std::queue<T> queue_;
+  std::atomic<size_t> approx_size_{0};
   mutable std::mutex mutex_;
 };
 
@@ -357,9 +365,20 @@ class File {
     return static_cast<int>(stream_.gcount());
   }
 
+  int Write(int64_t offset, const char* data, size_t size) {
+    stream_.seekp(offset);
+    stream_.write(data, size);
+    return stream_.good() ? static_cast<int>(size) : -1;
+  }
+
   int WriteAtCurrentPos(const char* data, int size) {
     stream_.write(data, size);
     return stream_.good() ? size : -1;
+  }
+
+  bool Flush() {
+    stream_.flush();
+    return stream_.good();
   }
 
  private:

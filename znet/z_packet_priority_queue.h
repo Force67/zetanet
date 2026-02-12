@@ -53,6 +53,11 @@ class PriorityMPSCQueue {
            medium_priority_queue_.empty() && low_priority_queue_.empty();
   }
 
+  size_t size_approx() const {
+    return critial_priority_queue_.size_approx() + high_priority_queue_.size_approx() +
+           medium_priority_queue_.size_approx() + low_priority_queue_.size_approx();
+  }
+
  private:
   base::MPSCQueue<T> critial_priority_queue_;
   base::MPSCQueue<T> high_priority_queue_;

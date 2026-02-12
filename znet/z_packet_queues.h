@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#include <array>
 #include <map>
 #include <znet/z_packets.h>
 
@@ -45,9 +46,16 @@ class ZPacketQueue {
   }
 
   void Push(OutgoingPacket&& package_move_in) {
+    const PacketChannelType channel = package_move_in.channel;
+    const size_t payload_bytes = package_move_in.heap_data_size;
     auto& queue = GetChannelQueue(package_move_in.channel);
     PacketPriority priority = (PacketPriority)package_move_in.flags.priority;
     queue.enqueue(std::move(package_move_in), priority);
+    const size_t channel_index = static_cast<size_t>(channel);
+    if (channel_index < channel_outgoing_bytes_.size()) {
+      channel_outgoing_bytes_[channel_index].fetch_add(payload_bytes,
+                                                       std::memory_order_relaxed);
+    }
   }
   bool Pop(PacketChannelType channel_type, IncomingPacket& p) {
     auto& queue = channel_incoming_queues_[channel_type];
@@ -64,6 +72,26 @@ class ZPacketQueue {
   }
 
   void SetCryptoProvider(ZCryptoContext* crypto) { crypto_context_ = crypto; }
+
+  size_t GetApproxOutgoingPacketCount(PacketChannelType channel) const {
+    return channel_outgoing_queues_.at(channel).size_approx();
+  }
+
+  size_t GetApproxOutgoingBytes(PacketChannelType channel) const {
+    const size_t channel_index = static_cast<size_t>(channel);
+    if (channel_index >= channel_outgoing_bytes_.size()) {
+      return 0;
+    }
+    return channel_outgoing_bytes_[channel_index].load(std::memory_order_relaxed);
+  }
+
+  size_t GetApproxAwaitingAckPacketCount() const {
+    return awaiting_ack_packet_count_.load(std::memory_order_relaxed);
+  }
+
+  size_t GetApproxAwaitingAckBytes() const {
+    return awaiting_ack_bytes_.load(std::memory_order_relaxed);
+  }
 
  private:
   void ProcessOutgoingPackets();
@@ -91,6 +119,10 @@ class ZPacketQueue {
 
   PacketDispatcher dispatcher_;
   PacketReceiver receiver_;
+
+  std::array<base::Atomic<size_t>, 2> channel_outgoing_bytes_{};
+  base::Atomic<size_t> awaiting_ack_packet_count_{0};
+  base::Atomic<size_t> awaiting_ack_bytes_{0};
 
   base::Atomic<bool>& stop_threads_;
 

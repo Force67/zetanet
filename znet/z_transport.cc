@@ -76,4 +76,29 @@ void ZAsyncTransportLayer::Deinit() {
   state_ = State::kDisconnected;
 }
 
+bool ZAsyncTransportLayer::EnqueuePacket(OutgoingPacket&& packet) {
+  if (state_ != State::kConnected) {
+    BASE_LOGW(kLogTag, "Dropping packet while disconnected");
+    return false;
+  }
+  packet_queue_.Push(std::move(packet));
+  return true;
+}
+
+ZAsyncTransportLayer::OutboundPressure ZAsyncTransportLayer::GetOutboundPressure()
+    const {
+  OutboundPressure pressure;
+  pressure.control_queued_packets =
+      packet_queue_.GetApproxOutgoingPacketCount(PacketChannelType::Control);
+  pressure.control_queued_bytes =
+      packet_queue_.GetApproxOutgoingBytes(PacketChannelType::Control);
+  pressure.data_queued_packets =
+      packet_queue_.GetApproxOutgoingPacketCount(PacketChannelType::Data);
+  pressure.data_queued_bytes =
+      packet_queue_.GetApproxOutgoingBytes(PacketChannelType::Data);
+  pressure.awaiting_ack_packets = packet_queue_.GetApproxAwaitingAckPacketCount();
+  pressure.awaiting_ack_bytes = packet_queue_.GetApproxAwaitingAckBytes();
+  return pressure;
+}
+
 }  // namespace tx::network

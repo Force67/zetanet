@@ -162,6 +162,22 @@ class PacketBufferPool {
     }
   }
 
+  void BoostClassCacheForSize(size_t requested_size, size_t min_target_blocks) {
+    if (min_target_blocks == 0) {
+      return;
+    }
+    const size_t class_index = SizeToClassIndex(requested_size);
+    if (class_index == kInvalidClassIndex) {
+      return;
+    }
+    ClassBucket& bucket = classes_[class_index];
+    size_t current_target = bucket.target_cached_blocks.load(std::memory_order_relaxed);
+    while (current_target < min_target_blocks &&
+           !bucket.target_cached_blocks.compare_exchange_weak(
+               current_target, min_target_blocks, std::memory_order_relaxed)) {
+    }
+  }
+
  private:
   struct alignas(std::max_align_t) BlockHeader {
     std::atomic<std::uint32_t> ref_count;

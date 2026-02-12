@@ -15,6 +15,19 @@
 
 namespace tx::network {
 static constexpr char kLogTag[] = "z-packet-queue";
+static constexpr u32 kResendIntervalSeconds = 1;
+static constexpr u32 kDropAfterSeconds = 5;
+namespace {
+void SaturatingSub(base::Atomic<size_t>& value, size_t delta) {
+  size_t current = value.load(std::memory_order_relaxed);
+  while (true) {
+    const size_t next = (current > delta) ? (current - delta) : 0;
+    if (value.compare_exchange_weak(current, next, std::memory_order_relaxed)) {
+      return;
+    }
+  }
+}
+}  // namespace
 
 ZPacketQueue::ZPacketQueue(ZSocket& socket,
                            ZPeerMapping& peer_list,
@@ -28,6 +41,11 @@ ZPacketQueue::ZPacketQueue(ZSocket& socket,
     // Default-construct queues via operator[] (PriorityMPSCQueue is not moveable due to mutex)
     channel_outgoing_queues_[PacketChannelType::Control];
     channel_outgoing_queues_[PacketChannelType::Data];
+    channel_outgoing_bytes_[0].store(0, std::memory_order_relaxed);
+    channel_outgoing_bytes_[1].store(0, std::memory_order_relaxed);
+    awaiting_ack_packet_count_.store(0, std::memory_order_relaxed);
+    awaiting_ack_bytes_.store(0, std::memory_order_relaxed);
+    dispatcher_.SetAwaitingAckCounters(&awaiting_ack_packet_count_, &awaiting_ack_bytes_);
 }
 
 bool ZPacketQueue::StartThreads() {
@@ -44,14 +62,19 @@ void ZPacketQueue::ProcessOutgoingPackets() {
 
     auto now = static_cast<u32>(base::GetUnixTimeStamp());
     for (auto& [seqNum, packet] : awaiting_ack_packets_) {
-      if ((now - packet.last_send_time) > 1000) {
+      const u32 packet_age = now - packet.last_send_time;
+      // Drop packets that have exceeded retry budget to cap memory growth.
+      if (packet_age > kDropAfterSeconds) {
+        const size_t dropped_bytes = packet.heap_data_size;
+        awaiting_ack_packets_.remove(seqNum);
+        SaturatingSub(awaiting_ack_packet_count_, 1);
+        SaturatingSub(awaiting_ack_bytes_, dropped_bytes);
+        continue;
+      }
+      if (packet_age > kResendIntervalSeconds) {
         dispatcher_.DispatchPacket(crypto_context_, packet,
                                    awaiting_ack_packets_);
         packet.last_send_time = now;
-      }
-      // we waited too long, drop the packet to avoid flooding
-      if ((now - packet.last_send_time) > 5000) {
-        awaiting_ack_packets_.remove(seqNum);
       }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -63,6 +86,10 @@ void ZPacketQueue::ProcessChannel(PacketChannelType channel) {
   if (!queue.empty()) {
     OutgoingPacket packet;
     queue.dequeue(packet);
+    const size_t channel_index = static_cast<size_t>(channel);
+    if (channel_index < channel_outgoing_bytes_.size()) {
+      SaturatingSub(channel_outgoing_bytes_[channel_index], packet.heap_data_size);
+    }
     dispatcher_.DispatchPacket(crypto_context_, packet, awaiting_ack_packets_);
   }
 }
@@ -113,9 +140,13 @@ void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
   const bool has_acknowledged_packet = awaiting_ack_packets_.with_value(
       ack_number, [&](const OutgoingPacket& packet) {
         destination_matches = (packet.destination_peer_id == return_address.id);
+        if (destination_matches) {
+          SaturatingSub(awaiting_ack_bytes_, packet.heap_data_size);
+        }
       });
   if (has_acknowledged_packet && destination_matches) {
     awaiting_ack_packets_.remove(ack_number);
+    SaturatingSub(awaiting_ack_packet_count_, 1);
   }
 }
 

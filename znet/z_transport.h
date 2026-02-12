@@ -2,6 +2,8 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#include <cstddef>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -33,10 +35,24 @@ class ZAsyncTransportLayer {
     bool use_compression;
     bool allow_ipv6;
   };
+
+  struct OutboundPressure {
+    size_t control_queued_packets{0};
+    size_t control_queued_bytes{0};
+    size_t data_queued_packets{0};
+    size_t data_queued_bytes{0};
+    size_t awaiting_ack_packets{0};
+    size_t awaiting_ack_bytes{0};
+  };
   bool Init(const InitOptions&);
 
   void Deinit();
 
+  bool EnqueuePacket(OutgoingPacket&& packet);
+  OutboundPressure GetOutboundPressure() const;
+  bool encryption_enabled() const {
+    return crypto_context_.Get_UseOnlyIfYouKnowWhatYouareDoing() != nullptr;
+  }
 
   State state() const { return state_; }
 

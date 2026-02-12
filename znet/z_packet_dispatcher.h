@@ -2,6 +2,8 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#include <cstddef>
+
 #include <znet/z_socket.h>
 #include <znet/z_packets.h>
 #include <znet/z_peer_mapping.h>
@@ -25,6 +27,12 @@ class PacketDispatcher {
 
   PacketDispatcher(ZSocket& socket, ZPeerMapping& peer_list)
       : socket_(socket), peer_list_(peer_list) {}
+
+  void SetAwaitingAckCounters(base::Atomic<size_t>* packet_count,
+                              base::Atomic<size_t>* bytes) {
+    awaiting_ack_packet_count_ = packet_count;
+    awaiting_ack_bytes_ = bytes;
+  }
 
   void DispatchPacket(
       ZCryptoContext* crypto,
@@ -90,16 +98,27 @@ class PacketDispatcher {
   void AddReceiptIfNeeded(
       OutgoingPacket& packet,
       base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
-    if (packet.flags.reliable && packet.type != PacketType::Acknowledgement) {
+    if (packet.flags.reliable && packet.type != PacketType::Acknowledgement &&
+        packet.last_send_time == 0) {
+      const size_t payload_bytes = packet.heap_data_size;
       packet.flags.awaiting_ack = true;
       packet.last_send_time = static_cast<u32>(base::GetUnixTimeStamp());
-      receipt_queue.insert(next_outgoing_sequence_number_, std::move(packet));
+      if (receipt_queue.insert(next_outgoing_sequence_number_, std::move(packet))) {
+        if (awaiting_ack_packet_count_) {
+          awaiting_ack_packet_count_->fetch_add(1, std::memory_order_relaxed);
+        }
+        if (awaiting_ack_bytes_) {
+          awaiting_ack_bytes_->fetch_add(payload_bytes, std::memory_order_relaxed);
+        }
+      }
     }
   }
 
   ZSocket& socket_;
   ZPeerMapping& peer_list_;
   base::Atomic<u32> next_outgoing_sequence_number_{0};
+  base::Atomic<size_t>* awaiting_ack_packet_count_{nullptr};
+  base::Atomic<size_t>* awaiting_ack_bytes_{nullptr};
 };
 
 }  // namespace tx::network
