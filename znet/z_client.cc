@@ -61,6 +61,10 @@ void ZClient::Update() {
   }
 }
 void ZClient::SendMessage(const ZPeerId id, const std::string& data) {
+  if (crypto_context_ && !crypto_context_->IsAuthenticated()) {
+    BASE_LOGW(kLogTag, "Cannot send message: not authenticated");
+    return;
+  }
   const u8 use_encryption = crypto_context_ ? 1 : 0;
   const PackageFlags flags{.reliable = 1,
                            .encrypted = use_encryption,
@@ -87,8 +91,8 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
           BASE_LOGE(kLogTag, "Malformed ServerHello: missing header");
           return;
         }
-        BASE_LOGI(kLogTag, "ServerHello: {}",
-                  response.compression_algo_list_len);
+        BASE_LOGI(kLogTag, "ServerHello: enc_algo={}, comp_algo={}",
+                  response.encryption_algo_list_len, response.compression_algo_list_len);
 
         base::Vector<byte> encryption_algorithms(
             response.encryption_algo_list_len);
@@ -101,9 +105,8 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
         base::Vector<byte> compression_algorithms(
             response.compression_algo_list_len);
         if (!reader.ReadS(compression_algorithms)) {
-          BASE_LOGE(
-              kLogTag,
-              "Malformed ServerHello: invalid compression algorithm list");
+          BASE_LOGE(kLogTag,
+                    "Malformed ServerHello: invalid compression algorithm list");
           return;
         }
 
@@ -112,13 +115,47 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
           BASE_LOGE(kLogTag, "Malformed ServerHello: invalid public key list");
           return;
         }
-        if (reader.position() != p.data.size()) {
-          BASE_LOGW(kLogTag, "ServerHello has trailing bytes");
+        
+        std::string server_challenge;
+        if (response.challenge_len > 0) {
+          base::Vector<byte> temp_challenge;
+          if (!reader.ReadList(temp_challenge)) {
+            BASE_LOGE(kLogTag, "Malformed ServerHello: missing server challenge");
+            return;
+          }
+          server_challenge.assign(reinterpret_cast<const char*>(temp_challenge.data()), 
+                                  temp_challenge.size());
+        }
+        
+        std::string server_proof;
+        if (response.proof_len > 0) {
+          base::Vector<byte> temp_proof;
+          if (!reader.ReadList(temp_proof)) {
+            BASE_LOGE(kLogTag, "Malformed ServerHello: missing server proof");
+            return;
+          }
+          server_proof.assign(reinterpret_cast<const char*>(temp_proof.data()), 
+                             temp_proof.size());
         }
 
         if (crypto_context_) {
           crypto_context_->ProcessServerKey(
-              std::string((const char*)key.data(), key.size()));
+              std::string((const char*)key.data(), key.size()),
+              server_challenge);
+          
+          if (!server_proof.empty()) {
+            if (!crypto_context_->VerifyServerResponse(server_proof)) {
+              BASE_LOGE(kLogTag, "Server authentication failed!");
+              Disconnect();
+              return;
+            }
+            BASE_LOGI(kLogTag, "Server authenticated successfully");
+          }
+          
+          std::string client_proof = crypto_context_->GenerateClientProof();
+          if (!client_proof.empty()) {
+            SendClientAuthProof(client_proof);
+          }
         }
 
         state_ = State::kConnected;
@@ -135,9 +172,15 @@ void ZClient::SendClientHello() {
   constexpr CompressionAlgorithm compression_algorithms[] = {
       CompressionAlgorithm::LZ4};
 
+  std::string client_challenge;
+  if (crypto_context_) {
+    client_challenge = crypto_context_->GetChallenge();
+  }
+
   system_commands::ClientHello request{
       .encryption_algo_list_len = (u8)_countof(encryption_algorithms),
-      .compression_algo_list_len = (u8)_countof(compression_algorithms)};
+      .compression_algo_list_len = (u8)_countof(compression_algorithms),
+      .challenge_len = static_cast<u8>(client_challenge.size())};
   PacketWriter writer;
   writer.Put(request);
   for (int i = 0; i < request.encryption_algo_list_len; i++) {
@@ -145,6 +188,11 @@ void ZClient::SendClientHello() {
   }
   for (int i = 0; i < request.compression_algo_list_len; i++) {
     writer.Put((u8)compression_algorithms[i]);
+  }
+  
+  if (!client_challenge.empty()) {
+    writer.PutList(base::Span<byte>(reinterpret_cast<const byte*>(client_challenge.data()),
+                                     client_challenge.size()));
   }
 
   const PackageFlags flags{.reliable = 1,
@@ -155,6 +203,26 @@ void ZClient::SendClientHello() {
                            .awaiting_ack = 0,
                            .reserved = 0};
   OutgoingPacket o(ZPeerId::to_server, PacketType::ClientHello,
+                   PacketChannelType::Control, flags, writer.data());
+  Push(std::move(o));
+}
+
+void ZClient::SendClientAuthProof(const std::string& proof) {
+  system_commands::ClientAuthProof request{
+      .proof_len = static_cast<u8>(proof.size())};
+  PacketWriter writer;
+  writer.Put(request);
+  writer.PutList(base::Span<byte>(reinterpret_cast<const byte*>(proof.data()),
+                                   proof.size()));
+
+  const PackageFlags flags{.reliable = 1,
+                           .encrypted = 0,
+                           .compressed = 0,
+                           .priority = (u8)PacketPriority::Critical,
+                           .acknowledged = 1,
+                           .awaiting_ack = 0,
+                           .reserved = 0};
+  OutgoingPacket o(ZPeerId::to_server, PacketType::ServerHello,
                    PacketChannelType::Control, flags, writer.data());
   Push(std::move(o));
 }

@@ -104,6 +104,9 @@ class ZFileTransporter {
   bool EnsureStreamSession(const TransferChunk& chunk,
                            const base::Path& temp_directory,
                            StreamReceiveSession*& out_session);
+  bool ValidatePath(const base::Path& base_dir, const base::Path& file_path) const;
+
+  static bool IsPathTraversal(const std::string& path);
 
   ZAsyncTransportLayer& transport_layer_;
   IFileWriteFactory* file_write_factory_{nullptr};

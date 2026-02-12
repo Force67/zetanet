@@ -154,10 +154,12 @@ namespace system_commands {
 struct ClientHello {
   u8 encryption_algo_list_len;
   u8 compression_algo_list_len;
+  u8 challenge_len;
 
   static void Build(PacketWriter& builder, ClientHello& packet) {
     builder.Put<u8>(packet.encryption_algo_list_len);
     builder.Put<u8>(packet.compression_algo_list_len);
+    builder.Put<u8>(packet.challenge_len);
   }
 };
 
@@ -165,11 +167,31 @@ struct ServerHello {
   u8 encryption_algo_list_len;
   u8 compression_algo_list_len;
   u8 pub_key_list_len;
+  u8 challenge_len;
+  u8 proof_len;
 
   static void Build(PacketWriter& builder, ServerHello& packet) {
     builder.Put<u8>(packet.encryption_algo_list_len);
     builder.Put<u8>(packet.compression_algo_list_len);
     builder.Put<u8>(packet.pub_key_list_len);
+    builder.Put<u8>(packet.challenge_len);
+    builder.Put<u8>(packet.proof_len);
+  }
+};
+
+struct ServerAuthProof {
+  u8 proof_len;
+
+  static void Build(PacketWriter& builder, ServerAuthProof& packet) {
+    builder.Put<u8>(packet.proof_len);
+  }
+};
+
+struct ClientAuthProof {
+  u8 proof_len;
+
+  static void Build(PacketWriter& builder, ClientAuthProof& packet) {
+    builder.Put<u8>(packet.proof_len);
   }
 };
 

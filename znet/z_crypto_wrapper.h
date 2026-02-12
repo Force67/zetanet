@@ -18,7 +18,6 @@ namespace tx::network {
 class ZCryptoContext {
  public:
   static constexpr mem_size kNonceSize = 12;
-  static constexpr mem_size kAuthTagSize = 32;
 
   ZCryptoContext();
   ~ZCryptoContext();
@@ -26,8 +25,14 @@ class ZCryptoContext {
   bool InitializeKeyExchange();
 
   std::string GetPublicKey() const;
+  std::string GetChallenge() const;
 
-  void ProcessServerKey(const std::string& server_key);
+  void ProcessServerKey(const std::string& server_key, const std::string& server_challenge);
+
+  bool VerifyServerResponse(const std::string& server_proof);
+  std::string GenerateClientProof();
+  std::string GenerateServerProof();
+  bool IsAuthenticated() const;
 
   bool EncryptPayload(const base::Span<byte>& plaintext,
                       const base::Span<byte>& aad,
@@ -40,24 +45,16 @@ class ZCryptoContext {
  private:
   bool EnsureKeyMaterialReady();
   bool DeriveKeyMaterial(const std::string& secret);
-  bool EncryptAesCtr(const byte* input,
-                     mem_size input_size,
-                     const byte* nonce,
-                     base::Vector<byte>& output);
-  bool DecryptAesCtr(const byte* input,
-                     mem_size input_size,
-                     const byte* nonce,
-                     base::Vector<byte>& output);
-  bool ComputeHmac(const byte* data,
-                   mem_size size,
-                   base::Vector<byte>& out_tag) const;
 
  private:
   std::array<byte, 32> encryption_key_{};
   std::array<byte, 32> authentication_key_{};
   bool keys_initialized_{false};
-  std::string local_public_key_;
-  std::string server_public_key_;
+  bool authenticated_{false};
+  std::string local_nonce_;
+  std::string local_challenge_;
+  std::string server_nonce_;
+  std::string server_challenge_;
 };
 
 }  // namespace tx::network

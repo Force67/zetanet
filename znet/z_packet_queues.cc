@@ -37,7 +37,9 @@ ZPacketQueue::ZPacketQueue(ZSocket& socket,
       awaiting_ack_packets_(200),
       dispatcher_(socket, peer_list),
       receiver_(socket, peer_list),
-      stop_threads_(stop_token) {
+      stop_threads_(stop_token),
+      rate_limit_config_({}),
+      rate_limit_window_start_(std::chrono::steady_clock::now()) {
     // Default-construct queues via operator[] (PriorityMPSCQueue is not moveable due to mutex)
     channel_outgoing_queues_[PacketChannelType::Control];
     channel_outgoing_queues_[PacketChannelType::Data];
@@ -45,7 +47,45 @@ ZPacketQueue::ZPacketQueue(ZSocket& socket,
     channel_outgoing_bytes_[1].store(0, std::memory_order_relaxed);
     awaiting_ack_packet_count_.store(0, std::memory_order_relaxed);
     awaiting_ack_bytes_.store(0, std::memory_order_relaxed);
+    packets_sent_this_second_.store(0, std::memory_order_relaxed);
+    bytes_sent_this_second_.store(0, std::memory_order_relaxed);
+    burst_tokens_.store(rate_limit_config_.burst_allowance, std::memory_order_relaxed);
     dispatcher_.SetAwaitingAckCounters(&awaiting_ack_packet_count_, &awaiting_ack_bytes_);
+}
+
+bool ZPacketQueue::CheckRateLimit(size_t payload_bytes) {
+  auto now = std::chrono::steady_clock::now();
+  auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+      now - rate_limit_window_start_);
+  
+  if (elapsed.count() >= 1) {
+    packets_sent_this_second_.store(0, std::memory_order_relaxed);
+    bytes_sent_this_second_.store(0, std::memory_order_relaxed);
+    burst_tokens_.store(rate_limit_config_.burst_allowance, std::memory_order_relaxed);
+    rate_limit_window_start_ = now;
+  }
+  
+  size_t current_packets = packets_sent_this_second_.load(std::memory_order_relaxed);
+  size_t current_bytes = bytes_sent_this_second_.load(std::memory_order_relaxed);
+  size_t burst = burst_tokens_.load(std::memory_order_relaxed);
+  
+  if (current_packets >= rate_limit_config_.max_packets_per_second) {
+    if (burst == 0) {
+      return false;
+    }
+    size_t expected_burst = burst_tokens_.fetch_sub(1, std::memory_order_relaxed);
+    if (expected_burst == 0) {
+      return false;
+    }
+  }
+  
+  if (current_bytes + payload_bytes > rate_limit_config_.max_bytes_per_second) {
+    return false;
+  }
+  
+  packets_sent_this_second_.fetch_add(1, std::memory_order_relaxed);
+  bytes_sent_this_second_.fetch_add(payload_bytes, std::memory_order_relaxed);
+  return true;
 }
 
 bool ZPacketQueue::StartThreads() {

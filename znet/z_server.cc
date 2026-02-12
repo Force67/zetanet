@@ -61,6 +61,10 @@ bool ZServer::Update() {
 }
 
 void ZServer::SendMessage(ZPeerId id, const std::string& data) {
+  if (crypto_context_ && !crypto_context_->IsAuthenticated()) {
+    BASE_LOGW(kLogTag, "Cannot send message: not authenticated");
+    return;
+  }
   const u8 use_encryption = crypto_context_ ? 1 : 0;
   const PackageFlags flags{.reliable = 1,
                            .encrypted = use_encryption,
@@ -96,6 +100,9 @@ void ZServer::SendServerHello(ZPeerId dest) {
 
   base::Vector<byte> public_key_data;
   u8 pub_key_list_len = 0;
+  std::string server_challenge;
+  std::string server_proof;
+  
   if (crypto_context_) {
     bool foundAesCBC = false;
     for (u8 i = 0; i < (u8)_countof(encryption_algorithms); i++) {
@@ -110,6 +117,13 @@ void ZServer::SendServerHello(ZPeerId dest) {
         std::memcpy(public_key_data.data(), key.data(), key.length());
         pub_key_list_len = 1;
       }
+      
+      server_challenge = crypto_context_->GetChallenge();
+      
+      const char* psk_env = std::getenv("ZNET_PSK");
+      if (psk_env && psk_env[0] != '\0') {
+        server_proof = crypto_context_->GenerateServerProof();
+      }
     }
   }
 
@@ -117,7 +131,9 @@ void ZServer::SendServerHello(ZPeerId dest) {
   system_commands::ServerHello request{
       .encryption_algo_list_len = (u8)_countof(encryption_algorithms),
       .compression_algo_list_len = (u8)_countof(compression_algorithms),
-      .pub_key_list_len = pub_key_list_len};
+      .pub_key_list_len = pub_key_list_len,
+      .challenge_len = static_cast<u8>(server_challenge.size()),
+      .proof_len = static_cast<u8>(server_proof.size())};
   writer.Put(request);
 
   for (int i = 0; i < request.encryption_algo_list_len; i++) {
@@ -129,6 +145,16 @@ void ZServer::SendServerHello(ZPeerId dest) {
 
   writer.PutList(
       base::Span<byte>(public_key_data.data(), public_key_data.size()));
+  
+  if (!server_challenge.empty()) {
+    writer.PutList(base::Span<byte>(reinterpret_cast<const byte*>(server_challenge.data()),
+                                     server_challenge.size()));
+  }
+  
+  if (!server_proof.empty()) {
+    writer.PutList(base::Span<byte>(reinterpret_cast<const byte*>(server_proof.data()),
+                                     server_proof.size()));
+  }
 
   const PackageFlags flags{.reliable = 1,
                            .encrypted = 0,

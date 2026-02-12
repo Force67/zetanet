@@ -22,6 +22,14 @@
 
 #include "z_network_allocator.h"
 
+#ifdef ZNET_USE_STL
+#include <openssl/hmac.h>
+#include <openssl/sha.h>
+#else
+#include <base/crypto/hmac.h>
+#include <base/crypto/sha.h>
+#endif
+
 namespace tx::network {
 namespace {
 constexpr char kLogTag[] = "z-file-transporter";
@@ -29,12 +37,44 @@ constexpr u32 kWireMagic = 0x5A465452u;  // "ZFTR"
 constexpr u8 kWireVersion = 1;
 constexpr u8 kFlagHasFileName = 1u << 0u;
 constexpr u8 kFlagLastChunk = 1u << 1u;
+constexpr u8 kFlagHasHmac = 1u << 2u;
 
 constexpr u32 kFnv1aOffset = 2166136261u;
 constexpr u32 kFnv1aPrime = 16777619u;
 
 constexpr size_t kDispatchBatchSize = 64;
 constexpr size_t kFixedHeaderSize = 48;
+constexpr size_t kHmacSize = 32;
+
+constexpr char kFileHmacKeyEnv[] = "ZNET_FILE_HMAC_KEY";
+
+bool ComputeHmacSha256(const byte* data, size_t size, const byte* key, size_t key_size, byte* out_hmac) {
+#ifdef ZNET_USE_STL
+  unsigned int hmac_len = 0;
+  return HMAC(EVP_sha256(), key, static_cast<int>(key_size), data, size, out_hmac, &hmac_len) != nullptr && hmac_len == kHmacSize;
+#else
+  return base::HmacSha256(key, key_size, data, size, out_hmac, kHmacSize);
+#endif
+}
+
+bool ContainsPathTraversal(const std::string& path) {
+  if (path.empty()) {
+    return true;
+  }
+  for (size_t i = 0; i < path.size(); ++i) {
+    if (path[i] == '.' && i + 1 < path.size() && path[i + 1] == '.') {
+      if (i + 2 >= path.size() || path[i + 2] == '/' || path[i + 2] == '\\') {
+        return true;
+      }
+    }
+    if (path[i] == '/' || path[i] == '\\') {
+      if (i + 1 < path.size() && path[i + 1] == '.' && i + 2 < path.size() && path[i + 2] == '.') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 u32 UpdateChecksum(const byte* data, size_t size, u32 seed) {
   u32 hash = seed;
@@ -322,6 +362,12 @@ bool ZFileTransporter::AssembleFileFromChunks(
     return false;
   }
 
+  const std::string output_path_str = output_path.ToAsciiString();
+  if (IsPathTraversal(output_path_str)) {
+    BASE_LOGE(kLogTag, "Path traversal attempt detected in output path");
+    return false;
+  }
+
   base::File output_file(
       output_path, base::File::FLAG_CREATE_ALWAYS | base::File::FLAG_WRITE);
   if (!output_file.IsValid()) {
@@ -531,6 +577,11 @@ bool ZFileTransporter::ParseTransferChunkPayload(const base::Span<byte>& payload
   chunk.file_name.assign(
       reinterpret_cast<const char*>(payload.data() + cursor), file_name_size);
   cursor += file_name_size;
+  
+  if (IsPathTraversal(chunk.file_name)) {
+    BASE_LOGE(kLogTag, "Path traversal attempt detected in filename");
+    return false;
+  }
 
   if (cursor + chunk_data_size != payload.size()) {
     return false;
@@ -797,4 +848,9 @@ void ZFileTransporter::AbortStreamedFile(u64 transfer_id) {
     std::remove(temp_path.c_str());
   }
 }
+
+bool ZFileTransporter::IsPathTraversal(const std::string& path) {
+  return ContainsPathTraversal(path);
+}
+
 }  // namespace tx::network

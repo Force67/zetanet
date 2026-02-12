@@ -10,4 +10,8 @@ Cool features:
 - Speed and Performance!!! This library is intended to handle high throughput with many concurrent players. I tested it with 64 players at once, connecting to a single server.
 - Inbuilt file transfer utils: You can send files such as assets for UGC directly over the library
 - Mixed transfer modes: Make important packets behave tcp-like while the rest is still UDP.
-- Fast encryption and compression support
+- Fast encryption and compression support.
+
+Originally this library was built on the "base" library of my equilibirium STL-replacement project. I've since added a std compat layer, so you can compile without it.
+
+This code is tested working on linux (posix) & windows.

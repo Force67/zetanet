@@ -31,21 +31,34 @@ class ZPeerMapping;
 
 class ZPacketQueue {
  public:
+  struct RateLimitConfig {
+    size_t max_packets_per_second = 1000;
+    size_t max_bytes_per_second = 10 * 1024 * 1024;
+    size_t burst_allowance = 2000;
+  };
+
   ZPacketQueue(ZSocket&, ZPeerMapping&, base::Atomic<bool>& stop_token);
 
   bool StartThreads();
   void StopThreads() {
-	stop_threads_.store(true);
-	const auto current_thread_id = std::this_thread::get_id();
-	if (outgoing_thread_.joinable() &&
-	    outgoing_thread_.get_id() != current_thread_id)
-	  outgoing_thread_.join();
-	if (incoming_thread_.joinable() &&
-	    incoming_thread_.get_id() != current_thread_id)
-	  incoming_thread_.join();
+  	stop_threads_.store(true);
+  	const auto current_thread_id = std::this_thread::get_id();
+  	if (outgoing_thread_.joinable() &&
+  	    outgoing_thread_.get_id() != current_thread_id)
+  	  outgoing_thread_.join();
+  	if (incoming_thread_.joinable() &&
+  	    incoming_thread_.get_id() != current_thread_id)
+  	  incoming_thread_.join();
+  }
+
+  void SetRateLimitConfig(const RateLimitConfig& config) {
+    rate_limit_config_ = config;
   }
 
   void Push(OutgoingPacket&& package_move_in) {
+    if (!CheckRateLimit(package_move_in.heap_data_size)) {
+      return;
+    }
     const PacketChannelType channel = package_move_in.channel;
     const size_t payload_bytes = package_move_in.heap_data_size;
     auto& queue = GetChannelQueue(package_move_in.channel);
@@ -57,6 +70,8 @@ class ZPacketQueue {
                                                        std::memory_order_relaxed);
     }
   }
+  
+  bool CheckRateLimit(size_t payload_bytes);
   bool Pop(PacketChannelType channel_type, IncomingPacket& p) {
     auto& queue = channel_incoming_queues_[channel_type];
     if (!queue.empty()) {
@@ -125,6 +140,12 @@ class ZPacketQueue {
   base::Atomic<size_t> awaiting_ack_bytes_{0};
 
   base::Atomic<bool>& stop_threads_;
+
+  RateLimitConfig rate_limit_config_;
+  base::Atomic<size_t> packets_sent_this_second_{0};
+  base::Atomic<size_t> bytes_sent_this_second_{0};
+  base::Atomic<size_t> burst_tokens_{0};
+  std::chrono::steady_clock::time_point rate_limit_window_start_;
 
   byte incomingbuffer[4096]{};
 };

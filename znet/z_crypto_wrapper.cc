@@ -10,6 +10,7 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
+#include <openssl/kdf.h>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -47,6 +48,17 @@ std::string BytesToHex(const byte* data, mem_size size) {
   }
   return out;
 }
+
+bool HmacSha256(const byte* key, mem_size key_size,
+                const byte* data, mem_size data_size,
+                std::array<byte, 32>& out_mac) {
+  unsigned int mac_len = 0;
+  if (!HMAC(EVP_sha256(), key, static_cast<int>(key_size),
+            data, data_size, out_mac.data(), &mac_len)) {
+    return false;
+  }
+  return mac_len == out_mac.size();
+}
 }  // namespace
 
 ZCryptoContext::ZCryptoContext() = default;
@@ -61,21 +73,77 @@ bool ZCryptoContext::InitializeKeyExchange() {
     return false;
   }
 
-  byte local_nonce[16]{};
+  byte local_nonce[32]{};
   if (RAND_bytes(local_nonce, sizeof(local_nonce)) != 1) {
     BASE_LOGE(kLogTag, "Failed to generate local key exchange nonce");
     return false;
   }
-  local_public_key_ = BytesToHex(local_nonce, sizeof(local_nonce));
+  local_nonce_ = BytesToHex(local_nonce, sizeof(local_nonce));
+  
+  byte local_challenge[16]{};
+  if (RAND_bytes(local_challenge, sizeof(local_challenge)) != 1) {
+    BASE_LOGE(kLogTag, "Failed to generate local challenge");
+    return false;
+  }
+  local_challenge_ = BytesToHex(local_challenge, sizeof(local_challenge));
+  
   return true;
 }
 
 std::string ZCryptoContext::GetPublicKey() const {
-  return local_public_key_;
+  return local_nonce_;
 }
 
-void ZCryptoContext::ProcessServerKey(const std::string& server_key) {
-  server_public_key_ = server_key;
+std::string ZCryptoContext::GetChallenge() const {
+  return local_challenge_;
+}
+
+void ZCryptoContext::ProcessServerKey(const std::string& server_key, const std::string& server_challenge) {
+  server_nonce_ = server_key;
+  server_challenge_ = server_challenge;
+}
+
+bool ZCryptoContext::VerifyServerResponse(const std::string& server_proof) {
+  if (server_nonce_.empty() || server_challenge_.empty() || local_nonce_.empty() || local_challenge_.empty()) {
+    BASE_LOGE(kLogTag, "Key exchange not completed");
+    return false;
+  }
+  
+  std::string verify_data = local_nonce_ + server_nonce_ + local_challenge_ + server_challenge_;
+  std::array<byte, 32> expected_proof{};
+  if (!HmacSha256(encryption_key_.data(), encryption_key_.size(),
+                  reinterpret_cast<const byte*>(verify_data.data()), verify_data.size(),
+                  expected_proof)) {
+    BASE_LOGE(kLogTag, "Failed to compute expected proof");
+    return false;
+  }
+  
+  std::string expected_proof_hex = BytesToHex(expected_proof.data(), expected_proof.size());
+  if (expected_proof_hex != server_proof) {
+    BASE_LOGE(kLogTag, "Server proof verification failed");
+    return false;
+  }
+  
+  authenticated_ = true;
+  return true;
+}
+
+std::string ZCryptoContext::GenerateClientProof() {
+  if (server_nonce_.empty() || server_challenge_.empty() || local_nonce_.empty() || local_challenge_.empty()) {
+    BASE_LOGE(kLogTag, "Key exchange not completed");
+    return "";
+  }
+  
+  std::string verify_data = server_nonce_ + local_nonce_ + server_challenge_ + local_challenge_;
+  std::array<byte, 32> proof{};
+  if (!HmacSha256(encryption_key_.data(), encryption_key_.size(),
+                  reinterpret_cast<const byte*>(verify_data.data()), verify_data.size(),
+                  proof)) {
+    BASE_LOGE(kLogTag, "Failed to generate client proof");
+    return "";
+  }
+  
+  return BytesToHex(proof.data(), proof.size());
 }
 
 bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
@@ -87,48 +155,67 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
     return false;
   }
 
-  byte nonce[kNonceSize]{};
+  byte nonce[12]{};
   if (RAND_bytes(nonce, sizeof(nonce)) != 1) {
     BASE_LOGE(kLogTag, "Failed to generate encryption nonce");
     return false;
   }
 
-  base::Vector<byte> ciphertext;
-  if (!EncryptAesCtr(plaintext.data(), plaintext.size(), nonce, ciphertext)) {
-    BASE_LOGE(kLogTag, "Payload encryption failed");
+  const size_t tag_size = 16;
+  const size_t ciphertext_size = plaintext.size();
+  
+  encrypted.resize(sizeof(nonce) + ciphertext_size + tag_size);
+  std::memcpy(encrypted.data(), nonce, sizeof(nonce));
+  
+  if (plaintext.empty()) {
+    encrypted.clear();
+    BASE_LOGE(kLogTag, "Empty plaintext");
     return false;
   }
-
-  base::Vector<byte> mac_input(kNonceSize + ciphertext.size() + aad.size());
-  std::memcpy(mac_input.data(), nonce, kNonceSize);
-  if (!ciphertext.empty()) {
-    std::memcpy(mac_input.data() + kNonceSize, ciphertext.data(),
-                ciphertext.size());
-  }
-  if (!aad.empty()) {
-    std::memcpy(mac_input.data() + kNonceSize + ciphertext.size(), aad.data(),
-                aad.size());
-  }
-
-  base::Vector<byte> auth_tag;
-  if (!ComputeHmac(mac_input.data(), mac_input.size(), auth_tag) ||
-      auth_tag.size() != kAuthTagSize) {
-    BASE_LOGE(kLogTag, "Failed to generate payload auth tag");
+  
+  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  if (!ctx) {
+    encrypted.clear();
     return false;
   }
-
-  encrypted.resize(kNonceSize + ciphertext.size() + kAuthTagSize);
-  std::memcpy(encrypted.data(), nonce, kNonceSize);
-  if (!ciphertext.empty()) {
-    std::memcpy(encrypted.data() + kNonceSize, ciphertext.data(),
-                ciphertext.size());
+  
+  int out_len = 0;
+  int final_len = 0;
+  
+  bool success = EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+                EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, sizeof(nonce), nullptr) == 1 &&
+                EVP_EncryptInit_ex(ctx, nullptr, nullptr, encryption_key_.data(), nonce) == 1;
+  
+  if (success && !aad.empty()) {
+    success = EVP_EncryptUpdate(ctx, nullptr, &out_len, aad.data(), static_cast<int>(aad.size())) == 1;
   }
-  std::memcpy(encrypted.data() + kNonceSize + ciphertext.size(), auth_tag.data(),
-              kAuthTagSize);
+  
+  if (success) {
+    success = EVP_EncryptUpdate(ctx, encrypted.data() + sizeof(nonce), &out_len, 
+                                plaintext.data(), static_cast<int>(plaintext.size())) == 1;
+  }
+  
+  if (success) {
+    success = EVP_EncryptFinal_ex(ctx, encrypted.data() + sizeof(nonce) + out_len, &final_len) == 1;
+  }
+  
+  if (success) {
+    success = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, tag_size, 
+                                  encrypted.data() + sizeof(nonce) + ciphertext_size) == 1;
+  }
+  
+  EVP_CIPHER_CTX_free(ctx);
+  
+  if (!success) {
+    encrypted.clear();
+    BASE_LOGE(kLogTag, "AES-GCM encryption failed");
+    return false;
+  }
+  
   return true;
 }
 
-bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted,
+bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
                                     const base::Span<byte>& aad,
                                     base::Vector<byte>& plaintext) {
   plaintext.clear();
@@ -137,43 +224,88 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted,
     return false;
   }
 
-  const mem_size minimum_size = kNonceSize + kAuthTagSize;
-  if (encrypted.size() < minimum_size) {
-    BASE_LOGE(kLogTag, "Encrypted payload is too short");
+  const size_t nonce_size = 12;
+  const size_t tag_size = 16;
+  
+  if (encrypted_data.size() < nonce_size + tag_size) {
+    BASE_LOGE(kLogTag, "Encrypted payload too short");
     return false;
   }
-
-  const byte* nonce = encrypted.data();
-  const mem_size ciphertext_size = encrypted.size() - minimum_size;
-  const byte* ciphertext = encrypted.data() + kNonceSize;
-  const byte* incoming_tag = ciphertext + ciphertext_size;
-
-  base::Vector<byte> mac_input(kNonceSize + ciphertext_size + aad.size());
-  std::memcpy(mac_input.data(), nonce, kNonceSize);
-  if (ciphertext_size > 0) {
-    std::memcpy(mac_input.data() + kNonceSize, ciphertext, ciphertext_size);
-  }
-  if (!aad.empty()) {
-    std::memcpy(mac_input.data() + kNonceSize + ciphertext_size, aad.data(),
-                aad.size());
-  }
-
-  base::Vector<byte> expected_tag;
-  if (!ComputeHmac(mac_input.data(), mac_input.size(), expected_tag) ||
-      expected_tag.size() != kAuthTagSize) {
-    BASE_LOGE(kLogTag, "Failed to verify payload auth tag");
+  
+  const byte* nonce = encrypted_data.data();
+  const size_t ciphertext_size = encrypted_data.size() - nonce_size - tag_size;
+  const byte* ciphertext = encrypted_data.data() + nonce_size;
+  const byte* tag = encrypted_data.data() + nonce_size + ciphertext_size;
+  
+  if (ciphertext_size == 0) {
+    BASE_LOGE(kLogTag, "Empty ciphertext");
     return false;
   }
-  if (CRYPTO_memcmp(expected_tag.data(), incoming_tag, kAuthTagSize) != 0) {
-    BASE_LOGE(kLogTag, "Payload authentication failed");
+  
+  plaintext.resize(ciphertext_size);
+  
+  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  if (!ctx) {
+    plaintext.clear();
     return false;
   }
-
-  if (!DecryptAesCtr(ciphertext, ciphertext_size, nonce, plaintext)) {
-    BASE_LOGE(kLogTag, "Payload decryption failed");
+  
+  bool success = EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+                EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, nonce_size, nullptr) == 1 &&
+                EVP_DecryptInit_ex(ctx, nullptr, nullptr, encryption_key_.data(), nonce) == 1;
+  
+  if (success && !aad.empty()) {
+    success = EVP_DecryptUpdate(ctx, nullptr, nullptr, aad.data(), static_cast<int>(aad.size())) == 1;
+  }
+  
+  int out_len = 0;
+  if (success) {
+    success = EVP_DecryptUpdate(ctx, plaintext.data(), &out_len, ciphertext, 
+                                static_cast<int>(ciphertext_size)) == 1;
+  }
+  
+  if (success) {
+    success = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, tag_size, 
+                                  const_cast<byte*>(tag)) == 1;
+  }
+  
+  int final_len = 0;
+  if (success) {
+    success = EVP_DecryptFinal_ex(ctx, plaintext.data() + out_len, &final_len) == 1;
+  }
+  
+  EVP_CIPHER_CTX_free(ctx);
+  
+  if (!success) {
+    plaintext.clear();
+    BASE_LOGE(kLogTag, "AES-GCM decryption/authentication failed");
     return false;
   }
+  
+  plaintext.resize(static_cast<size_t>(out_len + final_len));
   return true;
+}
+
+bool ZCryptoContext::IsAuthenticated() const {
+  return authenticated_;
+}
+
+std::string ZCryptoContext::GenerateServerProof() {
+  if (server_nonce_.empty() || server_challenge_.empty() || local_nonce_.empty() || local_challenge_.empty()) {
+    BASE_LOGE(kLogTag, "Key exchange not completed");
+    return "";
+  }
+  
+  std::string verify_data = server_nonce_ + local_nonce_ + server_challenge_ + local_challenge_;
+  std::array<byte, 32> proof{};
+  if (!HmacSha256(encryption_key_.data(), encryption_key_.size(),
+                  reinterpret_cast<const byte*>(verify_data.data()), verify_data.size(),
+                  proof)) {
+    BASE_LOGE(kLogTag, "Failed to generate server proof");
+    return "";
+  }
+  
+  return BytesToHex(proof.data(), proof.size());
 }
 
 bool ZCryptoContext::EnsureKeyMaterialReady() {
@@ -222,89 +354,6 @@ bool ZCryptoContext::DeriveKeyMaterial(const std::string& secret) {
   auth_seed[3] = 'h';
   std::memcpy(auth_seed.data() + 4, master_key.data(), master_key.size());
   return Sha256(auth_seed.data(), auth_seed.size(), authentication_key_);
-}
-
-bool ZCryptoContext::EncryptAesCtr(const byte* input,
-                                   mem_size input_size,
-                                   const byte* nonce,
-                                   base::Vector<byte>& output) {
-  output.clear();
-  output.resize(input_size);
-
-  byte iv[16]{};
-  std::memcpy(iv, nonce, kNonceSize);
-
-  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-  if (!ctx) {
-    return false;
-  }
-
-  int written = 0;
-  int finalized = 0;
-  bool success =
-      EVP_EncryptInit_ex(ctx, EVP_aes_256_ctr(), nullptr, encryption_key_.data(),
-                         iv) == 1 &&
-      EVP_EncryptUpdate(ctx, output.data(), &written, input,
-                        static_cast<int>(input_size)) == 1 &&
-      EVP_EncryptFinal_ex(ctx, output.data() + written, &finalized) == 1;
-  EVP_CIPHER_CTX_free(ctx);
-
-  if (!success || written < 0 || finalized < 0) {
-    output.clear();
-    return false;
-  }
-  output.resize(static_cast<mem_size>(written + finalized));
-  return true;
-}
-
-bool ZCryptoContext::DecryptAesCtr(const byte* input,
-                                   mem_size input_size,
-                                   const byte* nonce,
-                                   base::Vector<byte>& output) {
-  output.clear();
-  output.resize(input_size);
-
-  byte iv[16]{};
-  std::memcpy(iv, nonce, kNonceSize);
-
-  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-  if (!ctx) {
-    return false;
-  }
-
-  int written = 0;
-  int finalized = 0;
-  bool success =
-      EVP_DecryptInit_ex(ctx, EVP_aes_256_ctr(), nullptr, encryption_key_.data(),
-                         iv) == 1 &&
-      EVP_DecryptUpdate(ctx, output.data(), &written, input,
-                        static_cast<int>(input_size)) == 1 &&
-      EVP_DecryptFinal_ex(ctx, output.data() + written, &finalized) == 1;
-  EVP_CIPHER_CTX_free(ctx);
-
-  if (!success || written < 0 || finalized < 0) {
-    output.clear();
-    return false;
-  }
-  output.resize(static_cast<mem_size>(written + finalized));
-  return true;
-}
-
-bool ZCryptoContext::ComputeHmac(const byte* data,
-                                 mem_size size,
-                                 base::Vector<byte>& out_tag) const {
-  out_tag.clear();
-  out_tag.resize(EVP_MAX_MD_SIZE);
-
-  unsigned int tag_size = 0;
-  if (!HMAC(EVP_sha256(), authentication_key_.data(),
-            static_cast<int>(authentication_key_.size()), data, size,
-            out_tag.data(), &tag_size)) {
-    out_tag.clear();
-    return false;
-  }
-  out_tag.resize(tag_size);
-  return true;
 }
 
 }  // namespace tx::network
