@@ -3,6 +3,7 @@
 #pragma once
 
 #include <limits>
+#include <type_traits>
 
 #include "z_wire_le.h"
 
@@ -14,6 +15,18 @@
 #endif
 
 namespace tx::network {
+namespace detail {
+template <typename T, bool IsEnum = std::is_enum<T>::value>
+struct WireRawType {
+  using type = T;
+};
+
+template <typename T>
+struct WireRawType<T, true> {
+  using type = typename std::underlying_type<T>::type;
+};
+}  // namespace detail
+
 class PacketWriter {
  public:
   explicit PacketWriter(mem_size initial_size = 1024)
@@ -41,7 +54,26 @@ class PacketWriter {
   typename std::enable_if<std::is_scalar<T>::value, bool>::type Put(
       const T value) {
     EnsureCapacity(offset_ + sizeof(T));
-    std::memcpy(buffer_ + offset_, &value, sizeof(T));
+    if constexpr (std::is_integral<T>::value || std::is_enum<T>::value) {
+      using RawT = typename detail::WireRawType<T>::type;
+      using UnsignedRawT = typename std::make_unsigned<RawT>::type;
+      UnsignedRawT bits = 0;
+      const RawT raw_value = static_cast<RawT>(value);
+      std::memcpy(&bits, &raw_value, sizeof(bits));
+      if constexpr (sizeof(UnsignedRawT) == 1) {
+        buffer_[offset_] = static_cast<byte>(bits);
+      } else if constexpr (sizeof(UnsignedRawT) == 2) {
+        wire_le::StoreU16(buffer_ + offset_, static_cast<u16>(bits));
+      } else if constexpr (sizeof(UnsignedRawT) == 4) {
+        wire_le::StoreU32(buffer_ + offset_, static_cast<u32>(bits));
+      } else if constexpr (sizeof(UnsignedRawT) == 8) {
+        wire_le::StoreU64(buffer_ + offset_, static_cast<u64>(bits));
+      } else {
+        std::memcpy(buffer_ + offset_, &value, sizeof(T));
+      }
+    } else {
+      std::memcpy(buffer_ + offset_, &value, sizeof(T));
+    }
     offset_ += sizeof(T);
     return true;
   }
@@ -101,8 +133,29 @@ class PacketReader {
     if (offset_ + sizeof(T) > capacity_) {
       return false;
     }
-
-    std::memcpy(&value, buffer_ + offset_, sizeof(T));
+    if constexpr (std::is_integral<T>::value || std::is_enum<T>::value) {
+      using RawT = typename detail::WireRawType<T>::type;
+      using UnsignedRawT = typename std::make_unsigned<RawT>::type;
+      UnsignedRawT bits = 0;
+      if constexpr (sizeof(UnsignedRawT) == 1) {
+        bits = static_cast<UnsignedRawT>(buffer_[offset_]);
+      } else if constexpr (sizeof(UnsignedRawT) == 2) {
+        bits = static_cast<UnsignedRawT>(wire_le::LoadU16(buffer_ + offset_));
+      } else if constexpr (sizeof(UnsignedRawT) == 4) {
+        bits = static_cast<UnsignedRawT>(wire_le::LoadU32(buffer_ + offset_));
+      } else if constexpr (sizeof(UnsignedRawT) == 8) {
+        bits = static_cast<UnsignedRawT>(wire_le::LoadU64(buffer_ + offset_));
+      } else {
+        std::memcpy(&value, buffer_ + offset_, sizeof(T));
+        offset_ += sizeof(T);
+        return true;
+      }
+      RawT raw_value{};
+      std::memcpy(&raw_value, &bits, sizeof(raw_value));
+      value = static_cast<T>(raw_value);
+    } else {
+      std::memcpy(&value, buffer_ + offset_, sizeof(T));
+    }
     offset_ += sizeof(T);
     return true;
   }

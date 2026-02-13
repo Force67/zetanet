@@ -197,7 +197,15 @@ inline bool ReadU64(const byte* data,
 
 template <typename Input>
 inline bool ReadU16(const Input& input, mem_size& cursor, u16& out) {
+  return ReadU16(input.data(), input.size(), cursor, out);
+}
+
+template <typename Input>
 inline bool ReadU32(const Input& input, mem_size& cursor, u32& out) {
+  return ReadU32(input.data(), input.size(), cursor, out);
+}
+
+template <typename Input>
 inline bool ReadU64(const Input& input, mem_size& cursor, u64& out) {
   return ReadU64(input.data(), input.size(), cursor, out);
 }

@@ -22,6 +22,51 @@ static constexpr u32 kFnv1aOffset = 2166136261u;
 static constexpr u32 kFnv1aPrime = 16777619u;
 
 namespace {
+constexpr mem_size kPacketHeaderWireSize = sizeof(PacketHeader);
+constexpr mem_size kReliableHeaderWireSize = sizeof(ReliableHeader);
+constexpr mem_size kUncompressedHeaderWireSize = sizeof(UncompressedPayloadHeader);
+constexpr mem_size kCompressedHeaderWireSize = sizeof(CompressedPayloadHeader);
+
+constexpr mem_size kHeaderMagicOffset = 0;
+constexpr mem_size kHeaderChecksumOffset = 2;
+constexpr mem_size kHeaderTotalSizeOffset = 4;
+constexpr mem_size kHeaderVersionOffset = 8;
+constexpr mem_size kHeaderFlagsOffset = 9;
+constexpr mem_size kHeaderTypeOffset = 10;
+constexpr mem_size kHeaderAlignmentOffset = 12;
+constexpr mem_size kHeaderPaddingOffset = 14;
+constexpr mem_size kHeaderChannelOffset = 15;
+constexpr mem_size kHeaderTimestampOffset = 16;
+
+constexpr mem_size kReliableSequenceOffset = 0;
+constexpr mem_size kReliableAcknowledgementOffset = 4;
+
+constexpr mem_size kCompressedSizeOffset = 0;
+constexpr mem_size kCompressedOriginalSizeOffset = 4;
+constexpr mem_size kCompressedChecksumOffset = 8;
+constexpr mem_size kCompressedFlagsOffset = 12;
+
+constexpr mem_size kUncompressedChecksumOffset = 0;
+
+u8 PackHeaderFlags(const u8 reliable,
+                   const u8 encrypted,
+                   const u8 compressed,
+                   const u8 priority) {
+  return static_cast<u8>((reliable ? 1u : 0u) |
+                         ((encrypted ? 1u : 0u) << 1u) |
+                         ((compressed ? 1u : 0u) << 2u) |
+                         ((priority & 0x3u) << 4u));
+}
+
+void UnpackHeaderFlags(const u8 flags_byte, PacketHeader& out) {
+  out.flags = {.is_reliable = static_cast<u8>(flags_byte & 0x1u),
+               .is_encrypted = static_cast<u8>((flags_byte >> 1u) & 0x1u),
+               .is_compressed = static_cast<u8>((flags_byte >> 2u) & 0x1u),
+               .is_fragmented = static_cast<u8>((flags_byte >> 3u) & 0x1u),
+               .priority = static_cast<u8>((flags_byte >> 4u) & 0x3u),
+               .reserved = static_cast<u8>((flags_byte >> 6u) & 0x3u)};
+}
+
 u32 ComputeChecksum32(const byte* data, mem_size size) {
   u32 hash = kFnv1aOffset;
   for (mem_size i = 0; i < size; ++i) {
@@ -31,13 +76,12 @@ u32 ComputeChecksum32(const byte* data, mem_size size) {
   return hash;
 }
 
-u16 ComputePacketHeaderChecksum(const PacketHeader& header) {
-  PacketHeader header_copy = header;
-  header_copy.header_checksum = 0;
+u16 ComputePacketHeaderChecksum(const byte* header_wire) {
+  byte header_copy[kPacketHeaderWireSize];
+  std::memcpy(header_copy, header_wire, kPacketHeaderWireSize);
+  wire_le::StoreU16(header_copy + kHeaderChecksumOffset, 0);
   return static_cast<u16>(
-      ComputeChecksum32(reinterpret_cast<const byte*>(&header_copy),
-                        sizeof(PacketHeader)) &
-      0xFFFFu);
+      ComputeChecksum32(header_copy, kPacketHeaderWireSize) & 0xFFFFu);
 }
 }  // namespace
 
@@ -93,10 +137,10 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
   }
 
   u32 size_of_headers =
-      sizeof(PacketHeader) +
-      (packet_info.flags.reliable * sizeof(ReliableHeader)) +
-      (packet_info.flags.compressed * sizeof(CompressedPayloadHeader)) +
-      ((!packet_info.flags.compressed) * sizeof(UncompressedPayloadHeader));
+      static_cast<u32>(kPacketHeaderWireSize) +
+      (packet_info.flags.reliable ? static_cast<u32>(kReliableHeaderWireSize) : 0u) +
+      (packet_info.flags.compressed ? static_cast<u32>(kCompressedHeaderWireSize)
+                                    : static_cast<u32>(kUncompressedHeaderWireSize));
   if (size_of_headers > std::numeric_limits<u32>::max() - payload_size) {
     BASE_LOGE(kLogTag, "Packet size overflow");
     return {};
@@ -111,58 +155,44 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
     std::memcpy(packet.data() + size_of_headers, payload_source, payload_size);
   }
 
-  if (packet.size() < sizeof(PacketHeader)) {
+  if (packet.size() < kPacketHeaderWireSize) {
     BASE_LOGE(kLogTag, "Packet is smaller than header size");
     return {};
   }
 
-  PacketHeader header{};
-  std::memcpy(&header, packet.data(), sizeof(PacketHeader));
-
-  mem_size offset = sizeof(PacketHeader);
-  if (header.flags.is_reliable) {
-    offset += sizeof(ReliableHeader);
+  mem_size offset = kPacketHeaderWireSize;
+  if (packet_info.flags.reliable) {
+    offset += kReliableHeaderWireSize;
   }
 
-  if (header.flags.is_compressed) {
-    if (offset + sizeof(CompressedPayloadHeader) > packet.size()) {
+  if (packet_info.flags.compressed) {
+    if (offset + kCompressedHeaderWireSize > packet.size()) {
       BASE_LOGE(kLogTag, "Invalid packet header layout");
       return {};
     }
-    CompressedPayloadHeader compressed_header{};
-    std::memcpy(&compressed_header, packet.data() + offset,
-                sizeof(CompressedPayloadHeader));
-    offset += sizeof(CompressedPayloadHeader);
-
-    const mem_size wire_payload_size = packet.size() - offset;
-    compressed_header.checksum =
-        ComputeChecksum32(packet.data() + offset, wire_payload_size);
-    std::memcpy(packet.data() + sizeof(PacketHeader) +
-                    (header.flags.is_reliable ? sizeof(ReliableHeader) : 0),
-                &compressed_header, sizeof(CompressedPayloadHeader));
+    const mem_size payload_offset = offset + kCompressedHeaderWireSize;
+    const mem_size wire_payload_size = packet.size() - payload_offset;
+    const u32 payload_checksum =
+        ComputeChecksum32(packet.data() + payload_offset, wire_payload_size);
+    wire_le::StoreU32(packet.data() + offset + kCompressedChecksumOffset,
+                      payload_checksum);
   } else {
-    if (offset + sizeof(UncompressedPayloadHeader) > packet.size()) {
+    if (offset + kUncompressedHeaderWireSize > packet.size()) {
       BASE_LOGE(kLogTag, "Invalid packet header layout");
       return {};
     }
-
-    UncompressedPayloadHeader uncompressed_header{};
-    std::memcpy(&uncompressed_header, packet.data() + offset,
-                sizeof(UncompressedPayloadHeader));
-    offset += sizeof(UncompressedPayloadHeader);
-
-    const mem_size wire_payload_size = packet.size() - offset;
-    uncompressed_header.checksum =
-        ComputeChecksum32(packet.data() + offset, wire_payload_size);
-    std::memcpy(packet.data() + sizeof(PacketHeader) +
-                    (header.flags.is_reliable ? sizeof(ReliableHeader) : 0),
-                &uncompressed_header, sizeof(UncompressedPayloadHeader));
+    const mem_size payload_offset = offset + kUncompressedHeaderWireSize;
+    const mem_size wire_payload_size = packet.size() - payload_offset;
+    const u32 payload_checksum =
+        ComputeChecksum32(packet.data() + payload_offset, wire_payload_size);
+    wire_le::StoreU32(packet.data() + offset + kUncompressedChecksumOffset,
+                      payload_checksum);
   }
 
-  header.header_checksum = ComputePacketHeaderChecksum(header);
-  std::memcpy(packet.data(), &header, sizeof(PacketHeader));
+  const u16 header_checksum = ComputePacketHeaderChecksum(packet.data());
+  wire_le::StoreU16(packet.data() + kHeaderChecksumOffset, header_checksum);
 
-  if (header.total_packet_data_size != packet.size()) {
+  if (wire_le::LoadU32(packet.data() + kHeaderTotalSizeOffset) != packet.size()) {
     BASE_LOGE(kLogTag, "Packet size mismatch while finalizing");
     return {};
   }
@@ -175,75 +205,75 @@ void PacketBuilder::FillPacketHeader(const base::Span<byte> outgoing_data,
                                      u32 payload_size,
                                      u32 original_payload_size,
                                      u32 next_sequence_number) {
-  byte* readptr = const_cast<byte*>(outgoing_data.data());
-  PacketHeader header{};
-  // build core header.
-  header.magic = PacketHeader::kMagic;
-  header.header_checksum = 0;
-  header.total_packet_data_size = static_cast<u32>(outgoing_data.size());
-  header.version = 1;
-  header.flags = {.is_reliable = packet_info.flags.reliable,
-                  .is_encrypted = packet_info.flags.encrypted,
-                  .is_compressed = packet_info.flags.compressed,
-                  .is_fragmented = 0,
-                  .priority = packet_info.flags.priority,
-                  .reserved = 0};
-  header.type = static_cast<u16>(packet_info.type);
-  header.alignment = 0;
-  header.padding_number = 0;
-  header.channel_id = static_cast<u8>(packet_info.channel);
-  header.timestamp = static_cast<u32>(base::GetUnixTimeStamp() - kTimeshift);
-  std::memcpy(readptr, &header, sizeof(PacketHeader));
-  readptr += sizeof(PacketHeader);
+  byte* write_ptr = const_cast<byte*>(outgoing_data.data());
+  wire_le::StoreU16(write_ptr + kHeaderMagicOffset, PacketHeader::kMagic);
+  wire_le::StoreU16(write_ptr + kHeaderChecksumOffset, 0);
+  wire_le::StoreU32(write_ptr + kHeaderTotalSizeOffset,
+                    static_cast<u32>(outgoing_data.size()));
+  write_ptr[kHeaderVersionOffset] = kProtocolVersion;
+  write_ptr[kHeaderFlagsOffset] = PackHeaderFlags(
+      packet_info.flags.reliable, packet_info.flags.encrypted,
+      packet_info.flags.compressed, packet_info.flags.priority);
+  wire_le::StoreU16(write_ptr + kHeaderTypeOffset,
+                    static_cast<u16>(packet_info.type));
+  wire_le::StoreU16(write_ptr + kHeaderAlignmentOffset, 0);
+  write_ptr[kHeaderPaddingOffset] = 0;
+  write_ptr[kHeaderChannelOffset] = static_cast<u8>(packet_info.channel);
+  wire_le::StoreU32(
+      write_ptr + kHeaderTimestampOffset,
+      static_cast<u32>(base::GetUnixTimeStamp() - kTimeshift));
+  write_ptr += kPacketHeaderWireSize;
 
   if (packet_info.flags.reliable) {
-    ReliableHeader reliable_header{};
-    reliable_header.sequence_number = next_sequence_number;
-
-    if (packet_info.type == PacketType::Acknowledgement) {
-      reliable_header.acknowledgment_number =
-          static_cast<u32>(packet_info.payload.scalar);
-    } else {
-      reliable_header.acknowledgment_number = 0;
-    }
-    std::memcpy(readptr, &reliable_header, sizeof(ReliableHeader));
-    readptr += sizeof(ReliableHeader);
+    wire_le::StoreU32(write_ptr + kReliableSequenceOffset, next_sequence_number);
+    const u32 acknowledgement =
+        (packet_info.type == PacketType::Acknowledgement)
+            ? static_cast<u32>(packet_info.payload.scalar)
+            : 0;
+    wire_le::StoreU32(write_ptr + kReliableAcknowledgementOffset,
+                      acknowledgement);
+    write_ptr += kReliableHeaderWireSize;
   }
 
   if (packet_info.flags.compressed) {
-    CompressedPayloadHeader compressed_header{};
-    compressed_header.compressed_size = payload_size;
-    compressed_header.original_size = original_payload_size;
-    compressed_header.checksum = 0;
-    compressed_header.flags = {.is_little_endian = 1, .reserved = 0};
-    compressed_header.padding[0] = 0;
-    compressed_header.padding[1] = 0;
-    compressed_header.padding[2] = 0;
-    std::memcpy(readptr, &compressed_header, sizeof(CompressedPayloadHeader));
-    readptr += sizeof(CompressedPayloadHeader);
+    wire_le::StoreU32(write_ptr + kCompressedSizeOffset, payload_size);
+    wire_le::StoreU32(write_ptr + kCompressedOriginalSizeOffset,
+                      original_payload_size);
+    wire_le::StoreU32(write_ptr + kCompressedChecksumOffset, 0);
+    write_ptr[kCompressedFlagsOffset] = 1;  // payload metadata is LE.
+    write_ptr[kCompressedFlagsOffset + 1] = 0;
+    write_ptr[kCompressedFlagsOffset + 2] = 0;
+    write_ptr[kCompressedFlagsOffset + 3] = 0;
   } else {
-    UncompressedPayloadHeader uncompressed_header{};
-    uncompressed_header.checksum = 0;
-    std::memcpy(readptr, &uncompressed_header, sizeof(UncompressedPayloadHeader));
-    readptr += sizeof(UncompressedPayloadHeader);
+    wire_le::StoreU32(write_ptr + kUncompressedChecksumOffset, 0);
   }
 }
 
 bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
                                   mem_size in_size,
                                   IncomingPacket& out) {
-  if (!in_buffer || in_size < sizeof(PacketHeader)) {
+  if (!in_buffer || in_size < kPacketHeaderWireSize) {
     BASE_LOGE(kLogTag, "Invalid packet buffer");
     return false;
   }
 
   PacketHeader header{};
-  std::memcpy(&header, in_buffer, sizeof(PacketHeader));
+  header.magic = wire_le::LoadU16(in_buffer + kHeaderMagicOffset);
+  header.header_checksum = wire_le::LoadU16(in_buffer + kHeaderChecksumOffset);
+  header.total_packet_data_size =
+      wire_le::LoadU32(in_buffer + kHeaderTotalSizeOffset);
+  header.version = in_buffer[kHeaderVersionOffset];
+  UnpackHeaderFlags(in_buffer[kHeaderFlagsOffset], header);
+  header.type = wire_le::LoadU16(in_buffer + kHeaderTypeOffset);
+  header.alignment = wire_le::LoadU16(in_buffer + kHeaderAlignmentOffset);
+  header.padding_number = in_buffer[kHeaderPaddingOffset];
+  header.channel_id = in_buffer[kHeaderChannelOffset];
+  header.timestamp = wire_le::LoadU32(in_buffer + kHeaderTimestampOffset);
   if (!ValidatePacketHeader(header, in_size)) {
     BASE_LOGE(kLogTag, "Invalid packet header");
     return false;
   }
-  if (header.header_checksum != ComputePacketHeaderChecksum(header)) {
+  if (header.header_checksum != ComputePacketHeaderChecksum(in_buffer)) {
     BASE_LOGE(kLogTag, "Header checksum mismatch");
     return false;
   }
@@ -260,18 +290,18 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
     return false;
   }
 
-  mem_size offset = sizeof(PacketHeader);
+  mem_size offset = kPacketHeaderWireSize;
 
   if (header.flags.is_reliable) {
-    if (offset + sizeof(ReliableHeader) > in_size) {
+    if (offset + kReliableHeaderWireSize > in_size) {
       BASE_LOGE(kLogTag, "Truncated reliable header");
       return false;
     }
-    ReliableHeader reliable_header{};
-    std::memcpy(&reliable_header, in_buffer + offset, sizeof(ReliableHeader));
-    out.sequence_number = reliable_header.sequence_number;
-    out.acknowledgement_number = reliable_header.acknowledgment_number;
-    offset += sizeof(ReliableHeader);
+    out.sequence_number =
+        wire_le::LoadU32(in_buffer + offset + kReliableSequenceOffset);
+    out.acknowledgement_number =
+        wire_le::LoadU32(in_buffer + offset + kReliableAcknowledgementOffset);
+    offset += kReliableHeaderWireSize;
   } else {
     out.sequence_number = 0;
     out.acknowledgement_number = 0;
@@ -279,27 +309,31 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
 
   u32 expected_payload_checksum = 0;
   u32 original_size = 0;
+  u32 compressed_size = 0;
   if (header.flags.is_compressed) {
-    if (offset + sizeof(CompressedPayloadHeader) > in_size) {
+    if (offset + kCompressedHeaderWireSize > in_size) {
       BASE_LOGE(kLogTag, "Truncated compressed payload header");
       return false;
     }
-    CompressedPayloadHeader compressed_header{};
-    std::memcpy(&compressed_header, in_buffer + offset,
-                sizeof(CompressedPayloadHeader));
-    expected_payload_checksum = compressed_header.checksum;
-    original_size = compressed_header.original_size;
-    offset += sizeof(CompressedPayloadHeader);
+    const u8 compression_flags = in_buffer[offset + kCompressedFlagsOffset];
+    if ((compression_flags & ~0x1u) != 0) {
+      BASE_LOGE(kLogTag, "Invalid compressed payload flags");
+      return false;
+    }
+    compressed_size = wire_le::LoadU32(in_buffer + offset + kCompressedSizeOffset);
+    original_size =
+        wire_le::LoadU32(in_buffer + offset + kCompressedOriginalSizeOffset);
+    expected_payload_checksum =
+        wire_le::LoadU32(in_buffer + offset + kCompressedChecksumOffset);
+    offset += kCompressedHeaderWireSize;
   } else {
-    if (offset + sizeof(UncompressedPayloadHeader) > in_size) {
+    if (offset + kUncompressedHeaderWireSize > in_size) {
       BASE_LOGE(kLogTag, "Truncated uncompressed payload header");
       return false;
     }
-    UncompressedPayloadHeader uncompressed_header{};
-    std::memcpy(&uncompressed_header, in_buffer + offset,
-                sizeof(UncompressedPayloadHeader));
-    expected_payload_checksum = uncompressed_header.checksum;
-    offset += sizeof(UncompressedPayloadHeader);
+    expected_payload_checksum =
+        wire_le::LoadU32(in_buffer + offset + kUncompressedChecksumOffset);
+    offset += kUncompressedHeaderWireSize;
   }
   if (offset > in_size) {
     BASE_LOGE(kLogTag, "Invalid payload offset");
@@ -307,6 +341,10 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
   }
 
   mem_size payload_size = in_size - offset;
+  if (header.flags.is_compressed && compressed_size != payload_size) {
+    BASE_LOGE(kLogTag, "Compressed payload size mismatch");
+    return false;
+  }
   const u32 payload_checksum = ComputeChecksum32(in_buffer + offset, payload_size);
   if (payload_checksum != expected_payload_checksum) {
     BASE_LOGE(kLogTag, "Payload checksum mismatch");
