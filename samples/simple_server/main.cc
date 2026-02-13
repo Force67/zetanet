@@ -1,6 +1,7 @@
 #include <znet/z_server.h>
 #include <znet/z_packets.h>
 #include <znet/z_public_api.h>
+#include <znet/z_task_executor.h>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -21,6 +22,9 @@ struct Options {
   bool quiet_data = true;
   int rebroadcast_every_packets = 0;
   int rebroadcast_bytes = 64;
+  bool use_inline_dispatch_executor = false;
+  int dispatch_workers = 0;
+  int dispatch_max_queued = 0;
 };
 
 Options ParseArgs(int argc, char** argv) {
@@ -44,6 +48,17 @@ Options ParseArgs(int argc, char** argv) {
     } else if (std::strcmp(argv[i], "--rebroadcast-bytes") == 0 &&
                i + 1 < argc) {
       options.rebroadcast_bytes = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--dispatch-executor") == 0 &&
+               i + 1 < argc) {
+      const char* mode = argv[++i];
+      options.use_inline_dispatch_executor =
+          (std::strcmp(mode, "inline") == 0);
+    } else if (std::strcmp(argv[i], "--dispatch-workers") == 0 &&
+               i + 1 < argc) {
+      options.dispatch_workers = std::atoi(argv[++i]);
+    } else if (std::strcmp(argv[i], "--dispatch-max-queued") == 0 &&
+               i + 1 < argc) {
+      options.dispatch_max_queued = std::atoi(argv[++i]);
     }
   }
 
@@ -61,6 +76,12 @@ Options ParseArgs(int argc, char** argv) {
   }
   if (options.rebroadcast_bytes < 1) {
     options.rebroadcast_bytes = 1;
+  }
+  if (options.dispatch_workers < 0) {
+    options.dispatch_workers = 0;
+  }
+  if (options.dispatch_max_queued < 0) {
+    options.dispatch_max_queued = 0;
   }
 
   return options;
@@ -89,6 +110,14 @@ int main(int argc, char** argv) {
   std::cout << "Log handler set!" << std::endl;
 
   tx::network::ZServer server;
+  tx::network::ZInlineTaskExecutor inline_executor;
+  if (options.use_inline_dispatch_executor) {
+    server.SetTaskExecutor(&inline_executor);
+  } else {
+    server.SetBuiltInTaskExecutorConfig(
+        static_cast<mem_size>(options.dispatch_workers),
+        static_cast<mem_size>(options.dispatch_max_queued));
+  }
   if (!server.Begin(1337)) {
     std::cerr << "Failed to start server" << std::endl;
     return -1;

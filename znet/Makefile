@@ -89,6 +89,7 @@ GENERATED += $(OBJDIR)/z_public_api.o
 GENERATED += $(OBJDIR)/z_server.o
 GENERATED += $(OBJDIR)/z_socket.o
 GENERATED += $(OBJDIR)/z_socket_posix.o
+GENERATED += $(OBJDIR)/z_task_executor.o
 GENERATED += $(OBJDIR)/z_transport.o
 OBJECTS += $(OBJDIR)/z_client.o
 OBJECTS += $(OBJDIR)/z_crypto_wrapper.o
@@ -102,6 +103,7 @@ OBJECTS += $(OBJDIR)/z_public_api.o
 OBJECTS += $(OBJDIR)/z_server.o
 OBJECTS += $(OBJDIR)/z_socket.o
 OBJECTS += $(OBJDIR)/z_socket_posix.o
+OBJECTS += $(OBJDIR)/z_task_executor.o
 OBJECTS += $(OBJDIR)/z_transport.o
 
 # Rules
@@ -200,6 +202,9 @@ $(OBJDIR)/z_socket.o: z_socket.cc
 	@echo "$(notdir $<)"
 	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/z_socket_posix.o: z_socket_posix.cc
+	@echo "$(notdir $<)"
+	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/z_task_executor.o: z_task_executor.cc
 	@echo "$(notdir $<)"
 	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/z_transport.o: z_transport.cc

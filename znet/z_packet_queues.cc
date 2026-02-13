@@ -17,6 +17,9 @@ namespace tx::network {
 static constexpr char kLogTag[] = "z-packet-queue";
 static constexpr u32 kResendIntervalSeconds = 1;
 static constexpr u32 kDropAfterSeconds = 5;
+static constexpr mem_size kMaxDispatchPerChannelPerTick = 64;
+static constexpr auto kIdleSleepDuration = std::chrono::milliseconds(1);
+static constexpr auto kRetryScanInterval = std::chrono::milliseconds(10);
 namespace {
 void SaturatingSub(base::Atomic<mem_size>& value, mem_size delta) {
   mem_size current = value.load(std::memory_order_relaxed);
@@ -50,7 +53,24 @@ ZPacketQueue::ZPacketQueue(ZSocket& socket,
     packets_sent_this_second_.store(0, std::memory_order_relaxed);
     bytes_sent_this_second_.store(0, std::memory_order_relaxed);
     burst_tokens_.store(rate_limit_config_.burst_allowance, std::memory_order_relaxed);
+    pending_dispatch_tasks_.store(0, std::memory_order_relaxed);
     dispatcher_.SetAwaitingAckCounters(&awaiting_ack_packet_count_, &awaiting_ack_bytes_);
+}
+
+void ZPacketQueue::ConfigureDispatchExecutor(ITaskExecutor* executor,
+                                             mem_size built_in_worker_count,
+                                             mem_size built_in_max_queued_tasks) {
+  if (outgoing_thread_.joinable() || incoming_thread_.joinable()) {
+    BASE_LOGW(kLogTag, "Cannot reconfigure dispatch executor while threads are running");
+    return;
+  }
+
+  external_dispatch_executor_ = executor;
+  built_in_dispatch_worker_count_ = built_in_worker_count;
+  built_in_dispatch_max_queued_tasks_ = built_in_max_queued_tasks;
+
+  owned_dispatch_executor_.Reset();
+  dispatch_executor_ = external_dispatch_executor_;
 }
 
 bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
@@ -92,54 +112,124 @@ bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
 }
 
 bool ZPacketQueue::StartThreads() {
+  EnsureDispatchExecutor();
   stop_threads_.store(false);
   outgoing_thread_ = std::thread(&ZPacketQueue::ProcessOutgoingPackets, this);
   incoming_thread_ = std::thread(&ZPacketQueue::ProcessReceiving, this);
   return true;
 }
 
+void ZPacketQueue::StopThreads() {
+  stop_threads_.store(true);
+  const auto current_thread_id = std::this_thread::get_id();
+  if (outgoing_thread_.joinable() &&
+      outgoing_thread_.get_id() != current_thread_id) {
+    outgoing_thread_.join();
+  }
+  if (incoming_thread_.joinable() &&
+      incoming_thread_.get_id() != current_thread_id) {
+    incoming_thread_.join();
+  }
+  WaitForPendingDispatchTasks();
+}
+
+void ZPacketQueue::EnsureDispatchExecutor() {
+  if (dispatch_executor_) {
+    return;
+  }
+  ZThreadPoolTaskExecutor::Options options;
+  options.worker_count = built_in_dispatch_worker_count_;
+  options.max_queued_tasks = built_in_dispatch_max_queued_tasks_;
+  owned_dispatch_executor_ = base::MakeUnique<ZThreadPoolTaskExecutor>(options);
+  dispatch_executor_ = owned_dispatch_executor_.Get_UseOnlyIfYouKnowWhatYouareDoing();
+}
+
+void ZPacketQueue::WaitForPendingDispatchTasks() {
+  std::unique_lock<std::mutex> lock(dispatch_wait_mutex_);
+  dispatch_wait_cv_.wait(lock, [this] {
+    return pending_dispatch_tasks_.load(std::memory_order_acquire) == 0;
+  });
+}
+
+void ZPacketQueue::TrackDispatchTaskCompletion() {
+  const mem_size remaining =
+      pending_dispatch_tasks_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+  if (remaining == 0) {
+    dispatch_wait_cv_.notify_all();
+  }
+}
+
 void ZPacketQueue::ProcessOutgoingPackets() {
+  auto next_retry_scan = std::chrono::steady_clock::now();
   while (!stop_threads_.load()) {
-    ProcessChannel(PacketChannelType::Control);
-    ProcessChannel(PacketChannelType::Data);
+    mem_size dispatched = 0;
+    dispatched += ProcessChannel(PacketChannelType::Control,
+                                 kMaxDispatchPerChannelPerTick);
+    dispatched += ProcessChannel(PacketChannelType::Data,
+                                 kMaxDispatchPerChannelPerTick);
 
     // Periodically collect garbage from the ack tracking map
     if ((gc_counter_++ % 1000) == 0) {
       awaiting_ack_packets_.collect_garbage();
     }
 
-    auto now = static_cast<u32>(base::GetUnixTimeStamp());
-    for (auto& [seqNum, packet] : awaiting_ack_packets_) {
-      const u32 packet_age = now - packet.last_send_time;
-      // Drop packets that have exceeded retry budget to cap memory growth.
-      if (packet_age > kDropAfterSeconds) {
-        const mem_size dropped_bytes = packet.heap_data_size;
-        awaiting_ack_packets_.remove(seqNum);
-        SaturatingSub(awaiting_ack_packet_count_, 1);
-        SaturatingSub(awaiting_ack_bytes_, dropped_bytes);
-        continue;
+    const auto now_tp = std::chrono::steady_clock::now();
+    if (now_tp >= next_retry_scan) {
+      const auto now = static_cast<u32>(base::GetUnixTimeStamp());
+      for (auto& [seqNum, packet] : awaiting_ack_packets_) {
+        const u32 packet_age = now - packet.last_send_time;
+        // Drop packets that have exceeded retry budget to cap memory growth.
+        if (packet_age > kDropAfterSeconds) {
+          const mem_size dropped_bytes = packet.heap_data_size;
+          awaiting_ack_packets_.remove(seqNum);
+          SaturatingSub(awaiting_ack_packet_count_, 1);
+          SaturatingSub(awaiting_ack_bytes_, dropped_bytes);
+          continue;
+        }
+        if (packet_age > kResendIntervalSeconds) {
+          dispatcher_.DispatchPacket(crypto_context_, packet,
+                                     awaiting_ack_packets_);
+          packet.last_send_time = now;
+        }
       }
-      if (packet_age > kResendIntervalSeconds) {
-        dispatcher_.DispatchPacket(crypto_context_, packet,
-                                   awaiting_ack_packets_);
-        packet.last_send_time = now;
-      }
+      next_retry_scan = now_tp + kRetryScanInterval;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    if (dispatched == 0) {
+      std::this_thread::sleep_for(kIdleSleepDuration);
+    }
   }
 }
 
-void ZPacketQueue::ProcessChannel(PacketChannelType channel) {
+mem_size ZPacketQueue::ProcessChannel(PacketChannelType channel,
+                                      mem_size max_packets) {
+  mem_size processed = 0;
   auto& queue = channel_outgoing_queues_[channel];
-  if (!queue.empty()) {
+  while (processed < max_packets) {
     OutgoingPacket packet;
-    queue.dequeue(packet);
+    if (!queue.dequeue(packet)) {
+      break;
+    }
     const mem_size channel_index = static_cast<mem_size>(channel);
     if (channel_index < channel_outgoing_bytes_.size()) {
       SaturatingSub(channel_outgoing_bytes_[channel_index], packet.heap_data_size);
     }
-    dispatcher_.DispatchPacket(crypto_context_, packet, awaiting_ack_packets_);
+    pending_dispatch_tasks_.fetch_add(1, std::memory_order_acq_rel);
+    ITaskExecutor::Task task = [this, packet = std::move(packet)]() mutable {
+      try {
+        dispatcher_.DispatchPacket(crypto_context_, packet, awaiting_ack_packets_);
+      } catch (...) {
+      }
+      TrackDispatchTaskCompletion();
+    };
+    if (dispatch_executor_) {
+      dispatch_executor_->Submit(std::move(task));
+    } else {
+      task();
+    }
+    ++processed;
   }
+  return processed;
 }
 
 void ZPacketQueue::ProcessReceiving() {

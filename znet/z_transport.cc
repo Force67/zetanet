@@ -61,6 +61,10 @@ bool ZAsyncTransportLayer::Init(const InitOptions& options) {
     BASE_LOGI(kLogTag, "Compression support is disabled");
   }
 
+  packet_queue_.ConfigureDispatchExecutor(task_executor_override_,
+                                          built_in_executor_worker_count_,
+                                          built_in_executor_max_queued_tasks_);
+
   result = packet_queue_.StartThreads();
   if (!result) {
     BASE_LOGE(kLogTag, "Failed to start threads");
@@ -68,6 +72,26 @@ bool ZAsyncTransportLayer::Init(const InitOptions& options) {
     return false;
   }
   return true;
+}
+
+void ZAsyncTransportLayer::SetTaskExecutor(ITaskExecutor* executor) {
+  if (state_ != State::kDisconnected) {
+    BASE_LOGW(kLogTag, "SetTaskExecutor() must be called while disconnected");
+    return;
+  }
+  task_executor_override_ = executor;
+}
+
+void ZAsyncTransportLayer::SetBuiltInTaskExecutorConfig(
+    mem_size worker_count,
+    mem_size max_queued_tasks) {
+  if (state_ != State::kDisconnected) {
+    BASE_LOGW(kLogTag,
+              "SetBuiltInTaskExecutorConfig() must be called while disconnected");
+    return;
+  }
+  built_in_executor_worker_count_ = worker_count;
+  built_in_executor_max_queued_tasks_ = max_queued_tasks;
 }
 
 void ZAsyncTransportLayer::Deinit() {

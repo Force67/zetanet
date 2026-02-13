@@ -5,6 +5,7 @@
 #include <array>
 #include <map>
 #include <znet/z_packets.h>
+#include <znet/z_task_executor.h>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -23,6 +24,8 @@
 #include <znet/z_packet_priority_queue.h>
 
 #include <thread>
+#include <condition_variable>
+#include <mutex>
 
 namespace tx::network {
 
@@ -40,16 +43,11 @@ class ZPacketQueue {
   ZPacketQueue(ZSocket&, ZPeerMapping&, base::Atomic<bool>& stop_token);
 
   bool StartThreads();
-  void StopThreads() {
-  	stop_threads_.store(true);
-  	const auto current_thread_id = std::this_thread::get_id();
-  	if (outgoing_thread_.joinable() &&
-  	    outgoing_thread_.get_id() != current_thread_id)
-  	  outgoing_thread_.join();
-  	if (incoming_thread_.joinable() &&
-  	    incoming_thread_.get_id() != current_thread_id)
-  	  incoming_thread_.join();
-  }
+  void StopThreads();
+
+  void ConfigureDispatchExecutor(ITaskExecutor* executor,
+                                 mem_size built_in_worker_count = 0,
+                                 mem_size built_in_max_queued_tasks = 0);
 
   void SetRateLimitConfig(const RateLimitConfig& config) {
     rate_limit_config_ = config;
@@ -110,7 +108,10 @@ class ZPacketQueue {
 
  private:
   void ProcessOutgoingPackets();
-  void ProcessChannel(PacketChannelType);
+  mem_size ProcessChannel(PacketChannelType, mem_size max_packets);
+  void EnsureDispatchExecutor();
+  void WaitForPendingDispatchTasks();
+  void TrackDispatchTaskCompletion();
 
   void ProcessReceiving();
   void AddAwaitingAckPacket(ZPeerId return_address,
@@ -134,6 +135,16 @@ class ZPacketQueue {
 
   PacketDispatcher dispatcher_;
   PacketReceiver receiver_;
+
+  base::UniquePointer<ITaskExecutor> owned_dispatch_executor_;
+  ITaskExecutor* dispatch_executor_{nullptr};
+  ITaskExecutor* external_dispatch_executor_{nullptr};
+  mem_size built_in_dispatch_worker_count_{0};
+  mem_size built_in_dispatch_max_queued_tasks_{0};
+
+  base::Atomic<mem_size> pending_dispatch_tasks_{0};
+  std::mutex dispatch_wait_mutex_;
+  std::condition_variable dispatch_wait_cv_;
 
   base::Array<base::Atomic<mem_size>, 2> channel_outgoing_bytes_{};
   base::Atomic<mem_size> awaiting_ack_packet_count_{0};
