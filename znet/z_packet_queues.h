@@ -125,9 +125,9 @@ class ZPacketQueue {
   std::thread outgoing_thread_;
   std::thread incoming_thread_;
 
-  std::map<PacketChannelType, PriorityMPSCQueue<OutgoingPacket>>
+  base::Map<PacketChannelType, PriorityMPSCQueue<OutgoingPacket>>
       channel_outgoing_queues_;
-  std::map<PacketChannelType, PriorityMPSCQueue<IncomingPacket>>
+  base::Map<PacketChannelType, PriorityMPSCQueue<IncomingPacket>>
       channel_incoming_queues_;
 
   base::LockFreeOrderedHashMap<u32, OutgoingPacket> awaiting_ack_packets_;
@@ -135,7 +135,7 @@ class ZPacketQueue {
   PacketDispatcher dispatcher_;
   PacketReceiver receiver_;
 
-  std::array<base::Atomic<size_t>, 2> channel_outgoing_bytes_{};
+  base::Array<base::Atomic<size_t>, 2> channel_outgoing_bytes_{};
   base::Atomic<size_t> awaiting_ack_packet_count_{0};
   base::Atomic<size_t> awaiting_ack_bytes_{0};
 

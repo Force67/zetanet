@@ -22,7 +22,7 @@ namespace tx::network {
 namespace {
 constexpr char kLogTag[] = "z-crypto";
 
-bool Sha256(const byte* data, mem_size size, std::array<byte, 32>& out_hash) {
+bool Sha256(const byte* data, mem_size size, base::Array<byte, 32>& out_hash) {
   EVP_MD_CTX* ctx = EVP_MD_CTX_new();
   if (!ctx) {
     return false;
@@ -39,9 +39,9 @@ bool Sha256(const byte* data, mem_size size, std::array<byte, 32>& out_hash) {
   return success;
 }
 
-std::string BytesToHex(const byte* data, mem_size size) {
+base::String BytesToHex(const byte* data, mem_size size) {
   constexpr char kHex[] = "0123456789abcdef";
-  std::string out(size * 2, '0');
+  base::String out(size * 2, '0');
   for (mem_size i = 0; i < size; ++i) {
     out[2 * i] = kHex[(data[i] >> 4) & 0x0F];
     out[2 * i + 1] = kHex[data[i] & 0x0F];
@@ -51,7 +51,7 @@ std::string BytesToHex(const byte* data, mem_size size) {
 
 bool HmacSha256(const byte* key, mem_size key_size,
                 const byte* data, mem_size data_size,
-                std::array<byte, 32>& out_mac) {
+                base::Array<byte, 32>& out_mac) {
   unsigned int mac_len = 0;
   if (!HMAC(EVP_sha256(), key, static_cast<int>(key_size),
             data, data_size, out_mac.data(), &mac_len)) {
@@ -90,28 +90,28 @@ bool ZCryptoContext::InitializeKeyExchange() {
   return true;
 }
 
-std::string ZCryptoContext::GetPublicKey() const {
+base::String ZCryptoContext::GetPublicKey() const {
   return local_nonce_;
 }
 
-std::string ZCryptoContext::GetChallenge() const {
+base::String ZCryptoContext::GetChallenge() const {
   return local_challenge_;
 }
 
-void ZCryptoContext::ProcessServerKey(const std::string& server_key, const std::string& server_challenge) {
+void ZCryptoContext::ProcessServerKey(const base::String& server_key, const base::String& server_challenge) {
   server_nonce_ = server_key;
   server_challenge_ = server_challenge;
   DeriveSessionKeys();
 }
 
-bool ZCryptoContext::VerifyServerResponse(const std::string& server_proof) {
+bool ZCryptoContext::VerifyServerResponse(const base::String& server_proof) {
   if (server_nonce_.empty() || server_challenge_.empty() || local_nonce_.empty() || local_challenge_.empty()) {
     BASE_LOGE(kLogTag, "Key exchange not completed");
     return false;
   }
   
-  std::string verify_data = local_nonce_ + server_nonce_ + local_challenge_ + server_challenge_;
-  std::array<byte, 32> expected_proof{};
+  base::String verify_data = local_nonce_ + server_nonce_ + local_challenge_ + server_challenge_;
+  base::Array<byte, 32> expected_proof{};
   if (!HmacSha256(encryption_key_.data(), encryption_key_.size(),
                   reinterpret_cast<const byte*>(verify_data.data()), verify_data.size(),
                   expected_proof)) {
@@ -119,7 +119,7 @@ bool ZCryptoContext::VerifyServerResponse(const std::string& server_proof) {
     return false;
   }
   
-  std::string expected_proof_hex = BytesToHex(expected_proof.data(), expected_proof.size());
+  base::String expected_proof_hex = BytesToHex(expected_proof.data(), expected_proof.size());
   if (expected_proof_hex != server_proof) {
     BASE_LOGE(kLogTag, "Server proof verification failed");
     return false;
@@ -129,14 +129,14 @@ bool ZCryptoContext::VerifyServerResponse(const std::string& server_proof) {
   return true;
 }
 
-std::string ZCryptoContext::GenerateClientProof() {
+base::String ZCryptoContext::GenerateClientProof() {
   if (server_nonce_.empty() || server_challenge_.empty() || local_nonce_.empty() || local_challenge_.empty()) {
     BASE_LOGE(kLogTag, "Key exchange not completed");
     return "";
   }
   
-  std::string verify_data = server_nonce_ + local_nonce_ + server_challenge_ + local_challenge_;
-  std::array<byte, 32> proof{};
+  base::String verify_data = server_nonce_ + local_nonce_ + server_challenge_ + local_challenge_;
+  base::Array<byte, 32> proof{};
   if (!HmacSha256(encryption_key_.data(), encryption_key_.size(),
                   reinterpret_cast<const byte*>(verify_data.data()), verify_data.size(),
                   proof)) {
@@ -292,14 +292,14 @@ bool ZCryptoContext::IsAuthenticated() const {
   return authenticated_;
 }
 
-std::string ZCryptoContext::GenerateServerProof() {
+base::String ZCryptoContext::GenerateServerProof() {
   if (server_nonce_.empty() || server_challenge_.empty() || local_nonce_.empty() || local_challenge_.empty()) {
     BASE_LOGE(kLogTag, "Key exchange not completed");
     return "";
   }
   
-  std::string verify_data = server_nonce_ + local_nonce_ + server_challenge_ + local_challenge_;
-  std::array<byte, 32> proof{};
+  base::String verify_data = server_nonce_ + local_nonce_ + server_challenge_ + local_challenge_;
+  base::Array<byte, 32> proof{};
   if (!HmacSha256(encryption_key_.data(), encryption_key_.size(),
                   reinterpret_cast<const byte*>(verify_data.data()), verify_data.size(),
                   proof)) {
@@ -310,7 +310,7 @@ std::string ZCryptoContext::GenerateServerProof() {
   return BytesToHex(proof.data(), proof.size());
 }
 
-bool ZCryptoContext::VerifyClientProof(const std::string& client_proof) {
+bool ZCryptoContext::VerifyClientProof(const base::String& client_proof) {
   if (server_nonce_.empty() || local_nonce_.empty()) {
     BASE_LOGE(kLogTag, "Key exchange not completed");
     return false;
@@ -325,8 +325,8 @@ bool ZCryptoContext::VerifyClientProof(const std::string& client_proof) {
   //   client's server_challenge_ = our local_challenge_
   //   client's local_challenge_ = our server_challenge_
   // So expected: local_nonce_ + server_nonce_ + local_challenge_ + server_challenge_
-  std::string verify_data = local_nonce_ + server_nonce_ + local_challenge_ + server_challenge_;
-  std::array<byte, 32> expected_proof{};
+  base::String verify_data = local_nonce_ + server_nonce_ + local_challenge_ + server_challenge_;
+  base::Array<byte, 32> expected_proof{};
   if (!HmacSha256(encryption_key_.data(), encryption_key_.size(),
                   reinterpret_cast<const byte*>(verify_data.data()), verify_data.size(),
                   expected_proof)) {
@@ -334,7 +334,7 @@ bool ZCryptoContext::VerifyClientProof(const std::string& client_proof) {
     return false;
   }
 
-  std::string expected_proof_hex = BytesToHex(expected_proof.data(), expected_proof.size());
+  base::String expected_proof_hex = BytesToHex(expected_proof.data(), expected_proof.size());
   if (expected_proof_hex != client_proof) {
     BASE_LOGE(kLogTag, "Client proof verification failed");
     return false;
@@ -350,7 +350,7 @@ bool ZCryptoContext::DeriveSessionKeys() {
   }
 
   // Sort nonces lexicographically so both sides derive the same keys
-  std::string first_nonce, second_nonce;
+  base::String first_nonce, second_nonce;
   if (local_nonce_ < server_nonce_) {
     first_nonce = local_nonce_;
     second_nonce = server_nonce_;
@@ -360,20 +360,20 @@ bool ZCryptoContext::DeriveSessionKeys() {
   }
 
   // Derive new encryption key: SHA-256(current_enc_key + sorted_nonces)
-  std::string enc_input(reinterpret_cast<const char*>(encryption_key_.data()),
+  base::String enc_input(reinterpret_cast<const char*>(encryption_key_.data()),
                         encryption_key_.size());
   enc_input += first_nonce + second_nonce + "session-enc";
-  std::array<byte, 32> new_enc_key{};
+  base::Array<byte, 32> new_enc_key{};
   if (!Sha256(reinterpret_cast<const byte*>(enc_input.data()), enc_input.size(),
               new_enc_key)) {
     return false;
   }
 
   // Derive new authentication key: SHA-256(current_auth_key + sorted_nonces)
-  std::string auth_input(reinterpret_cast<const char*>(authentication_key_.data()),
+  base::String auth_input(reinterpret_cast<const char*>(authentication_key_.data()),
                          authentication_key_.size());
   auth_input += first_nonce + second_nonce + "session-auth";
-  std::array<byte, 32> new_auth_key{};
+  base::Array<byte, 32> new_auth_key{};
   if (!Sha256(reinterpret_cast<const byte*>(auth_input.data()), auth_input.size(),
               new_auth_key)) {
     return false;
@@ -394,7 +394,7 @@ bool ZCryptoContext::EnsureKeyMaterialReady() {
     BASE_LOGE(kLogTag, "ZNET_PSK is required when encryption is enabled");
     return false;
   }
-  const std::string secret(psk_env);
+  const base::String secret(psk_env);
   if (secret.size() < 16) {
     BASE_LOGE(kLogTag, "ZNET_PSK must be at least 16 characters");
     return false;
@@ -407,8 +407,8 @@ bool ZCryptoContext::EnsureKeyMaterialReady() {
   return true;
 }
 
-bool ZCryptoContext::DeriveKeyMaterial(const std::string& secret) {
-  std::array<byte, 32> master_key{};
+bool ZCryptoContext::DeriveKeyMaterial(const base::String& secret) {
+  base::Array<byte, 32> master_key{};
   if (!Sha256(reinterpret_cast<const byte*>(secret.data()), secret.size(),
               master_key)) {
     return false;

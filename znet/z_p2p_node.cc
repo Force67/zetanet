@@ -2,6 +2,8 @@
 // For licensing information see LICENSE at the root of this distribution.
 #include "z_p2p_node.h"
 
+#include <znet/z_stl_compat.h>
+
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -52,8 +54,8 @@ bool AddressFromString(const base::StringRef ip, u16 port, ZSocket::Address& out
   std::memcpy(out.ip, ip.data(), ip.size());
   out.port = port;
   // Detect address family from IP string
-  std::string ip_str(ip.data(), ip.size());
-  out.address_family = (ip_str.find(':') != std::string::npos) ? AF_INET6 : AF_INET;
+  base::String ip_str(ip.data(), ip.size());
+  out.address_family = (ip_str.find(':') != base::String::npos) ? AF_INET6 : AF_INET;
   return true;
 }
 }  // namespace
@@ -94,7 +96,7 @@ bool ZP2PNode::Update() {
 }
 
 bool ZP2PNode::Poll(PacketChannelType channel, IncomingPacket& packet) {
-  std::lock_guard<std::mutex> lock(incoming_mutex_);
+  std::lock_guard<base::Mutex> lock(incoming_mutex_);
   auto& queue =
       channel == PacketChannelType::Control ? incoming_control_ : incoming_data_;
   if (queue.empty()) {
@@ -105,7 +107,7 @@ bool ZP2PNode::Poll(PacketChannelType channel, IncomingPacket& packet) {
   return true;
 }
 
-void ZP2PNode::SendMessage(ZPeerId id, const std::string& data) {
+void ZP2PNode::SendMessage(ZPeerId id, const base::String& data) {
   if (state_ != State::kConnected) {
     return;
   }
@@ -134,7 +136,7 @@ void ZP2PNode::BecomeHost() {
 bool ZP2PNode::InitAsHost(u16 port) {
   Deinit();
   {
-    std::lock_guard<std::mutex> lock(incoming_mutex_);
+    std::lock_guard<base::Mutex> lock(incoming_mutex_);
     while (!incoming_control_.empty()) {
       incoming_control_.pop();
     }
@@ -172,7 +174,7 @@ bool ZP2PNode::InitAsClient(const base::StringRef host_ip,
                             u16 local_port) {
   Deinit();
   {
-    std::lock_guard<std::mutex> lock(incoming_mutex_);
+    std::lock_guard<base::Mutex> lock(incoming_mutex_);
     while (!incoming_control_.empty()) {
       incoming_control_.pop();
     }
@@ -496,7 +498,7 @@ bool ZP2PNode::IsSelfAddress(const ZSocket::Address& address, u16 self_port) {
 }
 
 void ZP2PNode::QueueIncoming(const IncomingPacket& packet) {
-  std::lock_guard<std::mutex> lock(incoming_mutex_);
+  std::lock_guard<base::Mutex> lock(incoming_mutex_);
   auto& queue = packet.channel == PacketChannelType::Control ? incoming_control_
                                                               : incoming_data_;
   queue.push(packet);

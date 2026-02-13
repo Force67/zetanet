@@ -21,7 +21,7 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
   bool Begin(u16 port);
 
   bool Update();
-  void SendMessage(ZPeerId id, const std::string& data);
+  void SendMessage(ZPeerId id, const base::String& data);
 
   // Fetches the next packet from the queue
   bool Poll(PacketChannelType t, IncomingPacket& p) {

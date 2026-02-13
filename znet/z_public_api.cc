@@ -37,7 +37,7 @@ ZNET_API bool tx::network::ZGetPacketAllocatorStats(
   }
 
   const PacketBufferPool::Stats global = PacketBufferPool::Instance().GetStats();
-  std::array<PacketBufferPool::ClassStats, PacketBufferPool::kClassCount>
+  base::Array<PacketBufferPool::ClassStats, PacketBufferPool::kClassCount>
       class_stats{};
   PacketBufferPool::Instance().GetClassStats(class_stats);
 

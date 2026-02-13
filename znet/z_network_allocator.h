@@ -2,13 +2,12 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <array>
-#include <atomic>
-#include <cstddef>
-#include <cstdint>
-#include <mutex>
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
+#include <base/containers/vector.h>
 #include <new>
-#include <vector>
+#endif
 
 namespace tx::network {
 class PacketBufferPool {
@@ -58,7 +57,7 @@ class PacketBufferPool {
     bucket.total_requests.fetch_add(1, std::memory_order_relaxed);
 
     {
-      std::lock_guard<std::mutex> lock(bucket.mutex);
+      std::lock_guard<base::Mutex> lock(bucket.mutex);
       if (!bucket.free_list.empty()) {
         pool_hits_.fetch_add(1, std::memory_order_relaxed);
         bucket.hits.fetch_add(1, std::memory_order_relaxed);
@@ -103,7 +102,7 @@ class PacketBufferPool {
         bucket.target_cached_blocks.load(std::memory_order_relaxed);
     bool keep = false;
     {
-      std::lock_guard<std::mutex> lock(bucket.mutex);
+      std::lock_guard<base::Mutex> lock(bucket.mutex);
       if (bucket.free_list.size() < target) {
         bucket.free_list.push_back(header);
         keep = true;
@@ -132,7 +131,7 @@ class PacketBufferPool {
     return stats;
   }
 
-  void GetClassStats(std::array<ClassStats, kClassCount>& out) const {
+  void GetClassStats(base::Array<ClassStats, kClassCount>& out) const {
     for (size_t i = 0; i < kClassCount; ++i) {
       const ClassBucket& bucket = classes_[i];
       out[i].block_size = bucket.block_size;
@@ -142,7 +141,7 @@ class PacketBufferPool {
           bucket.target_cached_blocks.load(std::memory_order_relaxed);
       out[i].ewma_demand = bucket.ewma_demand.load(std::memory_order_relaxed);
       {
-        std::lock_guard<std::mutex> lock(bucket.mutex);
+        std::lock_guard<base::Mutex> lock(bucket.mutex);
         out[i].cached_free_blocks = bucket.free_list.size();
       }
     }
@@ -180,7 +179,7 @@ class PacketBufferPool {
 
  private:
   struct alignas(std::max_align_t) BlockHeader {
-    std::atomic<std::uint32_t> ref_count;
+    base::Atomic<std::uint32_t> ref_count;
     std::uint32_t requested_size;
     std::uint32_t size_class_index;
     bool pooled;
@@ -190,14 +189,14 @@ class PacketBufferPool {
 
   struct ClassBucket {
     size_t block_size{0};
-    std::atomic<size_t> requests{0};
-    std::atomic<size_t> hits{0};
-    std::atomic<size_t> total_requests{0};
-    std::atomic<size_t> total_hits{0};
-    std::atomic<double> ewma_demand{0.0};
-    std::atomic<size_t> target_cached_blocks{kMinTargetPerClass};
-    std::vector<BlockHeader*> free_list;
-    mutable std::mutex mutex;
+    base::Atomic<size_t> requests{0};
+    base::Atomic<size_t> hits{0};
+    base::Atomic<size_t> total_requests{0};
+    base::Atomic<size_t> total_hits{0};
+    base::Atomic<double> ewma_demand{0.0};
+    base::Atomic<size_t> target_cached_blocks{kMinTargetPerClass};
+    base::Vector<BlockHeader*> free_list;
+    mutable base::Mutex mutex;
   };
 
   static constexpr std::uint32_t kInvalidClassIndex = 0xFFFFFFFFu;
@@ -214,7 +213,7 @@ class PacketBufferPool {
 
   ~PacketBufferPool() {
     for (ClassBucket& bucket : classes_) {
-      std::lock_guard<std::mutex> lock(bucket.mutex);
+      std::lock_guard<base::Mutex> lock(bucket.mutex);
       for (BlockHeader* header : bucket.free_list) {
         ::operator delete(header);
       }
@@ -313,9 +312,9 @@ class PacketBufferPool {
 
   void TrimClassCache(size_t class_index, size_t target) {
     ClassBucket& bucket = classes_[class_index];
-    std::vector<BlockHeader*> overflow;
+    base::Vector<BlockHeader*> overflow;
     {
-      std::lock_guard<std::mutex> lock(bucket.mutex);
+      std::lock_guard<base::Mutex> lock(bucket.mutex);
       if (bucket.free_list.size() <= target) {
         return;
       }
@@ -330,11 +329,11 @@ class PacketBufferPool {
     }
   }
 
-  std::array<ClassBucket, kClassCount> classes_{};
-  mutable std::mutex retune_mutex_;
-  std::atomic<size_t> total_requests_{0};
-  std::atomic<size_t> pool_hits_{0};
-  std::atomic<size_t> fallback_allocations_{0};
+  base::Array<ClassBucket, kClassCount> classes_{};
+  mutable base::Mutex retune_mutex_;
+  base::Atomic<size_t> total_requests_{0};
+  base::Atomic<size_t> pool_hits_{0};
+  base::Atomic<size_t> fallback_allocations_{0};
 };
 
 class PacketAllocator {

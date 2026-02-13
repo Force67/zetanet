@@ -3,6 +3,7 @@
 #pragma once
 
 #include <znet/z_abi.h>
+#include <znet/z_stl_compat.h>
 #include <znet/z_transport.h>
 
 #include <mutex>
@@ -20,7 +21,7 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
 
   bool Update();
   bool Poll(PacketChannelType channel, IncomingPacket& packet);
-  void SendMessage(ZPeerId id, const std::string& data);
+  void SendMessage(ZPeerId id, const base::String& data);
 
   void BecomeHost();
   Type type() const { return type_; }
@@ -64,11 +65,11 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
 
   Type type_{Type::Host};
   u16 local_port_{0};
-  std::string advertised_ip_{"127.0.0.1"};
+  base::String advertised_ip_{"127.0.0.1"};
   ZSocket::Address host_endpoint_{};
 
-  std::mutex incoming_mutex_;
-  std::queue<IncomingPacket> incoming_control_;
-  std::queue<IncomingPacket> incoming_data_;
+  base::Mutex incoming_mutex_;
+  base::Queue<IncomingPacket> incoming_control_;
+  base::Queue<IncomingPacket> incoming_data_;
 };
 }  // namespace tx::network

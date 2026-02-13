@@ -106,7 +106,7 @@ bool ZSocket::CreateClient(const base::StringRef ip,
   }
 
   memset(&server_, 0, sizeof(server_));
-  std::string ip_str(ip.data(), ip.size());
+  base::String ip_str(ip.data(), ip.size());
 
   if (ipv6) {
     auto* addr6 = reinterpret_cast<sockaddr_in6*>(&server_);

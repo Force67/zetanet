@@ -65,7 +65,7 @@ bool ZServer::Update() {
   return true;
 }
 
-void ZServer::SendMessage(ZPeerId id, const std::string& data) {
+void ZServer::SendMessage(ZPeerId id, const base::String& data) {
   if (crypto_context_ && !crypto_context_->IsAuthenticated()) {
     BASE_LOGW(kLogTag, "Cannot send message: not authenticated");
     return;
@@ -123,7 +123,7 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
         }
 
         // Read client challenge
-        std::string client_challenge;
+        base::String client_challenge;
         if (request.challenge_len > 0) {
           base::Vector<byte> temp_challenge;
           if (!reader.ReadList(temp_challenge)) {
@@ -135,7 +135,7 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
         }
 
         // Process client's key material
-        std::string client_nonce(reinterpret_cast<const char*>(client_key.data()),
+        base::String client_nonce(reinterpret_cast<const char*>(client_key.data()),
                                  client_key.size());
         crypto_context_->ProcessServerKey(client_nonce, client_challenge);
       }
@@ -159,7 +159,7 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
         BASE_LOGE(kLogTag, "Malformed ClientAuthProof: missing proof");
         return;
       }
-      std::string proof(reinterpret_cast<const char*>(proof_data.data()),
+      base::String proof(reinterpret_cast<const char*>(proof_data.data()),
                         proof_data.size());
       if (!crypto_context_->VerifyClientProof(proof)) {
         BASE_LOGE(kLogTag, "Client authentication failed!");
@@ -181,8 +181,8 @@ void ZServer::SendServerHello(ZPeerId dest) {
 
   base::Vector<byte> public_key_data;
   u8 pub_key_list_len = 0;
-  std::string server_challenge;
-  std::string server_proof;
+  base::String server_challenge;
+  base::String server_proof;
   
   if (crypto_context_) {
     bool foundAesCBC = false;

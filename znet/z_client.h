@@ -21,7 +21,7 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
   bool Connect(const base::StringRef address, u16 port);
   void Disconnect();
   void Update();
-  void SendMessage(const ZPeerId, const std::string& data);
+  void SendMessage(const ZPeerId, const base::String& data);
 
   // Fetches the next packet from the queue
   inline bool Poll(PacketChannelType t, IncomingPacket& p) {
@@ -39,6 +39,6 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
   void ProcessSystemMessage(const IncomingPacket& p);
 
   void SendClientHello();
-  void SendClientAuthProof(const std::string& proof);
+  void SendClientAuthProof(const base::String& proof);
 };
 }  // namespace tx::network

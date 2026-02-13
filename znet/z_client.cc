@@ -65,7 +65,7 @@ void ZClient::Update() {
       break;
   }
 }
-void ZClient::SendMessage(const ZPeerId id, const std::string& data) {
+void ZClient::SendMessage(const ZPeerId id, const base::String& data) {
   if (crypto_context_ && !crypto_context_->IsAuthenticated()) {
     BASE_LOGW(kLogTag, "Cannot send message: not authenticated");
     return;
@@ -122,7 +122,7 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
           return;
         }
         
-        std::string server_challenge;
+        base::String server_challenge;
         if (response.challenge_len > 0) {
           base::Vector<byte> temp_challenge;
           if (!reader.ReadList(temp_challenge)) {
@@ -133,7 +133,7 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
                                   temp_challenge.size());
         }
         
-        std::string server_proof;
+        base::String server_proof;
         if (response.proof_len > 0) {
           base::Vector<byte> temp_proof;
           if (!reader.ReadList(temp_proof)) {
@@ -146,7 +146,7 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
 
         if (crypto_context_) {
           crypto_context_->ProcessServerKey(
-              std::string((const char*)key.data(), key.size()),
+              base::String((const char*)key.data(), key.size()),
               server_challenge);
           
           if (!server_proof.empty()) {
@@ -158,7 +158,7 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
             BASE_LOGI(kLogTag, "Server authenticated successfully");
           }
           
-          std::string client_proof = crypto_context_->GenerateClientProof();
+          base::String client_proof = crypto_context_->GenerateClientProof();
           if (!client_proof.empty()) {
             SendClientAuthProof(client_proof);
           }
@@ -178,8 +178,8 @@ void ZClient::SendClientHello() {
   constexpr CompressionAlgorithm compression_algorithms[] = {
       CompressionAlgorithm::LZ4};
 
-  std::string client_public_key;
-  std::string client_challenge;
+  base::String client_public_key;
+  base::String client_challenge;
   u8 pub_key_list_len = 0;
   if (crypto_context_) {
     client_public_key = crypto_context_->GetPublicKey();
@@ -225,7 +225,7 @@ void ZClient::SendClientHello() {
   Push(std::move(o));
 }
 
-void ZClient::SendClientAuthProof(const std::string& proof) {
+void ZClient::SendClientAuthProof(const base::String& proof) {
   system_commands::ClientAuthProof request{
       .proof_len = static_cast<u8>(proof.size())};
   PacketWriter writer;

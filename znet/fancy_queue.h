@@ -3,16 +3,15 @@
 // --- MODIFIED for lock-freedom AND ordering (with caveats) ---
 #pragma once
 
-#include <atomic>
-#include <functional>  // For ::std::hash
-#include <utility>     // For ::std::pair, ::std::move
-#include <vector>      // To track nodes for deletion
-#include <mutex>       // For protecting the allNodes list during allocation/destruction
-#include <stdexcept>   // For exceptions
-#include <thread>      // For ::std::this_thread::yield (optional, for busy-wait)
-
-// When ZNET_USE_STL is defined, z_stl_compat.h defines types in namespace base
-// which can shadow ::std:: within this namespace. Use :::std:: to avoid ambiguity.
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
+#else
+#include <base/containers/vector.h>
+#include <functional>
+#include <utility>
+#include <stdexcept>
+#include <thread>
+#endif
 
 namespace base {
 
@@ -25,9 +24,9 @@ class LockFreeOrderedHashMap {
  private:
   struct Node {
     ::std::pair<Key, Value> keyValue;
-    ::std::atomic<Node*> bucketNext;  // Next node in the same hash bucket
-    ::std::atomic<Node*> orderNext;   // Next node in global insertion order
-    ::std::atomic<bool> is_deleted;   // Primary flag for logical deletion
+    base::Atomic<Node*> bucketNext;  // Next node in the same hash bucket
+    base::Atomic<Node*> orderNext;   // Next node in global insertion order
+    base::Atomic<bool> is_deleted;   // Primary flag for logical deletion
 
     Node(const Key& k, Value&& v)
         : keyValue(::std::make_pair(k, ::std::move(v))),
@@ -42,23 +41,23 @@ class LockFreeOrderedHashMap {
           is_deleted(false) {}
   };
 
-  ::std::atomic<Node*>* buckets;
+  base::Atomic<Node*>* buckets;
   size_t bucketCount;
-  ::std::hash<Key> keyHasher;
+  std::hash<Key> keyHasher;
 
-  ::std::atomic<Node*> orderHead;
-  ::std::atomic<Node*> orderTail;
+  base::Atomic<Node*> orderHead;
+  base::Atomic<Node*> orderTail;
 
   // --- Memory Management (Placeholder - Leaks during operation) ---
-  ::std::mutex allNodesMutex;  // Protects allNodes vector ONLY.
-  ::std::vector<Node*> allNodes;
+  base::Mutex allNodesMutex;  // Protects allNodes vector ONLY.
+  base::Vector<Node*> allNodes;
   // --- Requires proper SMR scheme for production ---
 
   // Finds a node *only* via hash bucket chain. Does NOT check is_deleted.
   // Returns the node if key matches, nullptr otherwise.
   // Sets 'prev_bucket_next_ptr' to the atomic 'bucketNext' of the predecessor node,
   // or to the bucket head atomic itself if the target node is the head.
-  Node* find_in_bucket(const Key& key, ::std::atomic<Node*>*& prev_bucket_next_ptr) const {
+  Node* find_in_bucket(const Key& key, base::Atomic<Node*>*& prev_bucket_next_ptr) const {
     size_t index = hash_key(key);
     prev_bucket_next_ptr = &buckets[index];
     Node* curr = buckets[index].load(::std::memory_order_acquire);
@@ -81,7 +80,7 @@ class LockFreeOrderedHashMap {
 
   // Tries to physically unlink a node known to be logically deleted
   // from its bucket chain. Helper function. Optional "helping" mechanism.
-  void try_unlink_bucket(Node* node, ::std::atomic<Node*>* prev_bucket_next_ptr) {
+  void try_unlink_bucket(Node* node, base::Atomic<Node*>* prev_bucket_next_ptr) {
     // This check is needed because prev_bucket_next_ptr is determined *before*
     // the node is marked deleted. We need to ensure the predecessor hasn't changed.
     // A simpler way might be to re-find the node and predecessor after marking,
@@ -250,7 +249,7 @@ class LockFreeOrderedHashMap {
   // --- Constructor / Destructor ---
   explicit LockFreeOrderedHashMap(size_t count)
       : bucketCount(count > 0 ? count : 1), orderHead(nullptr), orderTail(nullptr) {
-    buckets = new ::std::atomic<Node*>[bucketCount];
+    buckets = new base::Atomic<Node*>[bucketCount];
     for (size_t i = 0; i < bucketCount; ++i) {
       buckets[i].store(nullptr, ::std::memory_order_relaxed);
     }
@@ -259,7 +258,7 @@ class LockFreeOrderedHashMap {
   ~LockFreeOrderedHashMap() {
     // --- Proper Cleanup ---
     // Assumes no other threads are operating. Requires SMR synchronization otherwise.
-    // ::std::lock_guard<::std::mutex> lock(allNodesMutex); // Protects vector access
+    // std::lock_guard<base::Mutex> lock(allNodesMutex); // Protects vector access
     for (Node* node : allNodes) {
       delete node;
     }
@@ -291,7 +290,7 @@ class LockFreeOrderedHashMap {
   bool insert_internal(K&& key, V&& value) {
     Node* newNode = nullptr;  // Allocate later
     size_t index = hash_key(key);
-    ::std::atomic<Node*>* prev_bucket_next_ptr = nullptr;
+    base::Atomic<Node*>* prev_bucket_next_ptr = nullptr;
 
     // --- Phase 1: Insert into Hash Bucket ---
     while (true) {
@@ -316,7 +315,7 @@ class LockFreeOrderedHashMap {
         newNode = new Node(::std::forward<K>(key), ::std::forward<V>(value));
         // --- Track node for eventual deletion ---
         {  // Minimal lock scope
-          ::std::lock_guard<::std::mutex> lock(allNodesMutex);
+          std::lock_guard<base::Mutex> lock(allNodesMutex);
           allNodes.push_back(newNode);
         }
       }
@@ -402,7 +401,7 @@ class LockFreeOrderedHashMap {
  public:
   // Finds the key, copies the value if found and not deleted.
   bool find(const Key& key, Value& value) const {
-    ::std::atomic<Node*>* ignore_prev = nullptr;
+    base::Atomic<Node*>* ignore_prev = nullptr;
     Node* node = find_in_bucket(key, ignore_prev);
 
     if (node && !node->is_deleted.load(::std::memory_order_acquire)) {
@@ -418,7 +417,7 @@ class LockFreeOrderedHashMap {
 
   template <typename Callback>
   bool with_value(const Key& key, Callback&& callback) const {
-    ::std::atomic<Node*>* ignore_prev = nullptr;
+    base::Atomic<Node*>* ignore_prev = nullptr;
     Node* node = find_in_bucket(key, ignore_prev);
 
     if (node && !node->is_deleted.load(::std::memory_order_acquire)) {
@@ -431,7 +430,7 @@ class LockFreeOrderedHashMap {
   // Collects deleted nodes. Must be called periodically to reclaim memory.
   // Not lock-free: acquires allNodesMutex.
   void collect_garbage() {
-    ::std::lock_guard<::std::mutex> lock(allNodesMutex);
+    std::lock_guard<base::Mutex> lock(allNodesMutex);
 
     // First, unlink deleted nodes from the order chain
     Node* prev = nullptr;
@@ -472,7 +471,7 @@ class LockFreeOrderedHashMap {
   // Marks the node as deleted and unlinks from bucket chain.
   // Does NOT unlink from order chain.
   bool remove(const Key& key) {
-    ::std::atomic<Node*>* prev_bucket_next_ptr = nullptr;
+    base::Atomic<Node*>* prev_bucket_next_ptr = nullptr;
     Node* node_to_remove = nullptr;
     bool expected_deleted_status = false;
 

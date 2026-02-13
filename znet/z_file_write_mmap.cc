@@ -71,7 +71,7 @@ class MemoryMappedFileWriteFactory final : public IFileWriteFactory {
  public:
   base::UniquePointer<IFileWriteHandle> Open(const base::Path& path,
                                              u64 expected_size) override {
-    const std::string file_path = path.ToAsciiString();
+    const base::String file_path = path.ToAsciiString();
     const int fd = open(file_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
       return {};

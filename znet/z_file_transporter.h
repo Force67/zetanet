@@ -2,9 +2,6 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <mutex>
-#include <map>
-#include <string>
 #include <znet/z_peer.h>
 #include <znet/z_packets.h>
 #include <znet/z_file_write_interface.h>
@@ -34,8 +31,8 @@ class ZFileTransporter {
     u32 file_checksum{0};
     bool has_file_name{false};
     bool is_last_chunk{false};
-    std::string file_name;
-    std::string data;
+    base::String file_name;
+    base::String data;
   };
 
   static constexpr size_t kDefaultChunkSize = 1024;
@@ -70,11 +67,11 @@ class ZFileTransporter {
 
   bool AssembleFileFromChunks(
       const base::Path& output_path,
-      const std::map<u32, std::string>& chunks,
+      const base::Map<u32, base::String>& chunks,
       u32 total_chunks);
   bool AssembleFileFromChunks(
       const base::Path& output_path,
-      const std::map<u32, std::string>& chunks,
+      const base::Map<u32, base::String>& chunks,
       u32 total_chunks,
       u64 expected_file_size,
       u32 expected_file_checksum);
@@ -106,11 +103,11 @@ class ZFileTransporter {
                            StreamReceiveSession*& out_session);
   bool ValidatePath(const base::Path& base_dir, const base::Path& file_path) const;
 
-  static bool IsPathTraversal(const std::string& path);
+  static bool IsPathTraversal(const base::String& path);
 
   ZAsyncTransportLayer& transport_layer_;
   IFileWriteFactory* file_write_factory_{nullptr};
-  mutable std::mutex stream_mutex_;
-  std::map<u64, StreamReceiveSession> active_streams_;
+  mutable base::Mutex stream_mutex_;
+  base::Map<u64, StreamReceiveSession> active_streams_;
 };
 }  // namespace tx::network

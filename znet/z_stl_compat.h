@@ -23,6 +23,8 @@
 #include <cstdio>
 #include <cstdarg>
 #include <utility>
+#include <map>
+#include <array>
 
 // ---------------------------------------------------------------------------
 // Primitive type aliases (matching equilibrium/base/arch.h)
@@ -129,6 +131,19 @@ constexpr std::remove_reference_t<T>&& move(T&& t) noexcept {
 // --- Atomics ---
 template <typename T>
 using Atomic = std::atomic<T>;
+
+// --- Mutex ---
+using Mutex = std::mutex;
+
+// --- Containers ---
+template <typename K, typename V>
+using Map = std::map<K, V>;
+
+template <typename T>
+using Queue = std::queue<T>;
+
+template <typename T, size_t N>
+using Array = std::array<T, N>;
 
 // --- Time ---
 inline u64 GetUnixTimeStamp() {

@@ -57,7 +57,7 @@ bool ComputeHmacSha256(const byte* data, size_t size, const byte* key, size_t ke
 #endif
 }
 
-bool ContainsPathTraversal(const std::string& path) {
+bool ContainsPathTraversal(const base::String& path) {
   if (path.empty()) {
     return true;
   }
@@ -190,7 +190,7 @@ ZFileTransporter::~ZFileTransporter() {}
 
 void ZFileTransporter::SetFileWriteFactory(
     IFileWriteFactory* file_write_factory) {
-  std::lock_guard<std::mutex> lock(stream_mutex_);
+  std::lock_guard<base::Mutex> lock(stream_mutex_);
   file_write_factory_ = file_write_factory ? file_write_factory
                                            : &GetDefaultFileWriteFactory();
 }
@@ -231,7 +231,7 @@ bool ZFileTransporter::SendFile(const base::Path& path,
     return false;
   }
 
-  const std::string file_name = path.BaseName().ToAsciiString();
+  const base::String file_name = path.BaseName().ToAsciiString();
   if (file_name.empty() || file_name.size() > std::numeric_limits<u16>::max()) {
     BASE_LOGE(kLogTag, "Unsupported file name for transfer");
     return false;
@@ -353,7 +353,7 @@ bool ZFileTransporter::SendFile(const base::Path& path,
 
 bool ZFileTransporter::AssembleFileFromChunks(
     const base::Path& output_path,
-    const std::map<u32, std::string>& chunks,
+    const base::Map<u32, base::String>& chunks,
     u32 total_chunks) {
   return AssembleFileFromChunks(output_path, chunks, total_chunks,
                                 std::numeric_limits<u64>::max(), 0);
@@ -361,7 +361,7 @@ bool ZFileTransporter::AssembleFileFromChunks(
 
 bool ZFileTransporter::AssembleFileFromChunks(
     const base::Path& output_path,
-    const std::map<u32, std::string>& chunks,
+    const base::Map<u32, base::String>& chunks,
     u32 total_chunks,
     u64 expected_file_size,
     u32 expected_file_checksum) {
@@ -370,7 +370,7 @@ bool ZFileTransporter::AssembleFileFromChunks(
     return false;
   }
 
-  const std::string output_path_str = output_path.ToAsciiString();
+  const base::String output_path_str = output_path.ToAsciiString();
   if (IsPathTraversal(output_path_str)) {
     BASE_LOGE(kLogTag, "Path traversal attempt detected in output path");
     return false;
@@ -392,7 +392,7 @@ bool ZFileTransporter::AssembleFileFromChunks(
       return false;
     }
 
-    const std::string& chunk_data = it->second;
+    const base::String& chunk_data = it->second;
     size_t chunk_offset = 0;
     while (chunk_offset < chunk_data.size()) {
       const int wrote = output_file.WriteAtCurrentPos(
@@ -717,11 +717,11 @@ bool ZFileTransporter::EnsureStreamSession(const TransferChunk& chunk,
     return false;
   }
 
-  std::string temp_dir = temp_directory.ToAsciiString();
+  base::String temp_dir = temp_directory.ToAsciiString();
   if (!temp_dir.empty() && temp_dir.back() != '/' && temp_dir.back() != '\\') {
     temp_dir.push_back('/');
   }
-  std::string temp_name = "znet-transfer-" + std::to_string(chunk.transfer_id) + ".part";
+  base::String temp_name = "znet-transfer-" + std::to_string(chunk.transfer_id) + ".part";
   const base::Path temp_path(temp_dir + temp_name);
 
   StreamReceiveSession session;
@@ -755,7 +755,7 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
     *out_completed = false;
   }
 
-  std::lock_guard<std::mutex> lock(stream_mutex_);
+  std::lock_guard<base::Mutex> lock(stream_mutex_);
   StreamReceiveSession* session = nullptr;
   if (!EnsureStreamSession(chunk, temp_directory, session) || !session ||
       !session->temp_file) {
@@ -796,7 +796,7 @@ bool ZFileTransporter::FinalizeStreamedFile(u64 transfer_id,
   base::Path temp_path;
   u32 expected_checksum = 0;
   {
-    std::lock_guard<std::mutex> lock(stream_mutex_);
+    std::lock_guard<base::Mutex> lock(stream_mutex_);
     const auto it = active_streams_.find(transfer_id);
     if (it == active_streams_.end()) {
       return false;
@@ -825,22 +825,22 @@ bool ZFileTransporter::FinalizeStreamedFile(u64 transfer_id,
     return false;
   }
 
-  const std::string out_path = output_path.ToAsciiString();
-  const std::string tmp_path = temp_path.ToAsciiString();
+  const base::String out_path = output_path.ToAsciiString();
+  const base::String tmp_path = temp_path.ToAsciiString();
   std::remove(out_path.c_str());
   if (std::rename(tmp_path.c_str(), out_path.c_str()) != 0) {
     return false;
   }
 
-  std::lock_guard<std::mutex> lock(stream_mutex_);
+  std::lock_guard<base::Mutex> lock(stream_mutex_);
   active_streams_.erase(transfer_id);
   return true;
 }
 
 void ZFileTransporter::AbortStreamedFile(u64 transfer_id) {
-  std::string temp_path;
+  base::String temp_path;
   {
-    std::lock_guard<std::mutex> lock(stream_mutex_);
+    std::lock_guard<base::Mutex> lock(stream_mutex_);
     const auto it = active_streams_.find(transfer_id);
     if (it == active_streams_.end()) {
       return;
@@ -859,8 +859,8 @@ void ZFileTransporter::AbortStreamedFile(u64 transfer_id) {
 
 bool ZFileTransporter::ValidatePath(const base::Path& base_dir,
                                      const base::Path& file_path) const {
-  const std::string base_str = base_dir.ToAsciiString();
-  const std::string file_str = file_path.ToAsciiString();
+  const base::String base_str = base_dir.ToAsciiString();
+  const base::String file_str = file_path.ToAsciiString();
   if (ContainsPathTraversal(file_str)) {
     return false;
   }
@@ -868,7 +868,7 @@ bool ZFileTransporter::ValidatePath(const base::Path& base_dir,
   if (base_str.empty()) {
     return true;
   }
-  std::string base_prefix = base_str;
+  base::String base_prefix = base_str;
   if (base_prefix.back() != '/' && base_prefix.back() != '\\') {
     base_prefix.push_back('/');
   }
@@ -878,7 +878,7 @@ bool ZFileTransporter::ValidatePath(const base::Path& base_dir,
   return file_str.compare(0, base_prefix.size(), base_prefix) == 0;
 }
 
-bool ZFileTransporter::IsPathTraversal(const std::string& path) {
+bool ZFileTransporter::IsPathTraversal(const base::String& path) {
   return ContainsPathTraversal(path);
 }
 

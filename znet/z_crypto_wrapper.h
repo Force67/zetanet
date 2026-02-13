@@ -24,15 +24,15 @@ class ZCryptoContext {
 
   bool InitializeKeyExchange();
 
-  std::string GetPublicKey() const;
-  std::string GetChallenge() const;
+  base::String GetPublicKey() const;
+  base::String GetChallenge() const;
 
-  void ProcessServerKey(const std::string& server_key, const std::string& server_challenge);
+  void ProcessServerKey(const base::String& server_key, const base::String& server_challenge);
 
-  bool VerifyServerResponse(const std::string& server_proof);
-  bool VerifyClientProof(const std::string& client_proof);
-  std::string GenerateClientProof();
-  std::string GenerateServerProof();
+  bool VerifyServerResponse(const base::String& server_proof);
+  bool VerifyClientProof(const base::String& client_proof);
+  base::String GenerateClientProof();
+  base::String GenerateServerProof();
   bool IsAuthenticated() const;
 
   bool EncryptPayload(const base::Span<byte>& plaintext,
@@ -45,18 +45,18 @@ class ZCryptoContext {
 
  private:
   bool EnsureKeyMaterialReady();
-  bool DeriveKeyMaterial(const std::string& secret);
+  bool DeriveKeyMaterial(const base::String& secret);
   bool DeriveSessionKeys();
 
  private:
-  std::array<byte, 32> encryption_key_{};
-  std::array<byte, 32> authentication_key_{};
+  base::Array<byte, 32> encryption_key_{};
+  base::Array<byte, 32> authentication_key_{};
   bool keys_initialized_{false};
   bool authenticated_{false};
-  std::string local_nonce_;
-  std::string local_challenge_;
-  std::string server_nonce_;
-  std::string server_challenge_;
+  base::String local_nonce_;
+  base::String local_challenge_;
+  base::String server_nonce_;
+  base::String server_challenge_;
 };
 
 }  // namespace tx::network
