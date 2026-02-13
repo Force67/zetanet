@@ -35,13 +35,13 @@ class ZFileTransporter {
     base::String data;
   };
 
-  static constexpr size_t kDefaultChunkSize = 1024;
+  static constexpr mem_size kDefaultChunkSize = 1024;
 
   struct TransferTuning {
-    size_t chunk_size{kDefaultChunkSize};
-    size_t max_inflight_chunks{2048};
-    size_t max_inflight_bytes{64 * 1024 * 1024};
-    size_t allocator_min_cached_blocks{128};
+    mem_size chunk_size{kDefaultChunkSize};
+    mem_size max_inflight_chunks{2048};
+    mem_size max_inflight_bytes{64 * 1024};
+    mem_size allocator_min_cached_blocks{128};
     u32 backpressure_sleep_ms{1};
     u32 backpressure_timeout_ms{120000};
   };

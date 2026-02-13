@@ -16,16 +16,16 @@ namespace tx::network {
 // wrapper around the preferred compression library
 class ZCompressionContext {
  public:
-  static constexpr size_t kMaxDecompressedSize = 64 * 1024 * 1024;  // 64 MB limit
+  static constexpr mem_size kMaxDecompressedSize = 64 * 1024 * 1024;  // 64 MB limit
 
-  static bool Compress(const byte* input_data, size_t input_size,
+  static bool Compress(const byte* input_data, mem_size input_size,
                        base::Vector<byte>& compressed) {
     if (input_size == 0) {
       compressed.clear();
       return true;
     }
     int max_compressed_size = LZ4_compressBound(static_cast<int>(input_size));
-    compressed.resize(static_cast<size_t>(max_compressed_size));
+    compressed.resize(static_cast<mem_size>(max_compressed_size));
 
     int compressed_size =
         LZ4_compress_default(reinterpret_cast<const char*>(input_data),
@@ -37,12 +37,12 @@ class ZCompressionContext {
       return false;
     }
 
-    compressed.resize(static_cast<size_t>(compressed_size));
+    compressed.resize(static_cast<mem_size>(compressed_size));
     return true;
   }
 
-  static bool Decompress(const byte* data, size_t data_size,
-                          size_t original_size,
+  static bool Decompress(const byte* data, mem_size data_size,
+                          mem_size original_size,
                           base::Vector<byte>& decompressed) {
     if (original_size > kMaxDecompressedSize) {
       decompressed.clear();
@@ -60,7 +60,7 @@ class ZCompressionContext {
         static_cast<int>(data_size), static_cast<int>(original_size));
 
     if (decompressed_size < 0 ||
-        static_cast<size_t>(decompressed_size) != original_size) {
+        static_cast<mem_size>(decompressed_size) != original_size) {
       decompressed.clear();
       return false;
     }

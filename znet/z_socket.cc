@@ -243,7 +243,7 @@ i32 ZSocket::InternalSend(sockaddr_storage& target, socklen_t addr_len,
                   addr_len);
 }
 
-i32 ZSocket::Receive(Address& sender, char* buffer, size_t length) {
+i32 ZSocket::Receive(Address& sender, char* buffer, mem_size length) {
   if (socket_ == ZNET_INVALID_SOCKET)
     return -1;
   sockaddr_storage sender_addr{};
@@ -268,7 +268,7 @@ i32 ZSocket::Receive(Address& sender, char* buffer, size_t length) {
 i32 ZSocket::InternalReceive(sockaddr_storage& sender,
                              socklen_t& sender_len,
                              char* buffer,
-                             size_t length) {
+                             mem_size length) {
   sender_len = sizeof(sockaddr_storage);
   int bytes_received = ::recvfrom(socket_, buffer, length, 0,
                                   reinterpret_cast<struct sockaddr*>(&sender),

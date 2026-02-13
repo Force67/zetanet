@@ -42,7 +42,7 @@ class LockFreeOrderedHashMap {
   };
 
   base::Atomic<Node*>* buckets;
-  size_t bucketCount;
+  mem_size bucketCount;
   std::hash<Key> keyHasher;
 
   base::Atomic<Node*> orderHead;
@@ -58,7 +58,7 @@ class LockFreeOrderedHashMap {
   // Sets 'prev_bucket_next_ptr' to the atomic 'bucketNext' of the predecessor node,
   // or to the bucket head atomic itself if the target node is the head.
   Node* find_in_bucket(const Key& key, base::Atomic<Node*>*& prev_bucket_next_ptr) const {
-    size_t index = hash_key(key);
+    mem_size index = hash_key(key);
     prev_bucket_next_ptr = &buckets[index];
     Node* curr = buckets[index].load(::std::memory_order_acquire);
 
@@ -72,7 +72,7 @@ class LockFreeOrderedHashMap {
     return nullptr;  // Not found in this bucket chain
   }
 
-  size_t hash_key(const Key& key) const {
+  mem_size hash_key(const Key& key) const {
     if (bucketCount == 0)
       throw ::std::logic_error("Bucket count is zero");
     return keyHasher(key) % bucketCount;
@@ -171,7 +171,7 @@ class LockFreeOrderedHashMap {
   class BucketIterator : public IteratorBase<BucketIterator> {
     friend class LockFreeOrderedHashMap;  // Allow map to construct it
    private:
-    size_t bucketIndex;
+    mem_size bucketIndex;
 
    public:
     void advance_to_next_valid() override {
@@ -195,7 +195,7 @@ class LockFreeOrderedHashMap {
     }
     // Constructor for map access
     BucketIterator(const LockFreeOrderedHashMap<Key, Value>* m,
-                   size_t b_idx,
+                   mem_size b_idx,
                    Node* start_node)
         : IteratorBase<BucketIterator>(m, start_node), bucketIndex(b_idx) {}
     // Constructor for end iterator
@@ -223,8 +223,8 @@ class LockFreeOrderedHashMap {
   // Bucket Order Iterators (Default behavior if unqualified begin/end used)
   BucketIterator begin() const {
     Node* first_node = nullptr;
-    size_t first_bucket = bucketCount;  // Start assuming no elements
-    for (size_t i = 0; i < bucketCount; ++i) {
+    mem_size first_bucket = bucketCount;  // Start assuming no elements
+    for (mem_size i = 0; i < bucketCount; ++i) {
       first_node = buckets[i].load(::std::memory_order_acquire);
       first_bucket = i;
       // Skip deleted nodes at the start of the bucket
@@ -247,10 +247,10 @@ class LockFreeOrderedHashMap {
   }
 
   // --- Constructor / Destructor ---
-  explicit LockFreeOrderedHashMap(size_t count)
+  explicit LockFreeOrderedHashMap(mem_size count)
       : bucketCount(count > 0 ? count : 1), orderHead(nullptr), orderTail(nullptr) {
     buckets = new base::Atomic<Node*>[bucketCount];
-    for (size_t i = 0; i < bucketCount; ++i) {
+    for (mem_size i = 0; i < bucketCount; ++i) {
       buckets[i].store(nullptr, ::std::memory_order_relaxed);
     }
   }
@@ -289,7 +289,7 @@ class LockFreeOrderedHashMap {
   template <typename K, typename V>
   bool insert_internal(K&& key, V&& value) {
     Node* newNode = nullptr;  // Allocate later
-    size_t index = hash_key(key);
+    mem_size index = hash_key(key);
     base::Atomic<Node*>* prev_bucket_next_ptr = nullptr;
 
     // --- Phase 1: Insert into Hash Bucket ---
@@ -457,8 +457,8 @@ class LockFreeOrderedHashMap {
     }
 
     // Sweep allNodes: delete nodes with is_deleted=true, compact the vector
-    size_t write_idx = 0;
-    for (size_t read_idx = 0; read_idx < allNodes.size(); ++read_idx) {
+    mem_size write_idx = 0;
+    for (mem_size read_idx = 0; read_idx < allNodes.size(); ++read_idx) {
       if (allNodes[read_idx]->is_deleted.load(::std::memory_order_acquire)) {
         delete allNodes[read_idx];
       } else {

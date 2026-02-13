@@ -19,18 +19,18 @@ class PositionalFileWriteHandle final : public IFileWriteHandle {
   explicit PositionalFileWriteHandle(base::UniquePointer<base::File> file)
       : file_(std::move(file)) {}
 
-  bool WriteAt(u64 offset, const char* data, size_t size) override {
+  bool WriteAt(u64 offset, const char* data, mem_size size) override {
     if (!file_) {
       return false;
     }
-    size_t written = 0;
+    mem_size written = 0;
     while (written < size) {
       const int wrote = file_.Get_UseOnlyIfYouKnowWhatYouareDoing()->Write(
           static_cast<int64_t>(offset + written), data + written, size - written);
       if (wrote <= 0) {
         return false;
       }
-      written += static_cast<size_t>(wrote);
+      written += static_cast<mem_size>(wrote);
     }
     return true;
   }

@@ -37,12 +37,12 @@ class ZAsyncTransportLayer {
   };
 
   struct OutboundPressure {
-    size_t control_queued_packets{0};
-    size_t control_queued_bytes{0};
-    size_t data_queued_packets{0};
-    size_t data_queued_bytes{0};
-    size_t awaiting_ack_packets{0};
-    size_t awaiting_ack_bytes{0};
+    mem_size control_queued_packets{0};
+    mem_size control_queued_bytes{0};
+    mem_size data_queued_packets{0};
+    mem_size data_queued_bytes{0};
+    mem_size awaiting_ack_packets{0};
+    mem_size awaiting_ack_bytes{0};
   };
   bool Init(const InitOptions&);
 

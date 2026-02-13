@@ -53,7 +53,7 @@ class PriorityMPSCQueue {
            medium_priority_queue_.empty() && low_priority_queue_.empty();
   }
 
-  size_t size_approx() const {
+  mem_size size_approx() const {
     return critial_priority_queue_.size_approx() + high_priority_queue_.size_approx() +
            medium_priority_queue_.size_approx() + low_priority_queue_.size_approx();
   }

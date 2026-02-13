@@ -13,6 +13,7 @@
 
 #include <znet/z_packets.h>
 #include <znet/z_packet_bin_fmt.h>
+#include <znet/z_wire_le.h>
 
 namespace tx::network {
 
@@ -53,18 +54,11 @@ class PacketBuilder {
         (packet_info.flags.reliable && packet_info.type == PacketType::Acknowledgement)
             ? static_cast<u32>(packet_info.payload.scalar)
             : 0;
-    aad[0] = static_cast<u8>(static_cast<u16>(packet_info.type) & 0xFFu);
-    aad[1] = static_cast<u8>((static_cast<u16>(packet_info.type) >> 8) & 0xFFu);
+    wire_le::StoreU16(aad.data(), static_cast<u16>(packet_info.type));
     aad[2] = static_cast<u8>(packet_info.channel);
     aad[3] = flags;
-    aad[4] = static_cast<u8>(sequence & 0xFFu);
-    aad[5] = static_cast<u8>((sequence >> 8) & 0xFFu);
-    aad[6] = static_cast<u8>((sequence >> 16) & 0xFFu);
-    aad[7] = static_cast<u8>((sequence >> 24) & 0xFFu);
-    aad[8] = static_cast<u8>(acknowledgement & 0xFFu);
-    aad[9] = static_cast<u8>((acknowledgement >> 8) & 0xFFu);
-    aad[10] = static_cast<u8>((acknowledgement >> 16) & 0xFFu);
-    aad[11] = static_cast<u8>((acknowledgement >> 24) & 0xFFu);
+    wire_le::StoreU32(aad.data() + 4, sequence);
+    wire_le::StoreU32(aad.data() + 8, acknowledgement);
 
     base::Vector<byte> encrypted_payload;
     if (!crypto_context_->EncryptPayload(
@@ -83,12 +77,12 @@ class PacketUnpacker {
   PacketUnpacker(ZCryptoContext* crypto_context)
       : crypto_context_(crypto_context) {}
 
-  bool UnpackPacket(const byte* in_buffer, size_t in_size, IncomingPacket& out);
+  bool UnpackPacket(const byte* in_buffer, mem_size in_size, IncomingPacket& out);
 
  private:
   ZCryptoContext* crypto_context_;
 
-  bool ValidatePacketHeader(const PacketHeader& header, size_t size) const {
+  bool ValidatePacketHeader(const PacketHeader& header, mem_size size) const {
     if (size < sizeof(PacketHeader)) {
       return false;
     }
@@ -129,18 +123,11 @@ class PacketUnpacker {
         (header.flags.is_encrypted ? (1 << 1) : 0) |
         (header.flags.is_compressed ? (1 << 2) : 0) |
         ((header.flags.priority & 0x3) << 4);
-    aad[0] = static_cast<u8>(header.type & 0xFFu);
-    aad[1] = static_cast<u8>((header.type >> 8) & 0xFFu);
+    wire_le::StoreU16(aad.data(), header.type);
     aad[2] = header.channel_id;
     aad[3] = flags;
-    aad[4] = static_cast<u8>(sequence_number & 0xFFu);
-    aad[5] = static_cast<u8>((sequence_number >> 8) & 0xFFu);
-    aad[6] = static_cast<u8>((sequence_number >> 16) & 0xFFu);
-    aad[7] = static_cast<u8>((sequence_number >> 24) & 0xFFu);
-    aad[8] = static_cast<u8>(acknowledgement_number & 0xFFu);
-    aad[9] = static_cast<u8>((acknowledgement_number >> 8) & 0xFFu);
-    aad[10] = static_cast<u8>((acknowledgement_number >> 16) & 0xFFu);
-    aad[11] = static_cast<u8>((acknowledgement_number >> 24) & 0xFFu);
+    wire_le::StoreU32(aad.data() + 4, sequence_number);
+    wire_le::StoreU32(aad.data() + 8, acknowledgement_number);
 
     base::Vector<byte> plaintext;
     if (!crypto_context_->DecryptPayload(

@@ -59,7 +59,7 @@ class ZSocket {
   };
 
   i32 Send(const Address& addr, const base::Span<byte> data);
-  i32 Receive(Address& sender, char* buffer, size_t length);
+  i32 Receive(Address& sender, char* buffer, mem_size length);
 
   // Send to server sock addr
   i32 SendtoServer(const base::Span<byte> data) {
@@ -94,7 +94,7 @@ class ZSocket {
 
  private:
   i32 InternalSend(sockaddr_storage&, socklen_t addr_len, const base::Span<byte> data);
-  i32 InternalReceive(sockaddr_storage& sender, socklen_t& sender_len, char* buffer, size_t length);
+  i32 InternalReceive(sockaddr_storage& sender, socklen_t& sender_len, char* buffer, mem_size length);
 
  private:
 #if defined(_WIN32)

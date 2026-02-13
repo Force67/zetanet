@@ -46,7 +46,7 @@ ZNET_API bool tx::network::ZGetPacketAllocatorStats(
   out_stats->fallback_allocations = global.fallback_allocations;
   out_stats->class_count = PacketBufferPool::kClassCount;
 
-  for (size_t i = 0; i < out_stats->class_count; ++i) {
+  for (mem_size i = 0; i < out_stats->class_count; ++i) {
     out_stats->classes[i].block_size = class_stats[i].block_size;
     out_stats->classes[i].request_count = class_stats[i].request_count;
     out_stats->classes[i].hit_count = class_stats[i].hit_count;
@@ -73,7 +73,7 @@ ZNET_API void tx::network::ZDumpPacketAllocatorStats() {
                "PacketAllocator total=%zu hits=%zu hit_rate=%.2f%% fallback=%zu\n",
                stats.total_requests, stats.pool_hits, hit_rate,
                stats.fallback_allocations);
-  for (size_t i = 0; i < stats.class_count; ++i) {
+  for (mem_size i = 0; i < stats.class_count; ++i) {
     const ZPacketAllocatorClassStats &c = stats.classes[i];
     if (c.request_count == 0 && c.cached_free_blocks == 0) {
       continue;

@@ -1,6 +1,7 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #include "z_p2p_node.h"
+#include "z_wire_le.h"
 
 #include <znet/z_stl_compat.h>
 
@@ -11,40 +12,6 @@
 namespace tx::network {
 namespace {
 constexpr char kLogTag[] = "z-p2p-node";
-
-bool ReadU16(const byte* data, size_t data_size, size_t& cursor, u16& out) {
-  if (cursor + sizeof(u16) > data_size) {
-    return false;
-  }
-  out = static_cast<u16>(data[cursor] |
-                         (static_cast<u16>(data[cursor + 1]) << 8));
-  cursor += sizeof(u16);
-  return true;
-}
-
-bool ReadU32(const byte* data, size_t data_size, size_t& cursor, u32& out) {
-  if (cursor + sizeof(u32) > data_size) {
-    return false;
-  }
-  out = static_cast<u32>(data[cursor]) |
-        (static_cast<u32>(data[cursor + 1]) << 8) |
-        (static_cast<u32>(data[cursor + 2]) << 16) |
-        (static_cast<u32>(data[cursor + 3]) << 24);
-  cursor += sizeof(u32);
-  return true;
-}
-
-void PushU16(base::Vector<byte>& out, u16 value) {
-  out.push_back(static_cast<byte>(value & 0xFFu));
-  out.push_back(static_cast<byte>((value >> 8) & 0xFFu));
-}
-
-void PushU32(base::Vector<byte>& out, u32 value) {
-  out.push_back(static_cast<byte>(value & 0xFFu));
-  out.push_back(static_cast<byte>((value >> 8) & 0xFFu));
-  out.push_back(static_cast<byte>((value >> 16) & 0xFFu));
-  out.push_back(static_cast<byte>((value >> 24) & 0xFFu));
-}
 
 bool AddressFromString(const base::StringRef ip, u16 port, ZSocket::Address& out) {
   if (ip.empty() || ip.size() >= sizeof(out.ip)) {
@@ -284,11 +251,11 @@ void ZP2PNode::ProcessIncomingPacket(const IncomingPacket& packet) {
 
 void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
   const byte* data = reinterpret_cast<const byte*>(packet.data.data());
-  const size_t size = packet.data.size();
-  size_t cursor = 0;
+  const mem_size size = packet.data.size();
+  mem_size cursor = 0;
 
   u32 magic = 0;
-  if (!ReadU32(data, size, cursor, magic) || magic != kControlMagic) {
+  if (!wire_le::ReadU32(data, size, cursor, magic) || magic != kControlMagic) {
     return;
   }
   if (cursor >= size) {
@@ -323,7 +290,7 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
         }
       }
       u16 peer_count = 0;
-      if (!ReadU16(data, size, cursor, peer_count)) {
+      if (!wire_le::ReadU16(data, size, cursor, peer_count)) {
         return;
       }
       for (u16 i = 0; i < peer_count; ++i) {
@@ -366,10 +333,10 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
 void ZP2PNode::SendJoinHello() {
   base::Vector<byte> payload;
   payload.reserve(12);
-  PushU32(payload, kControlMagic);
+  wire_le::AppendU32(payload, kControlMagic);
   payload.push_back(kControlVersion);
   payload.push_back(static_cast<byte>(ControlKind::JoinHello));
-  PushU16(payload, local_port_);
+  wire_le::AppendU16(payload, local_port_);
   PushControlPacket(ZPeerId::to_server, payload);
 }
 
@@ -392,10 +359,10 @@ void ZP2PNode::BroadcastPeerRoster() {
 
   base::Vector<byte> payload;
   payload.reserve(16 + roster.size() * 24);
-  PushU32(payload, kControlMagic);
+  wire_le::AppendU32(payload, kControlMagic);
   payload.push_back(kControlVersion);
   payload.push_back(static_cast<byte>(ControlKind::PeerRoster));
-  PushU16(payload, static_cast<u16>(roster.size()));
+  wire_le::AppendU16(payload, static_cast<u16>(roster.size()));
   for (const auto& address : roster) {
     if (!SerializeAddress(payload, address)) {
       BASE_LOGE(kLogTag, "Failed to serialize roster address {}:{}",
@@ -409,7 +376,7 @@ void ZP2PNode::BroadcastPeerRoster() {
 void ZP2PNode::BroadcastHostTransition(const ZSocket::Address& endpoint) {
   base::Vector<byte> payload;
   payload.reserve(48);
-  PushU32(payload, kControlMagic);
+  wire_le::AppendU32(payload, kControlMagic);
   payload.push_back(kControlVersion);
   payload.push_back(static_cast<byte>(ControlKind::HostTransition));
   if (!SerializeAddress(payload, endpoint)) {
@@ -440,22 +407,22 @@ void ZP2PNode::PushControlPacket(u32 destination_peer_id,
 
 bool ZP2PNode::SerializeAddress(base::Vector<byte>& buffer,
                                 const ZSocket::Address& address) {
-  const size_t ip_len = strnlen(address.ip, sizeof(address.ip));
+  const mem_size ip_len = strnlen(address.ip, sizeof(address.ip));
   if (ip_len == 0 || ip_len > 0xFFu) {
     return false;
   }
   buffer.push_back(static_cast<byte>(address.address_family));
   buffer.push_back(static_cast<byte>(ip_len));
-  for (size_t i = 0; i < ip_len; ++i) {
+  for (mem_size i = 0; i < ip_len; ++i) {
     buffer.push_back(static_cast<byte>(address.ip[i]));
   }
-  PushU16(buffer, address.port);
+  wire_le::AppendU16(buffer, address.port);
   return true;
 }
 
 bool ZP2PNode::DeserializeAddress(const byte* data,
-                                  size_t data_size,
-                                  size_t& cursor,
+                                  mem_size data_size,
+                                  mem_size& cursor,
                                   ZSocket::Address& address) {
   if (cursor >= data_size) {
     return false;
@@ -464,7 +431,7 @@ bool ZP2PNode::DeserializeAddress(const byte* data,
   if (cursor >= data_size) {
     return false;
   }
-  const size_t ip_len = data[cursor++];
+  const mem_size ip_len = data[cursor++];
   if (ip_len == 0 || ip_len >= sizeof(address.ip)) {
     return false;
   }
@@ -478,7 +445,7 @@ bool ZP2PNode::DeserializeAddress(const byte* data,
   cursor += ip_len;
 
   u16 port = 0;
-  if (!ReadU16(data, data_size, cursor, port)) {
+  if (!wire_le::ReadU16(data, data_size, cursor, port)) {
     return false;
   }
   address.port = port;

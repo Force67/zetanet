@@ -12,25 +12,25 @@
 namespace tx::network {
 class PacketBufferPool {
  public:
-  static constexpr size_t kMinClassSize = 64;
-  static constexpr size_t kMaxClassSize = 65536;
-  static constexpr size_t kClassCount = 11;  // 64 ... 65536
-  static constexpr size_t kRetunePeriod = 4096;
-  static constexpr size_t kCacheBudgetBytes = 16 * 1024 * 1024;
-  static constexpr size_t kMinTargetPerClass = 8;
+  static constexpr mem_size kMinClassSize = 64;
+  static constexpr mem_size kMaxClassSize = 65536;
+  static constexpr mem_size kClassCount = 11;  // 64 ... 65536
+  static constexpr mem_size kRetunePeriod = 4096;
+  static constexpr mem_size kCacheBudgetBytes = 16 * 1024 * 1024;
+  static constexpr mem_size kMinTargetPerClass = 8;
 
   struct Stats {
-    size_t total_requests{0};
-    size_t pool_hits{0};
-    size_t fallback_allocations{0};
+    mem_size total_requests{0};
+    mem_size pool_hits{0};
+    mem_size fallback_allocations{0};
   };
 
   struct ClassStats {
-    size_t block_size{0};
-    size_t request_count{0};
-    size_t hit_count{0};
-    size_t target_cached_blocks{0};
-    size_t cached_free_blocks{0};
+    mem_size block_size{0};
+    mem_size request_count{0};
+    mem_size hit_count{0};
+    mem_size target_cached_blocks{0};
+    mem_size cached_free_blocks{0};
     double ewma_demand{0.0};
   };
 
@@ -39,12 +39,12 @@ class PacketBufferPool {
     return instance;
   }
 
-  unsigned char* Allocate(size_t requested_size) {
+  unsigned char* Allocate(mem_size requested_size) {
     if (requested_size == 0) {
       return nullptr;
     }
 
-    const size_t class_index = SizeToClassIndex(requested_size);
+    const mem_size class_index = SizeToClassIndex(requested_size);
     total_requests_.fetch_add(1, std::memory_order_relaxed);
 
     if (class_index == kInvalidClassIndex) {
@@ -98,7 +98,7 @@ class PacketBufferPool {
     }
 
     ClassBucket& bucket = classes_[header->size_class_index];
-    const size_t target =
+    const mem_size target =
         bucket.target_cached_blocks.load(std::memory_order_relaxed);
     bool keep = false;
     {
@@ -115,7 +115,7 @@ class PacketBufferPool {
     MaybeRetune();
   }
 
-  size_t GetCapacity(const unsigned char* data) const {
+  mem_size GetCapacity(const unsigned char* data) const {
     if (!data) {
       return 0;
     }
@@ -132,7 +132,7 @@ class PacketBufferPool {
   }
 
   void GetClassStats(base::Array<ClassStats, kClassCount>& out) const {
-    for (size_t i = 0; i < kClassCount; ++i) {
+    for (mem_size i = 0; i < kClassCount; ++i) {
       const ClassBucket& bucket = classes_[i];
       out[i].block_size = bucket.block_size;
       out[i].request_count = bucket.total_requests.load(std::memory_order_relaxed);
@@ -151,7 +151,7 @@ class PacketBufferPool {
     total_requests_.store(0, std::memory_order_relaxed);
     pool_hits_.store(0, std::memory_order_relaxed);
     fallback_allocations_.store(0, std::memory_order_relaxed);
-    for (size_t i = 0; i < kClassCount; ++i) {
+    for (mem_size i = 0; i < kClassCount; ++i) {
       ClassBucket& bucket = classes_[i];
       bucket.requests.store(0, std::memory_order_relaxed);
       bucket.hits.store(0, std::memory_order_relaxed);
@@ -161,16 +161,16 @@ class PacketBufferPool {
     }
   }
 
-  void BoostClassCacheForSize(size_t requested_size, size_t min_target_blocks) {
+  void BoostClassCacheForSize(mem_size requested_size, mem_size min_target_blocks) {
     if (min_target_blocks == 0) {
       return;
     }
-    const size_t class_index = SizeToClassIndex(requested_size);
+    const mem_size class_index = SizeToClassIndex(requested_size);
     if (class_index == kInvalidClassIndex) {
       return;
     }
     ClassBucket& bucket = classes_[class_index];
-    size_t current_target = bucket.target_cached_blocks.load(std::memory_order_relaxed);
+    mem_size current_target = bucket.target_cached_blocks.load(std::memory_order_relaxed);
     while (current_target < min_target_blocks &&
            !bucket.target_cached_blocks.compare_exchange_weak(
                current_target, min_target_blocks, std::memory_order_relaxed)) {
@@ -184,17 +184,17 @@ class PacketBufferPool {
     std::uint32_t size_class_index;
     bool pooled;
     unsigned char reserved[3];
-    size_t capacity;
+    mem_size capacity;
   };
 
   struct ClassBucket {
-    size_t block_size{0};
-    base::Atomic<size_t> requests{0};
-    base::Atomic<size_t> hits{0};
-    base::Atomic<size_t> total_requests{0};
-    base::Atomic<size_t> total_hits{0};
+    mem_size block_size{0};
+    base::Atomic<mem_size> requests{0};
+    base::Atomic<mem_size> hits{0};
+    base::Atomic<mem_size> total_requests{0};
+    base::Atomic<mem_size> total_hits{0};
     base::Atomic<double> ewma_demand{0.0};
-    base::Atomic<size_t> target_cached_blocks{kMinTargetPerClass};
+    base::Atomic<mem_size> target_cached_blocks{kMinTargetPerClass};
     base::Vector<BlockHeader*> free_list;
     mutable base::Mutex mutex;
   };
@@ -202,8 +202,8 @@ class PacketBufferPool {
   static constexpr std::uint32_t kInvalidClassIndex = 0xFFFFFFFFu;
 
   PacketBufferPool() {
-    size_t block_size = kMinClassSize;
-    for (size_t i = 0; i < kClassCount; ++i) {
+    mem_size block_size = kMinClassSize;
+    for (mem_size i = 0; i < kClassCount; ++i) {
       classes_[i].block_size = block_size;
       classes_[i].target_cached_blocks.store(kMinTargetPerClass,
                                              std::memory_order_relaxed);
@@ -224,12 +224,12 @@ class PacketBufferPool {
   PacketBufferPool(const PacketBufferPool&) = delete;
   PacketBufferPool& operator=(const PacketBufferPool&) = delete;
 
-  static size_t SizeToClassIndex(size_t requested_size) {
+  static mem_size SizeToClassIndex(mem_size requested_size) {
     if (requested_size > kMaxClassSize) {
       return kInvalidClassIndex;
     }
-    size_t class_size = kMinClassSize;
-    size_t class_index = 0;
+    mem_size class_size = kMinClassSize;
+    mem_size class_index = 0;
     while (class_size < requested_size && class_index + 1 < kClassCount) {
       class_size <<= 1;
       ++class_index;
@@ -249,10 +249,10 @@ class PacketBufferPool {
     return reinterpret_cast<unsigned char*>(header + 1);
   }
 
-  unsigned char* AllocateNewBlock(size_t requested_size,
-                                  size_t class_index,
+  unsigned char* AllocateNewBlock(mem_size requested_size,
+                                  mem_size class_index,
                                   bool pooled) {
-    const size_t capacity =
+    const mem_size capacity =
         (class_index == kInvalidClassIndex) ? requested_size
                                             : classes_[class_index].block_size;
     BlockHeader* header = reinterpret_cast<BlockHeader*>(
@@ -269,7 +269,7 @@ class PacketBufferPool {
   }
 
   void MaybeRetune() {
-    const size_t requests = total_requests_.load(std::memory_order_relaxed);
+    const mem_size requests = total_requests_.load(std::memory_order_relaxed);
     if (requests < kRetunePeriod || (requests % kRetunePeriod) != 0) {
       return;
     }
@@ -282,8 +282,8 @@ class PacketBufferPool {
 
   void RetuneTargets() {
     double demand_sum = 0.0;
-    for (size_t i = 0; i < kClassCount; ++i) {
-      const size_t requests =
+    for (mem_size i = 0; i < kClassCount; ++i) {
+      const mem_size requests =
           classes_[i].requests.exchange(0, std::memory_order_relaxed);
       const double old = classes_[i].ewma_demand.load(std::memory_order_relaxed);
       const double updated = old * 0.8 + static_cast<double>(requests) * 0.2;
@@ -295,10 +295,10 @@ class PacketBufferPool {
       return;
     }
 
-    for (size_t i = 0; i < kClassCount; ++i) {
+    for (mem_size i = 0; i < kClassCount; ++i) {
       const double demand = classes_[i].ewma_demand.load(std::memory_order_relaxed);
       const double weight = demand / demand_sum;
-      size_t target = static_cast<size_t>(
+      mem_size target = static_cast<mem_size>(
           (weight * static_cast<double>(kCacheBudgetBytes)) /
           static_cast<double>(classes_[i].block_size));
       if (target < kMinTargetPerClass) {
@@ -310,7 +310,7 @@ class PacketBufferPool {
     }
   }
 
-  void TrimClassCache(size_t class_index, size_t target) {
+  void TrimClassCache(mem_size class_index, mem_size target) {
     ClassBucket& bucket = classes_[class_index];
     base::Vector<BlockHeader*> overflow;
     {
@@ -331,14 +331,14 @@ class PacketBufferPool {
 
   base::Array<ClassBucket, kClassCount> classes_{};
   mutable base::Mutex retune_mutex_;
-  base::Atomic<size_t> total_requests_{0};
-  base::Atomic<size_t> pool_hits_{0};
-  base::Atomic<size_t> fallback_allocations_{0};
+  base::Atomic<mem_size> total_requests_{0};
+  base::Atomic<mem_size> pool_hits_{0};
+  base::Atomic<mem_size> fallback_allocations_{0};
 };
 
 class PacketAllocator {
  public:
-  PacketAllocator(size_t block_size, size_t pool_size)
+  PacketAllocator(mem_size block_size, mem_size pool_size)
       : block_size_(block_size), pool_size_(pool_size) {}
 
   void* Allocate() {
@@ -354,8 +354,8 @@ class PacketAllocator {
   }
 
  private:
-  size_t block_size_;
-  size_t pool_size_;
+  mem_size block_size_;
+  mem_size pool_size_;
 };
 
 class PacketDeleter {

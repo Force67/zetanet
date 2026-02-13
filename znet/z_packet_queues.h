@@ -32,9 +32,9 @@ class ZPeerMapping;
 class ZPacketQueue {
  public:
   struct RateLimitConfig {
-    size_t max_packets_per_second = 1000;
-    size_t max_bytes_per_second = 10 * 1024 * 1024;
-    size_t burst_allowance = 2000;
+    mem_size max_packets_per_second = 1000;
+    mem_size max_bytes_per_second = 10 * 1024 * 1024;
+    mem_size burst_allowance = 2000;
   };
 
   ZPacketQueue(ZSocket&, ZPeerMapping&, base::Atomic<bool>& stop_token);
@@ -60,18 +60,18 @@ class ZPacketQueue {
       return;
     }
     const PacketChannelType channel = package_move_in.channel;
-    const size_t payload_bytes = package_move_in.heap_data_size;
+    const mem_size payload_bytes = package_move_in.heap_data_size;
     auto& queue = GetChannelQueue(package_move_in.channel);
     PacketPriority priority = (PacketPriority)package_move_in.flags.priority;
     queue.enqueue(std::move(package_move_in), priority);
-    const size_t channel_index = static_cast<size_t>(channel);
+    const mem_size channel_index = static_cast<mem_size>(channel);
     if (channel_index < channel_outgoing_bytes_.size()) {
       channel_outgoing_bytes_[channel_index].fetch_add(payload_bytes,
                                                        std::memory_order_relaxed);
     }
   }
   
-  bool CheckRateLimit(size_t payload_bytes);
+  bool CheckRateLimit(mem_size payload_bytes);
   bool Pop(PacketChannelType channel_type, IncomingPacket& p) {
     auto& queue = channel_incoming_queues_[channel_type];
     if (!queue.empty()) {
@@ -88,23 +88,23 @@ class ZPacketQueue {
 
   void SetCryptoProvider(ZCryptoContext* crypto) { crypto_context_ = crypto; }
 
-  size_t GetApproxOutgoingPacketCount(PacketChannelType channel) const {
+  mem_size GetApproxOutgoingPacketCount(PacketChannelType channel) const {
     return channel_outgoing_queues_.at(channel).size_approx();
   }
 
-  size_t GetApproxOutgoingBytes(PacketChannelType channel) const {
-    const size_t channel_index = static_cast<size_t>(channel);
+  mem_size GetApproxOutgoingBytes(PacketChannelType channel) const {
+    const mem_size channel_index = static_cast<mem_size>(channel);
     if (channel_index >= channel_outgoing_bytes_.size()) {
       return 0;
     }
     return channel_outgoing_bytes_[channel_index].load(std::memory_order_relaxed);
   }
 
-  size_t GetApproxAwaitingAckPacketCount() const {
+  mem_size GetApproxAwaitingAckPacketCount() const {
     return awaiting_ack_packet_count_.load(std::memory_order_relaxed);
   }
 
-  size_t GetApproxAwaitingAckBytes() const {
+  mem_size GetApproxAwaitingAckBytes() const {
     return awaiting_ack_bytes_.load(std::memory_order_relaxed);
   }
 
@@ -135,16 +135,16 @@ class ZPacketQueue {
   PacketDispatcher dispatcher_;
   PacketReceiver receiver_;
 
-  base::Array<base::Atomic<size_t>, 2> channel_outgoing_bytes_{};
-  base::Atomic<size_t> awaiting_ack_packet_count_{0};
-  base::Atomic<size_t> awaiting_ack_bytes_{0};
+  base::Array<base::Atomic<mem_size>, 2> channel_outgoing_bytes_{};
+  base::Atomic<mem_size> awaiting_ack_packet_count_{0};
+  base::Atomic<mem_size> awaiting_ack_bytes_{0};
 
   base::Atomic<bool>& stop_threads_;
 
   RateLimitConfig rate_limit_config_;
-  base::Atomic<size_t> packets_sent_this_second_{0};
-  base::Atomic<size_t> bytes_sent_this_second_{0};
-  base::Atomic<size_t> burst_tokens_{0};
+  base::Atomic<mem_size> packets_sent_this_second_{0};
+  base::Atomic<mem_size> bytes_sent_this_second_{0};
+  base::Atomic<mem_size> burst_tokens_{0};
   std::chrono::steady_clock::time_point rate_limit_window_start_;
   u32 gc_counter_{0};
 };

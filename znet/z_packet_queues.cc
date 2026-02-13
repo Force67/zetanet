@@ -3,6 +3,7 @@
 
 #include "z_packet_queues.h"
 #include "z_packet_serdes.h"
+#include "z_wire_le.h"
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -11,17 +12,16 @@
 #endif
 
 #include "z_socket.h"
-#include "z_packet_serdes.h"
 
 namespace tx::network {
 static constexpr char kLogTag[] = "z-packet-queue";
 static constexpr u32 kResendIntervalSeconds = 1;
 static constexpr u32 kDropAfterSeconds = 5;
 namespace {
-void SaturatingSub(base::Atomic<size_t>& value, size_t delta) {
-  size_t current = value.load(std::memory_order_relaxed);
+void SaturatingSub(base::Atomic<mem_size>& value, mem_size delta) {
+  mem_size current = value.load(std::memory_order_relaxed);
   while (true) {
-    const size_t next = (current > delta) ? (current - delta) : 0;
+    const mem_size next = (current > delta) ? (current - delta) : 0;
     if (value.compare_exchange_weak(current, next, std::memory_order_relaxed)) {
       return;
     }
@@ -53,7 +53,7 @@ ZPacketQueue::ZPacketQueue(ZSocket& socket,
     dispatcher_.SetAwaitingAckCounters(&awaiting_ack_packet_count_, &awaiting_ack_bytes_);
 }
 
-bool ZPacketQueue::CheckRateLimit(size_t payload_bytes) {
+bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
   auto now = std::chrono::steady_clock::now();
   auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
       now - rate_limit_window_start_);
@@ -65,12 +65,12 @@ bool ZPacketQueue::CheckRateLimit(size_t payload_bytes) {
     rate_limit_window_start_ = now;
   }
   
-  size_t current_packets = packets_sent_this_second_.load(std::memory_order_relaxed);
-  size_t current_bytes = bytes_sent_this_second_.load(std::memory_order_relaxed);
-  size_t burst = burst_tokens_.load(std::memory_order_relaxed);
+  mem_size current_packets = packets_sent_this_second_.load(std::memory_order_relaxed);
+  mem_size current_bytes = bytes_sent_this_second_.load(std::memory_order_relaxed);
+  mem_size burst = burst_tokens_.load(std::memory_order_relaxed);
   
   if (current_packets >= rate_limit_config_.max_packets_per_second) {
-    size_t current_burst = burst_tokens_.load(std::memory_order_relaxed);
+    mem_size current_burst = burst_tokens_.load(std::memory_order_relaxed);
     while (true) {
       if (current_burst == 0) {
         return false;
@@ -113,7 +113,7 @@ void ZPacketQueue::ProcessOutgoingPackets() {
       const u32 packet_age = now - packet.last_send_time;
       // Drop packets that have exceeded retry budget to cap memory growth.
       if (packet_age > kDropAfterSeconds) {
-        const size_t dropped_bytes = packet.heap_data_size;
+        const mem_size dropped_bytes = packet.heap_data_size;
         awaiting_ack_packets_.remove(seqNum);
         SaturatingSub(awaiting_ack_packet_count_, 1);
         SaturatingSub(awaiting_ack_bytes_, dropped_bytes);
@@ -134,7 +134,7 @@ void ZPacketQueue::ProcessChannel(PacketChannelType channel) {
   if (!queue.empty()) {
     OutgoingPacket packet;
     queue.dequeue(packet);
-    const size_t channel_index = static_cast<size_t>(channel);
+    const mem_size channel_index = static_cast<mem_size>(channel);
     if (channel_index < channel_outgoing_bytes_.size()) {
       SaturatingSub(channel_outgoing_bytes_[channel_index], packet.heap_data_size);
     }
@@ -159,10 +159,7 @@ void ZPacketQueue::ProcessReceiving() {
       // Parse the 4-byte LE payload to get the acked sequence number
       if (pack.data.size() >= 4) {
         const byte* d = reinterpret_cast<const byte*>(pack.data.data());
-        const u32 acked_seq = static_cast<u32>(d[0]) |
-                              (static_cast<u32>(d[1]) << 8) |
-                              (static_cast<u32>(d[2]) << 16) |
-                              (static_cast<u32>(d[3]) << 24);
+        const u32 acked_seq = wire_le::LoadU32(d);
         bool destination_matches = false;
         const bool has_packet = awaiting_ack_packets_.with_value(
             acked_seq, [&](const OutgoingPacket& packet) {
@@ -198,10 +195,7 @@ void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
                            .reserved = 0};
   // Serialize the acknowledged sequence number as a 4-byte LE payload
   byte ack_payload[4];
-  ack_payload[0] = static_cast<byte>(sequence_number & 0xFF);
-  ack_payload[1] = static_cast<byte>((sequence_number >> 8) & 0xFF);
-  ack_payload[2] = static_cast<byte>((sequence_number >> 16) & 0xFF);
-  ack_payload[3] = static_cast<byte>((sequence_number >> 24) & 0xFF);
+  wire_le::StoreU32(ack_payload, sequence_number);
   OutgoingPacket out(return_address.id, PacketType::Acknowledgement,
                      PacketChannelType::Control, flags,
                      base::Span<byte>(ack_payload, sizeof(ack_payload)));

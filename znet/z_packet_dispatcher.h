@@ -28,8 +28,8 @@ class PacketDispatcher {
   PacketDispatcher(ZSocket& socket, ZPeerMapping& peer_list)
       : socket_(socket), peer_list_(peer_list) {}
 
-  void SetAwaitingAckCounters(base::Atomic<size_t>* packet_count,
-                              base::Atomic<size_t>* bytes) {
+  void SetAwaitingAckCounters(base::Atomic<mem_size>* packet_count,
+                              base::Atomic<mem_size>* bytes) {
     awaiting_ack_packet_count_ = packet_count;
     awaiting_ack_bytes_ = bytes;
   }
@@ -100,7 +100,7 @@ class PacketDispatcher {
       base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
     if (packet.flags.reliable && packet.type != PacketType::Acknowledgement &&
         packet.last_send_time == 0) {
-      const size_t payload_bytes = packet.heap_data_size;
+      const mem_size payload_bytes = packet.heap_data_size;
       packet.flags.awaiting_ack = true;
       packet.last_send_time = static_cast<u32>(base::GetUnixTimeStamp());
       if (receipt_queue.insert(next_outgoing_sequence_number_, std::move(packet))) {
@@ -117,8 +117,8 @@ class PacketDispatcher {
   ZSocket& socket_;
   ZPeerMapping& peer_list_;
   base::Atomic<u32> next_outgoing_sequence_number_{0};
-  base::Atomic<size_t>* awaiting_ack_packet_count_{nullptr};
-  base::Atomic<size_t>* awaiting_ack_bytes_{nullptr};
+  base::Atomic<mem_size>* awaiting_ack_packet_count_{nullptr};
+  base::Atomic<mem_size>* awaiting_ack_bytes_{nullptr};
 };
 
 }  // namespace tx::network

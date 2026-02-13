@@ -4,6 +4,8 @@
 
 #include <limits>
 
+#include "z_wire_le.h"
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -14,16 +16,16 @@
 namespace tx::network {
 class PacketWriter {
  public:
-  explicit PacketWriter(size_t initial_size = 1024)
+  explicit PacketWriter(mem_size initial_size = 1024)
       : buffer_(new byte[initial_size]), capacity_(initial_size), offset_(0) {}
 
   ~PacketWriter() { delete[] buffer_; }
 
-  void EnsureCapacity(size_t required) {
+  void EnsureCapacity(mem_size required) {
     if (required <= capacity_) {
       return;
     }
-    size_t new_capacity = capacity_;
+    mem_size new_capacity = capacity_;
     while (new_capacity < required) {
       new_capacity *= 2;
     }
@@ -67,9 +69,9 @@ class PacketWriter {
     if (data.size() > std::numeric_limits<u16>::max()) {
       return false;
     }
-    if (!Put<u16>(static_cast<u16>(data.size()))) {
-      return false;
-    }
+    EnsureCapacity(offset_ + sizeof(u16) + data.size());
+    wire_le::StoreU16(buffer_ + offset_, static_cast<u16>(data.size()));
+    offset_ += sizeof(u16);
     return PutS(data);
   }
 
@@ -79,8 +81,8 @@ class PacketWriter {
 
  private:
   byte* buffer_;
-  size_t capacity_;
-  size_t offset_;
+  mem_size capacity_;
+  mem_size offset_;
 
   // Prevent copying and assignment
   PacketWriter(const PacketWriter&) = delete;
@@ -90,7 +92,7 @@ class PacketWriter {
 class PacketReader {
  public:
   // Constructor takes a pointer to a buffer and its size
-  PacketReader(const byte* buffer, size_t size)
+  PacketReader(const byte* buffer, mem_size size)
       : buffer_(buffer), capacity_(size), offset_(0) {}
 
   // Read method for scalar types
@@ -131,10 +133,11 @@ class PacketReader {
   }
 
   bool ReadList(base::Vector<byte>& data) {
-    u16 size;
-    if (!Read<u16>(size)) {
+    if (offset_ + sizeof(u16) > capacity_) {
       return false;
     }
+    const u16 size = wire_le::LoadU16(buffer_ + offset_);
+    offset_ += sizeof(u16);
     if (offset_ + size > capacity_) {
       return false;
     }
@@ -143,12 +146,12 @@ class PacketReader {
   }
 
   // Return the current position in the buffer
-  size_t position() const { return offset_; }
+  mem_size position() const { return offset_; }
 
  private:
   const byte* buffer_;
-  size_t capacity_;
-  size_t offset_;
+  mem_size capacity_;
+  mem_size offset_;
 
   // Prevent copying and assignment
   PacketReader(const PacketReader&) = delete;

@@ -4,6 +4,7 @@
 #include "z_file_transporter.h"
 #include "z_file_write_interface.h"
 #include "z_transport.h"
+#include "z_wire_le.h"
 
 #include <algorithm>
 #include <atomic>
@@ -42,13 +43,13 @@ constexpr u8 kFlagHasHmac = 1u << 2u;
 constexpr u32 kFnv1aOffset = 2166136261u;
 constexpr u32 kFnv1aPrime = 16777619u;
 
-constexpr size_t kDispatchBatchSize = 64;
-constexpr size_t kFixedHeaderSize = 48;
-constexpr size_t kHmacSize = 32;
+constexpr mem_size kDispatchBatchSize = 64;
+constexpr mem_size kFixedHeaderSize = 48;
+constexpr mem_size kHmacSize = 32;
 
 constexpr char kFileHmacKeyEnv[] = "ZNET_FILE_HMAC_KEY";
 
-bool ComputeHmacSha256(const byte* data, size_t size, const byte* key, size_t key_size, byte* out_hmac) {
+bool ComputeHmacSha256(const byte* data, mem_size size, const byte* key, mem_size key_size, byte* out_hmac) {
 #ifdef ZNET_USE_STL
   unsigned int hmac_len = 0;
   return HMAC(EVP_sha256(), key, static_cast<int>(key_size), data, size, out_hmac, &hmac_len) != nullptr && hmac_len == kHmacSize;
@@ -69,7 +70,7 @@ bool ContainsPathTraversal(const base::String& path) {
   if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
     return true;
   }
-  for (size_t i = 0; i < path.size(); ++i) {
+  for (mem_size i = 0; i < path.size(); ++i) {
     if (path[i] == '.' && i + 1 < path.size() && path[i + 1] == '.') {
       if (i + 2 >= path.size() || path[i + 2] == '/' || path[i + 2] == '\\') {
         return true;
@@ -84,78 +85,27 @@ bool ContainsPathTraversal(const base::String& path) {
   return false;
 }
 
-u32 UpdateChecksum(const byte* data, size_t size, u32 seed) {
+u32 UpdateChecksum(const byte* data, mem_size size, u32 seed) {
   u32 hash = seed;
-  for (size_t i = 0; i < size; ++i) {
+  for (mem_size i = 0; i < size; ++i) {
     hash ^= static_cast<u32>(data[i]);
     hash *= kFnv1aPrime;
   }
   return hash;
 }
 
-u32 ComputeChecksum(const byte* data, size_t size) {
+u32 ComputeChecksum(const byte* data, mem_size size) {
   return UpdateChecksum(data, size, kFnv1aOffset);
 }
 
-size_t CalculateTotalChunks(const u64 file_size, const u32 chunk_size) {
+mem_size CalculateTotalChunks(const u64 file_size, const u32 chunk_size) {
   if (chunk_size == 0) {
     return 0;
   }
   if (file_size == 0) {
     return 1;
   }
-  return static_cast<size_t>((file_size + chunk_size - 1u) / chunk_size);
-}
-
-void AppendU16(base::Vector<byte>& out, const u16 value) {
-  out.push_back(static_cast<byte>(value & 0xFFu));
-  out.push_back(static_cast<byte>((value >> 8u) & 0xFFu));
-}
-
-void AppendU32(base::Vector<byte>& out, const u32 value) {
-  out.push_back(static_cast<byte>(value & 0xFFu));
-  out.push_back(static_cast<byte>((value >> 8u) & 0xFFu));
-  out.push_back(static_cast<byte>((value >> 16u) & 0xFFu));
-  out.push_back(static_cast<byte>((value >> 24u) & 0xFFu));
-}
-
-void AppendU64(base::Vector<byte>& out, const u64 value) {
-  for (u32 shift = 0; shift < 64u; shift += 8u) {
-    out.push_back(static_cast<byte>((value >> shift) & 0xFFu));
-  }
-}
-
-bool ReadU16(const base::Span<byte>& input, size_t& cursor, u16& out) {
-  if (cursor + sizeof(u16) > input.size()) {
-    return false;
-  }
-  out = static_cast<u16>(input[cursor]) |
-        (static_cast<u16>(input[cursor + 1]) << 8u);
-  cursor += sizeof(u16);
-  return true;
-}
-
-bool ReadU32(const base::Span<byte>& input, size_t& cursor, u32& out) {
-  if (cursor + sizeof(u32) > input.size()) {
-    return false;
-  }
-  out = static_cast<u32>(input[cursor]) |
-        (static_cast<u32>(input[cursor + 1]) << 8u) |
-        (static_cast<u32>(input[cursor + 2]) << 16u) |
-        (static_cast<u32>(input[cursor + 3]) << 24u);
-  cursor += sizeof(u32);
-  return true;
-}
-
-bool ReadU64(const base::Span<byte>& input, size_t& cursor, u64& out) {
-  if (cursor + sizeof(u64) > input.size()) {
-    return false;
-  }
-  out = 0;
-  for (u32 shift = 0; shift < 64u; shift += 8u) {
-    out |= (static_cast<u64>(input[cursor++]) << shift);
-  }
-  return true;
+  return static_cast<mem_size>((file_size + chunk_size - 1u) / chunk_size);
 }
 
 u64 SafeReadChunk(base::File& file,
@@ -219,14 +169,14 @@ bool ZFileTransporter::SendFile(const base::Path& path,
   }
   const u64 file_size = static_cast<u64>(signed_file_size);
   if (tuning.chunk_size == 0 ||
-      tuning.chunk_size > static_cast<size_t>(std::numeric_limits<u32>::max())) {
+      tuning.chunk_size > static_cast<mem_size>(std::numeric_limits<u32>::max())) {
     BASE_LOGE(kLogTag, "Invalid chunk_size in transfer tuning");
     return false;
   }
   const u32 chunk_size = static_cast<u32>(tuning.chunk_size);
-  const size_t total_chunks_64 = CalculateTotalChunks(file_size, chunk_size);
+  const mem_size total_chunks_64 = CalculateTotalChunks(file_size, chunk_size);
   if (total_chunks_64 == 0 ||
-      total_chunks_64 > static_cast<size_t>(std::numeric_limits<u32>::max())) {
+      total_chunks_64 > static_cast<mem_size>(std::numeric_limits<u32>::max())) {
     BASE_LOGE(kLogTag, "Unsupported chunk count for file {}", path.ToAsciiString());
     return false;
   }
@@ -282,7 +232,7 @@ bool ZFileTransporter::SendFile(const base::Path& path,
 
     payload.clear();
     payload.reserve(kFixedHeaderSize + file_name.size() + bytes_read);
-    AppendU32(payload, kWireMagic);
+    wire_le::AppendU32(payload, kWireMagic);
     payload.push_back(kWireVersion);
     u8 wire_flags = 0;
     if (chunk_index == 0) {
@@ -293,24 +243,24 @@ bool ZFileTransporter::SendFile(const base::Path& path,
       wire_flags |= kFlagLastChunk;
     }
     payload.push_back(wire_flags);
-    AppendU64(payload, transfer_id);
-    AppendU64(payload, file_size);
-    AppendU32(payload, chunk_size);
-    AppendU32(payload, chunk_index);
-    AppendU32(payload, total_chunks);
-    AppendU32(payload, bytes_read);
-    AppendU32(payload,
+    wire_le::AppendU64(payload, transfer_id);
+    wire_le::AppendU64(payload, file_size);
+    wire_le::AppendU32(payload, chunk_size);
+    wire_le::AppendU32(payload, chunk_index);
+    wire_le::AppendU32(payload, total_chunks);
+    wire_le::AppendU32(payload, bytes_read);
+    wire_le::AppendU32(payload,
               ComputeChecksum(reinterpret_cast<const byte*>(read_buffer.data()),
                               bytes_read));
-    AppendU32(payload, is_last_chunk ? file_checksum : 0);
+    wire_le::AppendU32(payload, is_last_chunk ? file_checksum : 0);
     if (chunk_index == 0) {
-      AppendU16(payload, static_cast<u16>(file_name.size()));
+      wire_le::AppendU16(payload, static_cast<u16>(file_name.size()));
       const auto* file_name_bytes =
           reinterpret_cast<const byte*>(file_name.data());
       payload.insert(payload.end(), file_name_bytes,
                      file_name_bytes + file_name.size());
     } else {
-      AppendU16(payload, 0);
+      wire_le::AppendU16(payload, 0);
     }
     const auto* chunk_bytes = reinterpret_cast<const byte*>(read_buffer.data());
     payload.insert(payload.end(), chunk_bytes, chunk_bytes + bytes_read);
@@ -393,7 +343,7 @@ bool ZFileTransporter::AssembleFileFromChunks(
     }
 
     const base::String& chunk_data = it->second;
-    size_t chunk_offset = 0;
+    mem_size chunk_offset = 0;
     while (chunk_offset < chunk_data.size()) {
       const int wrote = output_file.WriteAtCurrentPos(
           chunk_data.data() + chunk_offset,
@@ -402,7 +352,7 @@ bool ZFileTransporter::AssembleFileFromChunks(
         BASE_LOGE(kLogTag, "Failed to write chunk: {}", i);
         return false;
       }
-      chunk_offset += static_cast<size_t>(wrote);
+      chunk_offset += static_cast<mem_size>(wrote);
       bytes_written += static_cast<u64>(wrote);
     }
     file_checksum =
@@ -475,7 +425,7 @@ bool ZFileTransporter::BuildTransferChunkPayload(
 
   payload.clear();
   payload.reserve(kFixedHeaderSize + chunk.file_name.size() + chunk.data.size());
-  AppendU32(payload, kWireMagic);
+  wire_le::AppendU32(payload, kWireMagic);
   payload.push_back(kWireVersion);
   u8 flags = 0;
   if (chunk.has_file_name) {
@@ -485,15 +435,15 @@ bool ZFileTransporter::BuildTransferChunkPayload(
     flags |= kFlagLastChunk;
   }
   payload.push_back(flags);
-  AppendU64(payload, chunk.transfer_id);
-  AppendU64(payload, chunk.file_size);
-  AppendU32(payload, chunk.chunk_size);
-  AppendU32(payload, chunk.chunk_index);
-  AppendU32(payload, chunk.total_chunks);
-  AppendU32(payload, static_cast<u32>(chunk.data.size()));
-  AppendU32(payload, chunk.chunk_checksum);
-  AppendU32(payload, chunk.file_checksum);
-  AppendU16(payload, static_cast<u16>(chunk.file_name.size()));
+  wire_le::AppendU64(payload, chunk.transfer_id);
+  wire_le::AppendU64(payload, chunk.file_size);
+  wire_le::AppendU32(payload, chunk.chunk_size);
+  wire_le::AppendU32(payload, chunk.chunk_index);
+  wire_le::AppendU32(payload, chunk.total_chunks);
+  wire_le::AppendU32(payload, static_cast<u32>(chunk.data.size()));
+  wire_le::AppendU32(payload, chunk.chunk_checksum);
+  wire_le::AppendU32(payload, chunk.file_checksum);
+  wire_le::AppendU16(payload, static_cast<u16>(chunk.file_name.size()));
 
   if (!chunk.file_name.empty()) {
     const auto* bytes = reinterpret_cast<const byte*>(chunk.file_name.data());
@@ -513,14 +463,14 @@ bool ZFileTransporter::ParseTransferChunkPayload(const base::Span<byte>& payload
   }
 
   chunk = TransferChunk{};
-  size_t cursor = 0;
+  mem_size cursor = 0;
   u32 magic = 0;
   u8 version = 0;
   u8 flags = 0;
   u16 file_name_size = 0;
   u32 chunk_data_size = 0;
 
-  if (!ReadU32(payload, cursor, magic)) {
+  if (!wire_le::ReadU32(payload, cursor, magic)) {
     return false;
   }
   if (magic != kWireMagic || cursor >= payload.size()) {
@@ -534,19 +484,19 @@ bool ZFileTransporter::ParseTransferChunkPayload(const base::Span<byte>& payload
   if ((flags & ~(kFlagHasFileName | kFlagLastChunk)) != 0) {
     return false;
   }
-  if (!ReadU64(payload, cursor, chunk.transfer_id)) {
+  if (!wire_le::ReadU64(payload, cursor, chunk.transfer_id)) {
     return false;
   }
-  if (!ReadU64(payload, cursor, chunk.file_size)) {
+  if (!wire_le::ReadU64(payload, cursor, chunk.file_size)) {
     return false;
   }
-  if (!ReadU32(payload, cursor, chunk.chunk_size) ||
-      !ReadU32(payload, cursor, chunk.chunk_index) ||
-      !ReadU32(payload, cursor, chunk.total_chunks) ||
-      !ReadU32(payload, cursor, chunk_data_size) ||
-      !ReadU32(payload, cursor, chunk.chunk_checksum) ||
-      !ReadU32(payload, cursor, chunk.file_checksum) ||
-      !ReadU16(payload, cursor, file_name_size)) {
+  if (!wire_le::ReadU32(payload, cursor, chunk.chunk_size) ||
+      !wire_le::ReadU32(payload, cursor, chunk.chunk_index) ||
+      !wire_le::ReadU32(payload, cursor, chunk.total_chunks) ||
+      !wire_le::ReadU32(payload, cursor, chunk_data_size) ||
+      !wire_le::ReadU32(payload, cursor, chunk.chunk_checksum) ||
+      !wire_le::ReadU32(payload, cursor, chunk.file_checksum) ||
+      !wire_le::ReadU16(payload, cursor, file_name_size)) {
     return false;
   }
 
@@ -648,8 +598,8 @@ bool ZFileTransporter::WaitForSendWindow(const TransferTuning& tuning) const {
       return false;
     }
     const auto pressure = transport_layer_.GetOutboundPressure();
-    const size_t inflight_chunks = pressure.control_queued_packets;
-    const size_t inflight_bytes = pressure.control_queued_bytes;
+    const mem_size inflight_chunks = pressure.control_queued_packets;
+    const mem_size inflight_bytes = pressure.control_queued_bytes;
 
     const bool chunks_ok =
         (tuning.max_inflight_chunks == 0) ||
@@ -692,7 +642,7 @@ bool ZFileTransporter::ComputeFileChecksum(const base::Path& path,
       break;
     }
     checksum = UpdateChecksum(reinterpret_cast<const byte*>(buffer.data()),
-                              static_cast<size_t>(read), checksum);
+                              static_cast<mem_size>(read), checksum);
     offset += static_cast<u64>(read);
   }
   out_checksum = checksum;

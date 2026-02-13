@@ -50,10 +50,10 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
 
   static bool SerializeAddress(base::Vector<byte>& buffer,
                                const ZSocket::Address& address);
-  static bool DeserializeAddress(const byte* data,
-                                 size_t data_size,
-                                 size_t& cursor,
-                                 ZSocket::Address& address);
+static bool DeserializeAddress(const byte* data,
+                                  mem_size data_size,
+                                  mem_size& cursor,
+                                  ZSocket::Address& address);
   static bool IsSelfAddress(const ZSocket::Address& address, u16 self_port);
 
   void QueueIncoming(const IncomingPacket& packet);

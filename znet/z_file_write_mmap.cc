@@ -20,12 +20,12 @@ namespace {
 
 class MMapFileWriteHandle final : public IFileWriteHandle {
  public:
-  MMapFileWriteHandle(int fd, void* mapping, size_t mapped_size)
+  MMapFileWriteHandle(int fd, void* mapping, mem_size mapped_size)
       : fd_(fd), mapping_(mapping), mapped_size_(mapped_size) {}
 
   ~MMapFileWriteHandle() override { Close(); }
 
-  bool WriteAt(u64 offset, const char* data, size_t size) override {
+  bool WriteAt(u64 offset, const char* data, mem_size size) override {
     if (size == 0) {
       return true;
     }
@@ -64,7 +64,7 @@ class MMapFileWriteHandle final : public IFileWriteHandle {
  private:
   int fd_{-1};
   void* mapping_{nullptr};
-  size_t mapped_size_{0};
+  mem_size mapped_size_{0};
 };
 
 class MemoryMappedFileWriteFactory final : public IFileWriteFactory {
@@ -91,11 +91,11 @@ class MemoryMappedFileWriteFactory final : public IFileWriteFactory {
           new MMapFileWriteHandle(fd, nullptr, 0));
     }
 
-    if (expected_size > static_cast<u64>(std::numeric_limits<size_t>::max())) {
+    if (expected_size > static_cast<u64>(std::numeric_limits<mem_size>::max())) {
       close(fd);
       return {};
     }
-    void* mapping = mmap(nullptr, static_cast<size_t>(expected_size),
+    void* mapping = mmap(nullptr, static_cast<mem_size>(expected_size),
                          PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (mapping == MAP_FAILED) {
       close(fd);
@@ -103,7 +103,7 @@ class MemoryMappedFileWriteFactory final : public IFileWriteFactory {
     }
 
     return base::UniquePointer<IFileWriteHandle>(new MMapFileWriteHandle(
-        fd, mapping, static_cast<size_t>(expected_size)));
+        fd, mapping, static_cast<mem_size>(expected_size)));
   }
 };
 

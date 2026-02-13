@@ -53,7 +53,7 @@ class PacketReceiver {
       return HandleReceiveError(recvResult);
     }
 
-    if (static_cast<size_t>(recvResult) < sizeof(PacketHeader)) {
+    if (static_cast<mem_size>(recvResult) < sizeof(PacketHeader)) {
       BASE_LOGE(kLogTag, "Received packet too small for header");
       return ReceiveResult::Error;
     }
@@ -86,7 +86,7 @@ class PacketReceiver {
                     IncomingPacket& incoming,
                     const ZSocket::Address& address,
                     byte* buffer,
-                    size_t size) {
+                    mem_size size) {
     PacketUnpacker unpacker(crypto);
     if (!unpacker.UnpackPacket(buffer, size, incoming)) {
       BASE_LOGE(kLogTag, "Failed to unpack packet");

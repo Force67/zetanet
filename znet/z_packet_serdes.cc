@@ -230,7 +230,7 @@ void PacketBuilder::FillPacketHeader(const base::Span<byte> outgoing_data,
 }
 
 bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
-                                  size_t in_size,
+                                  mem_size in_size,
                                   IncomingPacket& out) {
   if (!in_buffer || in_size < sizeof(PacketHeader)) {
     BASE_LOGE(kLogTag, "Invalid packet buffer");
@@ -306,7 +306,7 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
     return false;
   }
 
-  size_t payload_size = in_size - offset;
+  mem_size payload_size = in_size - offset;
   const u32 payload_checksum = ComputeChecksum32(in_buffer + offset, payload_size);
   if (payload_checksum != expected_payload_checksum) {
     BASE_LOGE(kLogTag, "Payload checksum mismatch");

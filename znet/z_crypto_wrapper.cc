@@ -162,8 +162,8 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
     return false;
   }
 
-  const size_t tag_size = 16;
-  const size_t ciphertext_size = plaintext.size();
+  const mem_size tag_size = 16;
+  const mem_size ciphertext_size = plaintext.size();
   
   encrypted.resize(sizeof(nonce) + ciphertext_size + tag_size);
   std::memcpy(encrypted.data(), nonce, sizeof(nonce));
@@ -225,8 +225,8 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
     return false;
   }
 
-  const size_t nonce_size = 12;
-  const size_t tag_size = 16;
+  const mem_size nonce_size = 12;
+  const mem_size tag_size = 16;
   
   if (encrypted_data.size() < nonce_size + tag_size) {
     BASE_LOGE(kLogTag, "Encrypted payload too short");
@@ -234,7 +234,7 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
   }
   
   const byte* nonce = encrypted_data.data();
-  const size_t ciphertext_size = encrypted_data.size() - nonce_size - tag_size;
+  const mem_size ciphertext_size = encrypted_data.size() - nonce_size - tag_size;
   const byte* ciphertext = encrypted_data.data() + nonce_size;
   const byte* tag = encrypted_data.data() + nonce_size + ciphertext_size;
   
@@ -284,7 +284,7 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
     return false;
   }
   
-  plaintext.resize(static_cast<size_t>(out_len + final_len));
+  plaintext.resize(static_cast<mem_size>(out_len + final_len));
   return true;
 }
 

@@ -18,7 +18,7 @@ class IFileWriteHandle {
  public:
   virtual ~IFileWriteHandle() = default;
 
-  virtual bool WriteAt(u64 offset, const char* data, size_t size) = 0;
+  virtual bool WriteAt(u64 offset, const char* data, mem_size size) = 0;
   virtual bool FlushAndClose() = 0;
   virtual void Close() = 0;
 };
