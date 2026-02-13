@@ -51,6 +51,9 @@ bool AddressFromString(const base::StringRef ip, u16 port, ZSocket::Address& out
   std::memset(&out, 0, sizeof(out));
   std::memcpy(out.ip, ip.data(), ip.size());
   out.port = port;
+  // Detect address family from IP string
+  std::string ip_str(ip.data(), ip.size());
+  out.address_family = (ip_str.find(':') != std::string::npos) ? AF_INET6 : AF_INET;
   return true;
 }
 }  // namespace
@@ -107,9 +110,10 @@ void ZP2PNode::SendMessage(ZPeerId id, const std::string& data) {
     return;
   }
   const u8 use_encryption = crypto_context_ ? 1 : 0;
+  const u8 use_compression = compression_enabled() ? 1 : 0;
   const PackageFlags flags{.reliable = 1,
                            .encrypted = use_encryption,
-                           .compressed = 0,
+                           .compressed = use_compression,
                            .priority = static_cast<u8>(PacketPriority::Medium),
                            .acknowledged = 0,
                            .awaiting_ack = 1,
@@ -438,6 +442,7 @@ bool ZP2PNode::SerializeAddress(base::Vector<byte>& buffer,
   if (ip_len == 0 || ip_len > 0xFFu) {
     return false;
   }
+  buffer.push_back(static_cast<byte>(address.address_family));
   buffer.push_back(static_cast<byte>(ip_len));
   for (size_t i = 0; i < ip_len; ++i) {
     buffer.push_back(static_cast<byte>(address.ip[i]));
@@ -453,6 +458,10 @@ bool ZP2PNode::DeserializeAddress(const byte* data,
   if (cursor >= data_size) {
     return false;
   }
+  const u8 addr_family = data[cursor++];
+  if (cursor >= data_size) {
+    return false;
+  }
   const size_t ip_len = data[cursor++];
   if (ip_len == 0 || ip_len >= sizeof(address.ip)) {
     return false;
@@ -462,6 +471,7 @@ bool ZP2PNode::DeserializeAddress(const byte* data,
   }
 
   std::memset(&address, 0, sizeof(address));
+  address.address_family = addr_family;
   std::memcpy(address.ip, data + cursor, ip_len);
   cursor += ip_len;
 
@@ -474,7 +484,15 @@ bool ZP2PNode::DeserializeAddress(const byte* data,
 }
 
 bool ZP2PNode::IsSelfAddress(const ZSocket::Address& address, u16 self_port) {
-  return self_port != 0 && address.port == self_port;
+  if (self_port == 0 || address.port != self_port) {
+    return false;
+  }
+  if (std::strcmp(address.ip, "127.0.0.1") == 0 ||
+      std::strcmp(address.ip, "0.0.0.0") == 0 ||
+      std::strcmp(address.ip, "::1") == 0) {
+    return true;
+  }
+  return false;
 }
 
 void ZP2PNode::QueueIncoming(const IncomingPacket& packet) {

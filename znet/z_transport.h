@@ -56,12 +56,15 @@ class ZAsyncTransportLayer {
 
   State state() const { return state_; }
 
+  bool compression_enabled() const { return use_compression_; }
+
  private:
   tx::network::ZSocket socket_;
   base::Atomic<bool> stop_threads{false};
 
  protected:
   State state_{State::kDisconnected};
+  bool use_compression_{false};
   base::UniquePointer<ZCryptoContext> crypto_context_;
   ZPacketQueue packet_queue_;
   ZPeerMapping peer_mapping_;

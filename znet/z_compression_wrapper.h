@@ -16,33 +16,56 @@ namespace tx::network {
 // wrapper around the preferred compression library
 class ZCompressionContext {
  public:
-  static base::Vector<char> Compress(const base::Span<char>& input_data) {
-    int input_size = static_cast<int>(input_data.size());
-    int max_compressed_size = LZ4_compressBound(input_size);
-    base::Vector<char> compressed_data(max_compressed_size);
+  static constexpr size_t kMaxDecompressedSize = 64 * 1024 * 1024;  // 64 MB limit
 
-    mem_size compressed_size =
-        LZ4_compress_default(input_data.data(), compressed_data.data(),
-                             input_size, max_compressed_size);
+  static bool Compress(const byte* input_data, size_t input_size,
+                       base::Vector<byte>& compressed) {
+    if (input_size == 0) {
+      compressed.clear();
+      return true;
+    }
+    int max_compressed_size = LZ4_compressBound(static_cast<int>(input_size));
+    compressed.resize(static_cast<size_t>(max_compressed_size));
 
-    compressed_data.resize(compressed_size);
-    return compressed_data;
-  }
+    int compressed_size =
+        LZ4_compress_default(reinterpret_cast<const char*>(input_data),
+                             reinterpret_cast<char*>(compressed.data()),
+                             static_cast<int>(input_size), max_compressed_size);
 
-  static base::Vector<char> Decompress(const byte* data,
-                                       mem_size data_size,
-                                       mem_size original_size) {
-    base::Vector<char> decompressed_data(original_size);
-
-    int decompressed_size = LZ4_decompress_safe(
-        (const char*)data, decompressed_data.data(),
-        static_cast<int>(data_size), static_cast<int>(original_size));
-
-    if (decompressed_size < 0) {
-      // decompression error
+    if (compressed_size <= 0) {
+      compressed.clear();
+      return false;
     }
 
-    return decompressed_data;
+    compressed.resize(static_cast<size_t>(compressed_size));
+    return true;
+  }
+
+  static bool Decompress(const byte* data, size_t data_size,
+                          size_t original_size,
+                          base::Vector<byte>& decompressed) {
+    if (original_size > kMaxDecompressedSize) {
+      decompressed.clear();
+      return false;
+    }
+    if (data_size == 0 && original_size == 0) {
+      decompressed.clear();
+      return true;
+    }
+    decompressed.resize(original_size);
+
+    int decompressed_size = LZ4_decompress_safe(
+        reinterpret_cast<const char*>(data),
+        reinterpret_cast<char*>(decompressed.data()),
+        static_cast<int>(data_size), static_cast<int>(original_size));
+
+    if (decompressed_size < 0 ||
+        static_cast<size_t>(decompressed_size) != original_size) {
+      decompressed.clear();
+      return false;
+    }
+
+    return true;
   }
 };
 

@@ -25,16 +25,25 @@ bool ZSocket::CreateServer(u16 port, bool ipv6) {
     BASE_LOGE(kLogTag, "InitSocket failed");
     return false;
   }
+
+  address_family_ = ipv6 ? AF_INET6 : AF_INET;
   memset(&server_, 0, sizeof(server_));
-  server_.sin_port = htons(port);
+
   if (ipv6) {
-    server_.sin_family = AF_INET6;
+    auto* addr6 = reinterpret_cast<sockaddr_in6*>(&server_);
+    addr6->sin6_family = AF_INET6;
+    addr6->sin6_port = htons(port);
+    addr6->sin6_addr = in6addr_any;
+    server_len_ = sizeof(sockaddr_in6);
   } else {
-    server_.sin_family = AF_INET;
-    server_.sin_addr.s_addr = INADDR_ANY;
+    auto* addr4 = reinterpret_cast<sockaddr_in*>(&server_);
+    addr4->sin_family = AF_INET;
+    addr4->sin_port = htons(port);
+    addr4->sin_addr.s_addr = INADDR_ANY;
+    server_len_ = sizeof(sockaddr_in);
   }
 
-  socket_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  socket_ = ::socket(address_family_, SOCK_DGRAM, IPPROTO_UDP);
   if (socket_ == ZNET_INVALID_SOCKET) {
     BASE_LOGE(kLogTag, "Could not create socket. Error : {}",
               ZSocket::GetErrorString());
@@ -42,7 +51,14 @@ bool ZSocket::CreateServer(u16 port, bool ipv6) {
     return false;
   }
 
-  if (::bind(socket_, (struct sockaddr*)&server_, sizeof(server_)) ==
+  if (ipv6) {
+    // Allow IPv6-only mode
+    int v6only = 1;
+    setsockopt(socket_, IPPROTO_IPV6, IPV6_V6ONLY,
+               reinterpret_cast<const char*>(&v6only), sizeof(v6only));
+  }
+
+  if (::bind(socket_, reinterpret_cast<struct sockaddr*>(&server_), server_len_) ==
       ZNET_SOCKET_ERROR) {
     BASE_LOGE(kLogTag, "Bind failed with error : {}", ZSocket::GetErrorString());
     DestroySocket();
@@ -65,7 +81,8 @@ bool ZSocket::CreateServer(u16 port, bool ipv6) {
 #endif
   BASE_LOGI(kLogTag, "Server set to non-blocking mode");
 #endif
-  BASE_LOGI(kLogTag, "Server socket initialized on port {}", port);
+  BASE_LOGI(kLogTag, "Server socket initialized on port {} ({})", port,
+            ipv6 ? "IPv6" : "IPv4");
   return true;
 }
 
@@ -78,7 +95,9 @@ bool ZSocket::CreateClient(const base::StringRef ip,
     return false;
   }
 
-  socket_ = ::socket(ipv6 ? AF_INET6 : AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  address_family_ = ipv6 ? AF_INET6 : AF_INET;
+
+  socket_ = ::socket(address_family_, SOCK_DGRAM, IPPROTO_UDP);
   if (socket_ == ZNET_INVALID_SOCKET) {
     BASE_LOGE(kLogTag, "Could not create socket. Error : {}",
               ZSocket::GetErrorString());
@@ -87,32 +106,50 @@ bool ZSocket::CreateClient(const base::StringRef ip,
   }
 
   memset(&server_, 0, sizeof(server_));
-  if (ipv6) {
-    server_.sin_family = AF_INET6;
-  } else {
-    server_.sin_family = AF_INET;
-  }
-  server_.sin_port = htons(port);
-
-  // Convert IP address from string to binary form
-  // StringRef provides .data() which may not be null-terminated in all cases.
-  // For inet_pton we need a null-terminated string.
   std::string ip_str(ip.data(), ip.size());
-  if ((ipv6 && ::inet_pton(AF_INET6, ip_str.c_str(), &server_.sin_addr) <= 0) ||
-      (!ipv6 && ::inet_pton(AF_INET, ip_str.c_str(), &server_.sin_addr) <= 0)) {
-    BASE_LOGE(kLogTag, "inet_pton failed with error : {}",
-              ZSocket::GetErrorString());
-    DestroySocket();
-    return false;
+
+  if (ipv6) {
+    auto* addr6 = reinterpret_cast<sockaddr_in6*>(&server_);
+    addr6->sin6_family = AF_INET6;
+    addr6->sin6_port = htons(port);
+    if (::inet_pton(AF_INET6, ip_str.c_str(), &addr6->sin6_addr) <= 0) {
+      BASE_LOGE(kLogTag, "inet_pton (IPv6) failed with error : {}",
+                ZSocket::GetErrorString());
+      DestroySocket();
+      return false;
+    }
+    server_len_ = sizeof(sockaddr_in6);
+  } else {
+    auto* addr4 = reinterpret_cast<sockaddr_in*>(&server_);
+    addr4->sin_family = AF_INET;
+    addr4->sin_port = htons(port);
+    if (::inet_pton(AF_INET, ip_str.c_str(), &addr4->sin_addr) <= 0) {
+      BASE_LOGE(kLogTag, "inet_pton (IPv4) failed with error : {}",
+                ZSocket::GetErrorString());
+      DestroySocket();
+      return false;
+    }
+    server_len_ = sizeof(sockaddr_in);
   }
 
   if (local_bind_port != 0) {
-    sockaddr_in local_addr{};
-    local_addr.sin_family = AF_INET;
-    local_addr.sin_addr.s_addr = INADDR_ANY;
-    local_addr.sin_port = htons(local_bind_port);
+    sockaddr_storage local_addr{};
+    socklen_t local_len = 0;
+    if (ipv6) {
+      auto* local6 = reinterpret_cast<sockaddr_in6*>(&local_addr);
+      local6->sin6_family = AF_INET6;
+      local6->sin6_addr = in6addr_any;
+      local6->sin6_port = htons(local_bind_port);
+      local_len = sizeof(sockaddr_in6);
+    } else {
+      auto* local4 = reinterpret_cast<sockaddr_in*>(&local_addr);
+      local4->sin_family = AF_INET;
+      local4->sin_addr.s_addr = INADDR_ANY;
+      local4->sin_port = htons(local_bind_port);
+      local_len = sizeof(sockaddr_in);
+    }
     if (::bind(socket_, reinterpret_cast<sockaddr*>(&local_addr),
-               sizeof(local_addr)) == ZNET_SOCKET_ERROR) {
+               local_len) == ZNET_SOCKET_ERROR) {
       BASE_LOGE(kLogTag, "Client bind({}) failed with error : {}",
                 local_bind_port, ZSocket::GetErrorString());
       DestroySocket();
@@ -146,14 +183,30 @@ bool ZSocket::CreateClient(const base::StringRef ip,
 }
 
 i32 ZSocket::Send(const Address& target, const base::Span<byte> data) {
-  sockaddr_in target_addr{};
-  target_addr.sin_family = AF_INET;
-  target_addr.sin_port = ::htons(target.port);
-  if (::inet_pton(AF_INET, target.ip, &target_addr.sin_addr) <= 0) {
-    BASE_LOGE(kLogTag, "Failed to convert IP address: {}", target.ip);
-    return -1;
+  sockaddr_storage target_addr{};
+  socklen_t addr_len = 0;
+
+  if (target.address_family == AF_INET6) {
+    auto* addr6 = reinterpret_cast<sockaddr_in6*>(&target_addr);
+    addr6->sin6_family = AF_INET6;
+    addr6->sin6_port = ::htons(target.port);
+    if (::inet_pton(AF_INET6, target.ip, &addr6->sin6_addr) <= 0) {
+      BASE_LOGE(kLogTag, "Failed to convert IPv6 address: {}", target.ip);
+      return -1;
+    }
+    addr_len = sizeof(sockaddr_in6);
+  } else {
+    auto* addr4 = reinterpret_cast<sockaddr_in*>(&target_addr);
+    addr4->sin_family = AF_INET;
+    addr4->sin_port = ::htons(target.port);
+    if (::inet_pton(AF_INET, target.ip, &addr4->sin_addr) <= 0) {
+      BASE_LOGE(kLogTag, "Failed to convert IPv4 address: {}", target.ip);
+      return -1;
+    }
+    addr_len = sizeof(sockaddr_in);
   }
-  return InternalSend(target_addr, data);
+
+  return InternalSend(target_addr, addr_len, data);
 }
 
 const char* ZSocket::GetErrorString(Error error) {
@@ -180,34 +233,46 @@ const char* ZSocket::GetErrorString(Error error) {
   return "InvalidError";
 }
 
-i32 ZSocket::InternalSend(sockaddr_in& target, const base::Span<byte> data) {
+i32 ZSocket::InternalSend(sockaddr_storage& target, socklen_t addr_len,
+                          const base::Span<byte> data) {
   if (socket_ == ZNET_INVALID_SOCKET)
     return -1;
   return ::sendto(socket_, reinterpret_cast<const char*>(data.data()),
                   static_cast<int>(data.size()), 0,
                   reinterpret_cast<struct sockaddr*>(&target),
-                  sizeof(sockaddr_in));
+                  addr_len);
 }
 
 i32 ZSocket::Receive(Address& sender, char* buffer, size_t length) {
   if (socket_ == ZNET_INVALID_SOCKET)
     return -1;
-  sockaddr_in sender_addr{};
-  i32 result = InternalReceive(sender_addr, buffer, length);
+  sockaddr_storage sender_addr{};
+  socklen_t sender_len = sizeof(sender_addr);
+  i32 result = InternalReceive(sender_addr, sender_len, buffer, length);
   if (result > 0) {
-    ::inet_ntop(AF_INET, &sender_addr.sin_addr, sender.ip, sizeof(sender.ip));
-    sender.port = ::ntohs(sender_addr.sin_port);
+    if (sender_addr.ss_family == AF_INET6) {
+      auto* addr6 = reinterpret_cast<sockaddr_in6*>(&sender_addr);
+      ::inet_ntop(AF_INET6, &addr6->sin6_addr, sender.ip, sizeof(sender.ip));
+      sender.port = ::ntohs(addr6->sin6_port);
+      sender.address_family = AF_INET6;
+    } else {
+      auto* addr4 = reinterpret_cast<sockaddr_in*>(&sender_addr);
+      ::inet_ntop(AF_INET, &addr4->sin_addr, sender.ip, sizeof(sender.ip));
+      sender.port = ::ntohs(addr4->sin_port);
+      sender.address_family = AF_INET;
+    }
   }
   return result;
 }
 
-i32 ZSocket::InternalReceive(sockaddr_in& sender,
-                                        char* buffer,
-                                        size_t length) {
-  socklen_t sender_addr_size = sizeof(sockaddr_in);
+i32 ZSocket::InternalReceive(sockaddr_storage& sender,
+                             socklen_t& sender_len,
+                             char* buffer,
+                             size_t length) {
+  sender_len = sizeof(sockaddr_storage);
   int bytes_received = ::recvfrom(socket_, buffer, length, 0,
                                   reinterpret_cast<struct sockaddr*>(&sender),
-                                  &sender_addr_size);
+                                  &sender_len);
   return bytes_received;
 }
 }  // namespace tx::network

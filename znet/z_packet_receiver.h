@@ -39,7 +39,7 @@ class PacketReceiver {
     memset(incoming_buffer_.data(), 0, incoming_buffer_.size());
   }
 
-  enum class ReceiveResult { Success, Goodbye, Error, Timeout };
+  enum class ReceiveResult { Success, Acknowledgement, Goodbye, Error, Timeout };
 
   ReceiveResult ReceivePackets(ZCryptoContext* crypto,
                                IncomingPacket& incoming) {
@@ -72,10 +72,14 @@ class PacketReceiver {
       return ReceiveResult::Error;
     }
 
-    return IngestPacket(crypto, incoming, address, incoming_buffer_.data(),
-                        packet_size)
-               ? ReceiveResult::Success
-               : ReceiveResult::Error;
+    if (!IngestPacket(crypto, incoming, address, incoming_buffer_.data(),
+                      packet_size)) {
+      return ReceiveResult::Error;
+    }
+    if (incoming.type == PacketType::Acknowledgement) {
+      return ReceiveResult::Acknowledgement;
+    }
+    return ReceiveResult::Success;
   }
 
   bool IngestPacket(ZCryptoContext* crypto,
@@ -101,11 +105,6 @@ class PacketReceiver {
     // the peer list manages the peers unique identifier, so we apply it here to
     // the data packet
     incoming.source_peer_id = peer->identifier.id;
-
-    // dont shove acks into the queue.. we know it succeeded.
-    if (incoming.type == PacketType::Acknowledgement) {
-      return false;
-    }
 
     return true;
   }

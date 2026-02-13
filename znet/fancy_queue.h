@@ -428,6 +428,47 @@ class LockFreeOrderedHashMap {
     return false;
   }
 
+  // Collects deleted nodes. Must be called periodically to reclaim memory.
+  // Not lock-free: acquires allNodesMutex.
+  void collect_garbage() {
+    ::std::lock_guard<::std::mutex> lock(allNodesMutex);
+
+    // First, unlink deleted nodes from the order chain
+    Node* prev = nullptr;
+    Node* curr = orderHead.load(::std::memory_order_acquire);
+    while (curr) {
+      Node* next = curr->orderNext.load(::std::memory_order_acquire);
+      if (curr->is_deleted.load(::std::memory_order_acquire)) {
+        // Unlink from order chain
+        if (prev) {
+          prev->orderNext.store(next, ::std::memory_order_release);
+        } else {
+          orderHead.store(next, ::std::memory_order_release);
+        }
+        // If this was the tail, update tail
+        Node* expected_tail = curr;
+        orderTail.compare_exchange_strong(expected_tail,
+                                          prev ? prev : nullptr,
+                                          ::std::memory_order_release,
+                                          ::std::memory_order_relaxed);
+      } else {
+        prev = curr;
+      }
+      curr = next;
+    }
+
+    // Sweep allNodes: delete nodes with is_deleted=true, compact the vector
+    size_t write_idx = 0;
+    for (size_t read_idx = 0; read_idx < allNodes.size(); ++read_idx) {
+      if (allNodes[read_idx]->is_deleted.load(::std::memory_order_acquire)) {
+        delete allNodes[read_idx];
+      } else {
+        allNodes[write_idx++] = allNodes[read_idx];
+      }
+    }
+    allNodes.resize(write_idx);
+  }
+
   // Marks the node as deleted and unlinks from bucket chain.
   // Does NOT unlink from order chain.
   bool remove(const Key& key) {

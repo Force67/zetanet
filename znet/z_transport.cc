@@ -55,7 +55,8 @@ bool ZAsyncTransportLayer::Init(const InitOptions& options) {
   }
 
   if (options.use_compression) {
-    BASE_LOGI(kLogTag, "Compression support is not implemented yet");
+    use_compression_ = true;
+    BASE_LOGI(kLogTag, "Compression support is enabled");
   } else {
     BASE_LOGI(kLogTag, "Compression support is disabled");
   }

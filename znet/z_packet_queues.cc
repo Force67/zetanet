@@ -70,12 +70,15 @@ bool ZPacketQueue::CheckRateLimit(size_t payload_bytes) {
   size_t burst = burst_tokens_.load(std::memory_order_relaxed);
   
   if (current_packets >= rate_limit_config_.max_packets_per_second) {
-    if (burst == 0) {
-      return false;
-    }
-    size_t expected_burst = burst_tokens_.fetch_sub(1, std::memory_order_relaxed);
-    if (expected_burst == 0) {
-      return false;
+    size_t current_burst = burst_tokens_.load(std::memory_order_relaxed);
+    while (true) {
+      if (current_burst == 0) {
+        return false;
+      }
+      if (burst_tokens_.compare_exchange_weak(current_burst, current_burst - 1,
+                                               std::memory_order_relaxed)) {
+        break;
+      }
     }
   }
   
@@ -99,6 +102,11 @@ void ZPacketQueue::ProcessOutgoingPackets() {
   while (!stop_threads_.load()) {
     ProcessChannel(PacketChannelType::Control);
     ProcessChannel(PacketChannelType::Data);
+
+    // Periodically collect garbage from the ack tracking map
+    if ((gc_counter_++ % 1000) == 0) {
+      awaiting_ack_packets_.collect_garbage();
+    }
 
     auto now = static_cast<u32>(base::GetUnixTimeStamp());
     for (auto& [seqNum, packet] : awaiting_ack_packets_) {
@@ -147,6 +155,28 @@ void ZPacketQueue::ProcessReceiving() {
                              pack.acknowledgement_number);
       }
       channel_incoming_queues_[pack.channel].enqueue(std::move(pack), prio);
+    } else if (result == PacketReceiver::ReceiveResult::Acknowledgement) {
+      // Parse the 4-byte LE payload to get the acked sequence number
+      if (pack.data.size() >= 4) {
+        const byte* d = reinterpret_cast<const byte*>(pack.data.data());
+        const u32 acked_seq = static_cast<u32>(d[0]) |
+                              (static_cast<u32>(d[1]) << 8) |
+                              (static_cast<u32>(d[2]) << 16) |
+                              (static_cast<u32>(d[3]) << 24);
+        bool destination_matches = false;
+        const bool has_packet = awaiting_ack_packets_.with_value(
+            acked_seq, [&](const OutgoingPacket& packet) {
+              destination_matches =
+                  (packet.destination_peer_id == pack.source_peer_id);
+              if (destination_matches) {
+                SaturatingSub(awaiting_ack_bytes_, packet.heap_data_size);
+              }
+            });
+        if (has_packet && destination_matches) {
+          awaiting_ack_packets_.remove(acked_seq);
+          SaturatingSub(awaiting_ack_packet_count_, 1);
+        }
+      }
     } else if (result == PacketReceiver::ReceiveResult::Goodbye) {
       stop_threads_.store(true);
       BASE_LOGI(kLogTag, "Goodbye packet received, stopping threads");
@@ -166,10 +196,15 @@ void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
                            .acknowledged = 1,
                            .awaiting_ack = 0,
                            .reserved = 0};
+  // Serialize the acknowledged sequence number as a 4-byte LE payload
+  byte ack_payload[4];
+  ack_payload[0] = static_cast<byte>(sequence_number & 0xFF);
+  ack_payload[1] = static_cast<byte>((sequence_number >> 8) & 0xFF);
+  ack_payload[2] = static_cast<byte>((sequence_number >> 16) & 0xFF);
+  ack_payload[3] = static_cast<byte>((sequence_number >> 24) & 0xFF);
   OutgoingPacket out(return_address.id, PacketType::Acknowledgement,
-                     PacketChannelType::Control, flags);
-  // stash the number
-  out.payload.scalar = sequence_number;
+                     PacketChannelType::Control, flags,
+                     base::Span<byte>(ack_payload, sizeof(ack_payload)));
   auto& queue = channel_outgoing_queues_[PacketChannelType::Control];
   queue.enqueue(std::move(out), PacketPriority::High);
   if (ack_number == 0) {

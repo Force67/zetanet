@@ -30,6 +30,7 @@ class ZCryptoContext {
   void ProcessServerKey(const std::string& server_key, const std::string& server_challenge);
 
   bool VerifyServerResponse(const std::string& server_proof);
+  bool VerifyClientProof(const std::string& client_proof);
   std::string GenerateClientProof();
   std::string GenerateServerProof();
   bool IsAuthenticated() const;
@@ -45,6 +46,7 @@ class ZCryptoContext {
  private:
   bool EnsureKeyMaterialReady();
   bool DeriveKeyMaterial(const std::string& secret);
+  bool DeriveSessionKeys();
 
  private:
   std::array<byte, 32> encryption_key_{};

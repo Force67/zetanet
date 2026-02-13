@@ -19,14 +19,26 @@ class PacketWriter {
 
   ~PacketWriter() { delete[] buffer_; }
 
+  void EnsureCapacity(size_t required) {
+    if (required <= capacity_) {
+      return;
+    }
+    size_t new_capacity = capacity_;
+    while (new_capacity < required) {
+      new_capacity *= 2;
+    }
+    byte* new_buffer = new byte[new_capacity];
+    std::memcpy(new_buffer, buffer_, offset_);
+    delete[] buffer_;
+    buffer_ = new_buffer;
+    capacity_ = new_capacity;
+  }
+
   // Put method for scalar types
   template <typename T>
   typename std::enable_if<std::is_scalar<T>::value, bool>::type Put(
       const T value) {
-    if (offset_ + sizeof(T) > capacity_) {
-      return false;
-    }
-
+    EnsureCapacity(offset_ + sizeof(T));
     std::memcpy(buffer_ + offset_, &value, sizeof(T));
     offset_ += sizeof(T);
     return true;
@@ -38,20 +50,14 @@ class PacketWriter {
                               std::is_trivially_copyable<T>::value,
                           bool>::type
   Put(const T& type) {
-    if (offset_ + sizeof(T) > capacity_) {
-      return false;
-    }
-
+    EnsureCapacity(offset_ + sizeof(T));
     std::memcpy(buffer_ + offset_, &type, sizeof(T));
     offset_ += sizeof(T);
     return true;
   }
 
   bool PutS(const base::Span<byte>& data) {
-    if (offset_ + data.size() > capacity_) {
-      return false;
-    }
-
+    EnsureCapacity(offset_ + data.size());
     std::memcpy(buffer_ + offset_, data.data(), data.size());
     offset_ += data.size();
     return true;
@@ -154,11 +160,13 @@ namespace system_commands {
 struct ClientHello {
   u8 encryption_algo_list_len;
   u8 compression_algo_list_len;
+  u8 pub_key_list_len;
   u8 challenge_len;
 
   static void Build(PacketWriter& builder, ClientHello& packet) {
     builder.Put<u8>(packet.encryption_algo_list_len);
     builder.Put<u8>(packet.compression_algo_list_len);
+    builder.Put<u8>(packet.pub_key_list_len);
     builder.Put<u8>(packet.challenge_len);
   }
 };

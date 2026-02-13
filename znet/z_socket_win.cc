@@ -21,6 +21,7 @@ bool ZSocket::InitSocket() {
               ZSocket::GetErrorString());
     return false;
   }
+  wsa_initialized_ = true;
   return true;
 }
 
@@ -29,7 +30,10 @@ void ZSocket::DestroySocket() {
     ::closesocket(socket_);
     socket_ = ZNET_INVALID_SOCKET;
   }
-  ::WSACleanup();
+  if (wsa_initialized_) {
+    ::WSACleanup();
+    wsa_initialized_ = false;
+  }
 }
 
 i32 ZSocket::GetLastSocketPlatformError() {

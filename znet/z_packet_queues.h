@@ -146,7 +146,6 @@ class ZPacketQueue {
   base::Atomic<size_t> bytes_sent_this_second_{0};
   base::Atomic<size_t> burst_tokens_{0};
   std::chrono::steady_clock::time_point rate_limit_window_start_;
-
-  byte incomingbuffer[4096]{};
+  u32 gc_counter_{0};
 };
 }  // namespace tx::network

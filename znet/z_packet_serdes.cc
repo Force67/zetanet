@@ -11,6 +11,8 @@
 #include <base/logging.h>
 #endif
 
+#include <znet/z_compression_wrapper.h>
+
 namespace tx::network {
 
 static constexpr char kLogTag[] = "z-packet-serdes";
@@ -41,13 +43,9 @@ u16 ComputePacketHeaderChecksum(const PacketHeader& header) {
 
 base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
                                               const u32 next_sequence_number) {
-  if (packet_info.flags.compressed) {
-    BASE_LOGE(kLogTag, "Compressed payloads are currently unsupported");
-    return {};
-  }
-
   const byte* payload_source = nullptr;
   u32 payload_size = 0;
+  u32 original_payload_size = 0;
   if (packet_info.heap_data_size > 0) {
     if (!packet_info.payload.data) {
       BASE_LOGE(kLogTag, "Payload pointer is null while size is non-zero");
@@ -56,7 +54,25 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
     payload_source = packet_info.payload.data;
     payload_size = packet_info.heap_data_size;
   }
+  original_payload_size = payload_size;
 
+  // Compression (before encryption)
+  base::Vector<byte> compressed_payload;
+  if (packet_info.flags.compressed && payload_size > 0) {
+    if (!ZCompressionContext::Compress(payload_source, payload_size,
+                                       compressed_payload)) {
+      BASE_LOGE(kLogTag, "Compression failed, sending uncompressed");
+      packet_info.flags.compressed = 0;
+    } else if (compressed_payload.size() >= payload_size) {
+      // Compression didn't help, send uncompressed
+      packet_info.flags.compressed = 0;
+    } else {
+      payload_source = compressed_payload.data();
+      payload_size = static_cast<u32>(compressed_payload.size());
+    }
+  }
+
+  // Encryption
   base::Vector<byte> encrypted_payload;
   if (packet_info.flags.encrypted) {
     encrypted_payload.resize(payload_size);
@@ -87,7 +103,8 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
   }
 
   base::Vector<byte> packet(size_of_headers + payload_size);
-  FillPacketHeader(packet, packet_info, payload_size, next_sequence_number);
+  FillPacketHeader(packet, packet_info, payload_size, original_payload_size,
+                   next_sequence_number);
 
   // and we copy the payload to its appropriate place
   if (payload_size > 0) {
@@ -106,27 +123,41 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
   if (header.flags.is_reliable) {
     offset += sizeof(ReliableHeader);
   }
+
   if (header.flags.is_compressed) {
-    BASE_LOGE(kLogTag, "Compressed payloads are currently unsupported");
-    return {};
+    if (offset + sizeof(CompressedPayloadHeader) > packet.size()) {
+      BASE_LOGE(kLogTag, "Invalid packet header layout");
+      return {};
+    }
+    CompressedPayloadHeader compressed_header{};
+    std::memcpy(&compressed_header, packet.data() + offset,
+                sizeof(CompressedPayloadHeader));
+    offset += sizeof(CompressedPayloadHeader);
+
+    const mem_size wire_payload_size = packet.size() - offset;
+    compressed_header.checksum =
+        ComputeChecksum32(packet.data() + offset, wire_payload_size);
+    std::memcpy(packet.data() + sizeof(PacketHeader) +
+                    (header.flags.is_reliable ? sizeof(ReliableHeader) : 0),
+                &compressed_header, sizeof(CompressedPayloadHeader));
+  } else {
+    if (offset + sizeof(UncompressedPayloadHeader) > packet.size()) {
+      BASE_LOGE(kLogTag, "Invalid packet header layout");
+      return {};
+    }
+
+    UncompressedPayloadHeader uncompressed_header{};
+    std::memcpy(&uncompressed_header, packet.data() + offset,
+                sizeof(UncompressedPayloadHeader));
+    offset += sizeof(UncompressedPayloadHeader);
+
+    const mem_size wire_payload_size = packet.size() - offset;
+    uncompressed_header.checksum =
+        ComputeChecksum32(packet.data() + offset, wire_payload_size);
+    std::memcpy(packet.data() + sizeof(PacketHeader) +
+                    (header.flags.is_reliable ? sizeof(ReliableHeader) : 0),
+                &uncompressed_header, sizeof(UncompressedPayloadHeader));
   }
-
-  if (offset + sizeof(UncompressedPayloadHeader) > packet.size()) {
-    BASE_LOGE(kLogTag, "Invalid packet header layout");
-    return {};
-  }
-
-  UncompressedPayloadHeader uncompressed_header{};
-  std::memcpy(&uncompressed_header, packet.data() + offset,
-              sizeof(UncompressedPayloadHeader));
-  offset += sizeof(UncompressedPayloadHeader);
-
-  const mem_size wire_payload_size = packet.size() - offset;
-  uncompressed_header.checksum =
-      ComputeChecksum32(packet.data() + offset, wire_payload_size);
-  std::memcpy(packet.data() + sizeof(PacketHeader) +
-                  (header.flags.is_reliable ? sizeof(ReliableHeader) : 0),
-              &uncompressed_header, sizeof(UncompressedPayloadHeader));
 
   header.header_checksum = ComputePacketHeaderChecksum(header);
   std::memcpy(packet.data(), &header, sizeof(PacketHeader));
@@ -142,6 +173,7 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
 void PacketBuilder::FillPacketHeader(const base::Span<byte> outgoing_data,
                                      const OutgoingPacket& packet_info,
                                      u32 payload_size,
+                                     u32 original_payload_size,
                                      u32 next_sequence_number) {
   byte* readptr = const_cast<byte*>(outgoing_data.data());
   PacketHeader header{};
@@ -181,6 +213,7 @@ void PacketBuilder::FillPacketHeader(const base::Span<byte> outgoing_data,
   if (packet_info.flags.compressed) {
     CompressedPayloadHeader compressed_header{};
     compressed_header.compressed_size = payload_size;
+    compressed_header.original_size = original_payload_size;
     compressed_header.checksum = 0;
     compressed_header.flags = {.is_little_endian = 1, .reserved = 0};
     compressed_header.padding[0] = 0;
@@ -245,6 +278,7 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
   }
 
   u32 expected_payload_checksum = 0;
+  u32 original_size = 0;
   if (header.flags.is_compressed) {
     if (offset + sizeof(CompressedPayloadHeader) > in_size) {
       BASE_LOGE(kLogTag, "Truncated compressed payload header");
@@ -254,6 +288,7 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
     std::memcpy(&compressed_header, in_buffer + offset,
                 sizeof(CompressedPayloadHeader));
     expected_payload_checksum = compressed_header.checksum;
+    original_size = compressed_header.original_size;
     offset += sizeof(CompressedPayloadHeader);
   } else {
     if (offset + sizeof(UncompressedPayloadHeader) > in_size) {
@@ -288,30 +323,37 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
                .awaiting_ack = 0,
                .reserved = 0};
 
+  // Read raw payload into a vector for processing
+  base::Vector<byte> payload_data(payload_size);
+  if (payload_size > 0) {
+    std::memcpy(payload_data.data(), in_buffer + offset, payload_size);
+  }
+
+  // Decrypt if needed
   if (header.flags.is_encrypted) {
-    base::Vector<byte> payload_data(payload_size);
-    if (payload_size > 0) {
-      std::memcpy(payload_data.data(), in_buffer + offset, payload_size);
-    }
     if (!DecryptPayloadIfNeeded(payload_data, out.sequence_number,
                                 out.acknowledgement_number, header)) {
       BASE_LOGE(kLogTag, "Encrypted payload authentication/decryption failed");
       return false;
     }
-    if (payload_data.empty()) {
-      out.data.clear();
-    } else {
-      out.data.assign(reinterpret_cast<const char*>(payload_data.data()),
-                      payload_data.size());
-    }
-    return true;
   }
 
-  if (payload_size == 0) {
+  // Decompress if needed
+  if (header.flags.is_compressed) {
+    base::Vector<byte> decompressed;
+    if (!ZCompressionContext::Decompress(payload_data.data(), payload_data.size(),
+                                         original_size, decompressed)) {
+      BASE_LOGE(kLogTag, "Decompression failed");
+      return false;
+    }
+    payload_data = std::move(decompressed);
+  }
+
+  if (payload_data.empty()) {
     out.data.clear();
   } else {
-    out.data.assign(reinterpret_cast<const char*>(in_buffer + offset),
-                    payload_size);
+    out.data.assign(reinterpret_cast<const char*>(payload_data.data()),
+                    payload_data.size());
   }
 
   return true;

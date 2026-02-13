@@ -30,6 +30,7 @@ class PacketBuilder {
   void FillPacketHeader(const base::Span<byte> outgoing_data,
                         const OutgoingPacket& packet_info,
                         u32 payload_size,
+                        u32 original_payload_size,
                         u32 next_sequence_number);
 
   bool EncryptPayloadIfNeeded(const OutgoingPacket& packet_info,
@@ -101,10 +102,6 @@ class PacketUnpacker {
       return false;
     }
     if (header.flags.reserved != 0 || header.flags.is_fragmented) {
-      return false;
-    }
-    if (header.flags.is_compressed) {
-      // Compression receive path is not fully implemented yet; reject for safety.
       return false;
     }
     if (header.channel_id > static_cast<u8>(PacketChannelType::Data)) {

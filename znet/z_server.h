@@ -25,14 +25,11 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
 
   // Fetches the next packet from the queue
   bool Poll(PacketChannelType t, IncomingPacket& p) {
-    for (u8 i = (u8)PacketChannelType::Control; i <= (u8)PacketChannelType::Data;
-         ++i) {
-      if (packet_queue_.Pop((PacketChannelType)i, p)) {
-        if (IsSystemMessage(p.type)) {
-          ProcessSystemMessage(p);
-        }
-        return true;
+    if (packet_queue_.Pop(t, p)) {
+      if (IsSystemMessage(p.type)) {
+        ProcessSystemMessage(p);
       }
+      return true;
     }
     return false;
   }

@@ -70,6 +70,9 @@ enum class PacketType : u16 {
   // reserved for future use
   NetworkControl,
 
+  // client sends proof of identity after receiving ServerHello
+  ClientAuthProof,
+
   // used to request a file transfer (native feature of this library)
   FileTransfer,
   StreamingData,

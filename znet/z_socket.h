@@ -46,11 +46,12 @@ class ZSocket {
                     u16 local_bind_port = 0);
 
   struct Address {
-    char ip[22]{};
+    char ip[46]{};  // INET6_ADDRSTRLEN
     u16 port{};
+    u8 address_family{AF_INET};
 
     bool operator==(const Address& other) const {
-      if (port == other.port) {
+      if (port == other.port && address_family == other.address_family) {
         return memcmp(ip, other.ip, sizeof(ip)) == 0;
       }
       return false;
@@ -62,7 +63,7 @@ class ZSocket {
 
   // Send to server sock addr
   i32 SendtoServer(const base::Span<byte> data) {
-    return InternalSend(server_, data);
+    return InternalSend(server_, server_len_, data);
   }
 
   // OS specific error.
@@ -92,15 +93,17 @@ class ZSocket {
   }
 
  private:
-  i32 InternalSend(sockaddr_in&, const base::Span<byte> data);
-  i32 InternalReceive(sockaddr_in& sender, char* buffer, size_t length);
+  i32 InternalSend(sockaddr_storage&, socklen_t addr_len, const base::Span<byte> data);
+  i32 InternalReceive(sockaddr_storage& sender, socklen_t& sender_len, char* buffer, size_t length);
 
  private:
 #if defined(_WIN32)
   WSADATA wsa_;
+  bool wsa_initialized_{false};
 #endif
   socket_t socket_;
-  struct sockaddr_in server_;
-  int server_len_;
+  sockaddr_storage server_{};
+  socklen_t server_len_{0};
+  int address_family_{AF_INET};
 };
 }  // namespace tx::network

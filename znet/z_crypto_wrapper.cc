@@ -101,6 +101,7 @@ std::string ZCryptoContext::GetChallenge() const {
 void ZCryptoContext::ProcessServerKey(const std::string& server_key, const std::string& server_challenge) {
   server_nonce_ = server_key;
   server_challenge_ = server_challenge;
+  DeriveSessionKeys();
 }
 
 bool ZCryptoContext::VerifyServerResponse(const std::string& server_proof) {
@@ -254,8 +255,9 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
                 EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, nonce_size, nullptr) == 1 &&
                 EVP_DecryptInit_ex(ctx, nullptr, nullptr, encryption_key_.data(), nonce) == 1;
   
+  int aad_len = 0;
   if (success && !aad.empty()) {
-    success = EVP_DecryptUpdate(ctx, nullptr, nullptr, aad.data(), static_cast<int>(aad.size())) == 1;
+    success = EVP_DecryptUpdate(ctx, nullptr, &aad_len, aad.data(), static_cast<int>(aad.size())) == 1;
   }
   
   int out_len = 0;
@@ -306,6 +308,80 @@ std::string ZCryptoContext::GenerateServerProof() {
   }
   
   return BytesToHex(proof.data(), proof.size());
+}
+
+bool ZCryptoContext::VerifyClientProof(const std::string& client_proof) {
+  if (server_nonce_.empty() || local_nonce_.empty()) {
+    BASE_LOGE(kLogTag, "Key exchange not completed");
+    return false;
+  }
+
+  // Client computes proof as: HMAC(server_nonce + local_nonce + server_challenge + local_challenge)
+  // From the server's perspective, server_nonce_ is the client's nonce, local_nonce_ is the server's nonce
+  // The client's GenerateClientProof uses: server_nonce_ + local_nonce_ + server_challenge_ + local_challenge_
+  // From the server's perspective (where ProcessServerKey stored client data into server_nonce_/server_challenge_):
+  //   client's server_nonce_ = our local_nonce_
+  //   client's local_nonce_ = our server_nonce_
+  //   client's server_challenge_ = our local_challenge_
+  //   client's local_challenge_ = our server_challenge_
+  // So expected: local_nonce_ + server_nonce_ + local_challenge_ + server_challenge_
+  std::string verify_data = local_nonce_ + server_nonce_ + local_challenge_ + server_challenge_;
+  std::array<byte, 32> expected_proof{};
+  if (!HmacSha256(encryption_key_.data(), encryption_key_.size(),
+                  reinterpret_cast<const byte*>(verify_data.data()), verify_data.size(),
+                  expected_proof)) {
+    BASE_LOGE(kLogTag, "Failed to compute expected client proof");
+    return false;
+  }
+
+  std::string expected_proof_hex = BytesToHex(expected_proof.data(), expected_proof.size());
+  if (expected_proof_hex != client_proof) {
+    BASE_LOGE(kLogTag, "Client proof verification failed");
+    return false;
+  }
+
+  authenticated_ = true;
+  return true;
+}
+
+bool ZCryptoContext::DeriveSessionKeys() {
+  if (local_nonce_.empty() || server_nonce_.empty()) {
+    return false;
+  }
+
+  // Sort nonces lexicographically so both sides derive the same keys
+  std::string first_nonce, second_nonce;
+  if (local_nonce_ < server_nonce_) {
+    first_nonce = local_nonce_;
+    second_nonce = server_nonce_;
+  } else {
+    first_nonce = server_nonce_;
+    second_nonce = local_nonce_;
+  }
+
+  // Derive new encryption key: SHA-256(current_enc_key + sorted_nonces)
+  std::string enc_input(reinterpret_cast<const char*>(encryption_key_.data()),
+                        encryption_key_.size());
+  enc_input += first_nonce + second_nonce + "session-enc";
+  std::array<byte, 32> new_enc_key{};
+  if (!Sha256(reinterpret_cast<const byte*>(enc_input.data()), enc_input.size(),
+              new_enc_key)) {
+    return false;
+  }
+
+  // Derive new authentication key: SHA-256(current_auth_key + sorted_nonces)
+  std::string auth_input(reinterpret_cast<const char*>(authentication_key_.data()),
+                         authentication_key_.size());
+  auth_input += first_nonce + second_nonce + "session-auth";
+  std::array<byte, 32> new_auth_key{};
+  if (!Sha256(reinterpret_cast<const byte*>(auth_input.data()), auth_input.size(),
+              new_auth_key)) {
+    return false;
+  }
+
+  encryption_key_ = new_enc_key;
+  authentication_key_ = new_auth_key;
+  return true;
 }
 
 bool ZCryptoContext::EnsureKeyMaterialReady() {

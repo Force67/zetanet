@@ -62,6 +62,7 @@ static_assert(sizeof(UncompressedPayloadHeader) == 4);
 // 2. follows next if the packet is compressed
 struct CompressedPayloadHeader {
   u32 compressed_size;    // 4 bytes
+  u32 original_size;      // 4 bytes (uncompressed payload size)
   u32 checksum;           // 4 bytes
   struct {
     u8 is_little_endian : 1;  // if the payload is little endian
@@ -69,5 +70,5 @@ struct CompressedPayloadHeader {
   } flags;                    // 1 byte for flags
   u8 padding[3];              // 3 byte
 };
-static_assert(sizeof(CompressedPayloadHeader) == 12);
+static_assert(sizeof(CompressedPayloadHeader) == 16);
 }  // namespace tx::network

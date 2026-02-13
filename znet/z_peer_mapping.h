@@ -2,6 +2,8 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#include <shared_mutex>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -21,6 +23,7 @@ class ZPeerMapping {
   ~ZPeerMapping() = default;
 
   ZPeer* CreatePeer(const ZSocket::Address& addr) {
+    std::unique_lock lock(mutex_);
     if (peer_list_.size() >= kMaxPeers) {
       return nullptr;
     }
@@ -32,6 +35,7 @@ class ZPeerMapping {
   }
 
   bool DestroyPeer(ZPeerId id) {
+    std::unique_lock lock(mutex_);
     for (mem_size i = 0; i < peer_list_.size(); ++i) {
       if (peer_list_[i].identifier == id) {
         z_peer_ids_.ReleaseId(id.id);
@@ -43,6 +47,7 @@ class ZPeerMapping {
   }
 
   ZPeer* GetPeer(ZPeerId id) {
+    std::shared_lock lock(mutex_);
     for (auto& peer : peer_list_) {
       if (peer.identifier == id) {
         return &peer;
@@ -52,15 +57,25 @@ class ZPeerMapping {
   }
 
   ZPeer* GetOrCreatePeer(const ZSocket::Address& addr) {
+    std::unique_lock lock(mutex_);
     for (auto& peer : peer_list_) {
       if (peer.address == addr) {
         return &peer;
       }
     }
-    return CreatePeer(addr);
+    // Inline CreatePeer logic (already holding unique lock)
+    if (peer_list_.size() >= kMaxPeers) {
+      return nullptr;
+    }
+    u32 id = z_peer_ids_.GenerateId();
+    if (id == ZPeerId::invalid_id) {
+      return nullptr;
+    }
+    return &peer_list_.emplace_back(ZPeer{ZPeerId(id), addr});
   }
 
   ZPeer* GetPeerByAddress(const ZSocket::Address& addr) {
+    std::shared_lock lock(mutex_);
     for (auto& peer : peer_list_) {
       if (peer.address == addr) {
         return &peer;
@@ -69,9 +84,13 @@ class ZPeerMapping {
     return nullptr;
   }
 
-  auto& GetPeerList() { return peer_list_; }
+  base::Vector<ZPeer> GetPeerList() {
+    std::shared_lock lock(mutex_);
+    return peer_list_;
+  }
 
  private:
+  mutable std::shared_mutex mutex_;
   base::IdSet<ZPeerId::id_type, ZPeerId::invalid_id, ZPeerId::max_id>
       z_peer_ids_;
   base::Vector<ZPeer> peer_list_;

@@ -61,6 +61,14 @@ bool ContainsPathTraversal(const std::string& path) {
   if (path.empty()) {
     return true;
   }
+  // Reject absolute paths
+  if (path[0] == '/' || path[0] == '\\') {
+    return true;
+  }
+  // Reject Windows drive letter paths (e.g. "C:")
+  if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
+    return true;
+  }
   for (size_t i = 0; i < path.size(); ++i) {
     if (path[i] == '.' && i + 1 < path.size() && path[i + 1] == '.') {
       if (i + 2 >= path.size() || path[i + 2] == '/' || path[i + 2] == '\\') {
@@ -847,6 +855,27 @@ void ZFileTransporter::AbortStreamedFile(u64 transfer_id) {
   if (!temp_path.empty()) {
     std::remove(temp_path.c_str());
   }
+}
+
+bool ZFileTransporter::ValidatePath(const base::Path& base_dir,
+                                     const base::Path& file_path) const {
+  const std::string base_str = base_dir.ToAsciiString();
+  const std::string file_str = file_path.ToAsciiString();
+  if (ContainsPathTraversal(file_str)) {
+    return false;
+  }
+  // Ensure the file path starts with the base directory prefix
+  if (base_str.empty()) {
+    return true;
+  }
+  std::string base_prefix = base_str;
+  if (base_prefix.back() != '/' && base_prefix.back() != '\\') {
+    base_prefix.push_back('/');
+  }
+  if (file_str.size() < base_prefix.size()) {
+    return false;
+  }
+  return file_str.compare(0, base_prefix.size(), base_prefix) == 0;
 }
 
 bool ZFileTransporter::IsPathTraversal(const std::string& path) {

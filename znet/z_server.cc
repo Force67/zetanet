@@ -20,13 +20,15 @@ static constexpr char kSelfAddress[] =
 bool ZServer::Begin(u16 port) {
   const char* encryption_env = std::getenv("ZNET_ENABLE_ENCRYPTION");
   const bool use_encryption = encryption_env && encryption_env[0] != '0';
+  const char* compression_env = std::getenv("ZNET_ENABLE_COMPRESSION");
+  const bool use_compression = compression_env && compression_env[0] != '0';
   const ZAsyncTransportLayer::InitOptions options{
       .ip = kSelfAddress,
       .port = port,
       .local_bind_port = 0,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kServer,
       .use_encryption = use_encryption,
-      .use_compression = false,
+      .use_compression = use_compression,
       .allow_ipv6 = false};
   bool result = ZAsyncTransportLayer::Init(options);
   if (!result) {
@@ -40,6 +42,9 @@ bool ZServer::Begin(u16 port) {
 
 bool ZServer::Update() {
   IncomingPacket packet;
+  if (Poll(PacketChannelType::Control, packet)) {
+    // Control packets are handled by ProcessSystemMessage inside Poll
+  }
   if (Poll(PacketChannelType::Data, packet)) {
     BASE_LOGI(kLogTag, "Incoming data: {}", packet.data);
   }
@@ -66,9 +71,10 @@ void ZServer::SendMessage(ZPeerId id, const std::string& data) {
     return;
   }
   const u8 use_encryption = crypto_context_ ? 1 : 0;
+  const u8 use_compression = compression_enabled() ? 1 : 0;
   const PackageFlags flags{.reliable = 1,
                            .encrypted = use_encryption,
-                           .compressed = 0,
+                           .compressed = use_compression,
                            .priority = (u8)PacketPriority::Medium,
                            .acknowledged = 0,
                            .awaiting_ack = 1,
@@ -84,7 +90,82 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
   switch (p.type) {
     case PacketType::ClientHello: {
       BASE_LOGI(kLogTag, "Received ClientHello");
+
+      if (crypto_context_) {
+        PacketReader reader((byte*)p.data.data(), p.data.size());
+        system_commands::ClientHello request;
+        if (!reader.Read(request)) {
+          BASE_LOGE(kLogTag, "Malformed ClientHello: missing header");
+          return;
+        }
+
+        // Skip encryption algorithm list
+        base::Vector<byte> enc_algos(request.encryption_algo_list_len);
+        if (!reader.ReadS(enc_algos)) {
+          BASE_LOGE(kLogTag, "Malformed ClientHello: invalid encryption algorithm list");
+          return;
+        }
+
+        // Skip compression algorithm list
+        base::Vector<byte> comp_algos(request.compression_algo_list_len);
+        if (!reader.ReadS(comp_algos)) {
+          BASE_LOGE(kLogTag, "Malformed ClientHello: invalid compression algorithm list");
+          return;
+        }
+
+        // Read client public key
+        base::Vector<byte> client_key;
+        if (request.pub_key_list_len > 0) {
+          if (!reader.ReadList(client_key)) {
+            BASE_LOGE(kLogTag, "Malformed ClientHello: invalid public key");
+            return;
+          }
+        }
+
+        // Read client challenge
+        std::string client_challenge;
+        if (request.challenge_len > 0) {
+          base::Vector<byte> temp_challenge;
+          if (!reader.ReadList(temp_challenge)) {
+            BASE_LOGE(kLogTag, "Malformed ClientHello: missing client challenge");
+            return;
+          }
+          client_challenge.assign(reinterpret_cast<const char*>(temp_challenge.data()),
+                                  temp_challenge.size());
+        }
+
+        // Process client's key material
+        std::string client_nonce(reinterpret_cast<const char*>(client_key.data()),
+                                 client_key.size());
+        crypto_context_->ProcessServerKey(client_nonce, client_challenge);
+      }
+
       SendServerHello(p.source_peer_id);
+      break;
+    }
+    case PacketType::ClientAuthProof: {
+      BASE_LOGI(kLogTag, "Received ClientAuthProof");
+      if (!crypto_context_) {
+        break;
+      }
+      PacketReader reader((byte*)p.data.data(), p.data.size());
+      system_commands::ClientAuthProof request;
+      if (!reader.Read(request)) {
+        BASE_LOGE(kLogTag, "Malformed ClientAuthProof: missing header");
+        return;
+      }
+      base::Vector<byte> proof_data;
+      if (!reader.ReadList(proof_data)) {
+        BASE_LOGE(kLogTag, "Malformed ClientAuthProof: missing proof");
+        return;
+      }
+      std::string proof(reinterpret_cast<const char*>(proof_data.data()),
+                        proof_data.size());
+      if (!crypto_context_->VerifyClientProof(proof)) {
+        BASE_LOGE(kLogTag, "Client authentication failed!");
+        return;
+      }
+      BASE_LOGI(kLogTag, "Client authenticated successfully");
       break;
     }
     default:
