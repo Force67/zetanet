@@ -1,4 +1,4 @@
--- Copyright (C) 2025 Vincent Hengel.
+-- Copyright (C) 2026 Vincent Hengel.
 -- For licensing information see LICENSE at the root of this distribution.
 require("premake", ">=5.0-beta3")
 
