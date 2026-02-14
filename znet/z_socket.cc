@@ -14,6 +14,108 @@ static constexpr char kLogTag[] = "z-socket";
 
 #define ZSOCKET_ASYNC 1
 
+namespace {
+void SetSockaddrPort(sockaddr_storage& address, u16 port) {
+  if (address.ss_family == AF_INET6) {
+    auto* addr6 = reinterpret_cast<sockaddr_in6*>(&address);
+    addr6->sin6_port = htons(port);
+  } else if (address.ss_family == AF_INET) {
+    auto* addr4 = reinterpret_cast<sockaddr_in*>(&address);
+    addr4->sin_port = htons(port);
+  }
+}
+
+bool AddressFromSockaddr(const sockaddr_storage& address, ZSocket::Address& out) {
+  memset(&out, 0, sizeof(out));
+
+  if (address.ss_family == AF_INET6) {
+    const auto* addr6 = reinterpret_cast<const sockaddr_in6*>(&address);
+    if (::inet_ntop(AF_INET6, &addr6->sin6_addr, out.ip, sizeof(out.ip)) ==
+        nullptr) {
+      return false;
+    }
+    out.port = ::ntohs(addr6->sin6_port);
+    out.address_family = AF_INET6;
+    return true;
+  }
+
+  if (address.ss_family == AF_INET) {
+    const auto* addr4 = reinterpret_cast<const sockaddr_in*>(&address);
+    if (::inet_ntop(AF_INET, &addr4->sin_addr, out.ip, sizeof(out.ip)) ==
+        nullptr) {
+      return false;
+    }
+    out.port = ::ntohs(addr4->sin_port);
+    out.address_family = AF_INET;
+    return true;
+  }
+
+  return false;
+}
+
+bool ResolveSockaddr(const base::StringRef host,
+                     u16 port,
+                     int family,
+                     sockaddr_storage& out_sockaddr,
+                     socklen_t& out_len,
+                     ZSocket::Address* out_address) {
+  if (host.empty()) {
+    return false;
+  }
+
+#if defined(_WIN32)
+  WSADATA wsa_data{};
+  if (::WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+    return false;
+  }
+#endif
+
+  addrinfo hints{};
+  hints.ai_family = family;
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_protocol = IPPROTO_UDP;
+
+  base::String host_str(host.data(), host.size());
+  addrinfo* results = nullptr;
+  const int result = ::getaddrinfo(host_str.c_str(), nullptr, &hints, &results);
+  if (result != 0 || results == nullptr) {
+#if defined(_WIN32)
+    ::WSACleanup();
+#endif
+    return false;
+  }
+
+  bool success = false;
+  for (addrinfo* candidate = results; candidate != nullptr;
+       candidate = candidate->ai_next) {
+    if (candidate->ai_addr == nullptr ||
+        candidate->ai_addrlen > sizeof(out_sockaddr) ||
+        (candidate->ai_family != AF_INET && candidate->ai_family != AF_INET6)) {
+      continue;
+    }
+
+    memset(&out_sockaddr, 0, sizeof(out_sockaddr));
+    memcpy(&out_sockaddr, candidate->ai_addr, candidate->ai_addrlen);
+    SetSockaddrPort(out_sockaddr, port);
+    out_len = static_cast<socklen_t>(candidate->ai_addrlen);
+
+    if (out_address != nullptr) {
+      if (!AddressFromSockaddr(out_sockaddr, *out_address)) {
+        continue;
+      }
+    }
+    success = true;
+    break;
+  }
+
+  ::freeaddrinfo(results);
+#if defined(_WIN32)
+  ::WSACleanup();
+#endif
+  return success;
+}
+}  // namespace
+
 ZSocket::ZSocket() : socket_(ZNET_INVALID_SOCKET) {}
 
 ZSocket::~ZSocket() {
@@ -95,8 +197,16 @@ bool ZSocket::CreateClient(const base::StringRef ip,
     return false;
   }
 
-  address_family_ = ipv6 ? AF_INET6 : AF_INET;
+  const int requested_family = ipv6 ? AF_INET6 : AF_INET;
+  ZSocket::Address resolved_endpoint{};
+  if (!ResolveSockaddr(ip, static_cast<u16>(port), requested_family, server_,
+                       server_len_, &resolved_endpoint)) {
+    BASE_LOGE(kLogTag, "Failed to resolve endpoint '{}:{}'", ip, port);
+    DestroySocket();
+    return false;
+  }
 
+  address_family_ = resolved_endpoint.address_family;
   socket_ = ::socket(address_family_, SOCK_DGRAM, IPPROTO_UDP);
   if (socket_ == ZNET_INVALID_SOCKET) {
     BASE_LOGE(kLogTag, "Could not create socket. Error : {}",
@@ -105,37 +215,10 @@ bool ZSocket::CreateClient(const base::StringRef ip,
     return false;
   }
 
-  memset(&server_, 0, sizeof(server_));
-  base::String ip_str(ip.data(), ip.size());
-
-  if (ipv6) {
-    auto* addr6 = reinterpret_cast<sockaddr_in6*>(&server_);
-    addr6->sin6_family = AF_INET6;
-    addr6->sin6_port = htons(port);
-    if (::inet_pton(AF_INET6, ip_str.c_str(), &addr6->sin6_addr) <= 0) {
-      BASE_LOGE(kLogTag, "inet_pton (IPv6) failed with error : {}",
-                ZSocket::GetErrorString());
-      DestroySocket();
-      return false;
-    }
-    server_len_ = sizeof(sockaddr_in6);
-  } else {
-    auto* addr4 = reinterpret_cast<sockaddr_in*>(&server_);
-    addr4->sin_family = AF_INET;
-    addr4->sin_port = htons(port);
-    if (::inet_pton(AF_INET, ip_str.c_str(), &addr4->sin_addr) <= 0) {
-      BASE_LOGE(kLogTag, "inet_pton (IPv4) failed with error : {}",
-                ZSocket::GetErrorString());
-      DestroySocket();
-      return false;
-    }
-    server_len_ = sizeof(sockaddr_in);
-  }
-
   if (local_bind_port != 0) {
     sockaddr_storage local_addr{};
     socklen_t local_len = 0;
-    if (ipv6) {
+    if (address_family_ == AF_INET6) {
       auto* local6 = reinterpret_cast<sockaddr_in6*>(&local_addr);
       local6->sin6_family = AF_INET6;
       local6->sin6_addr = in6addr_any;
@@ -178,8 +261,26 @@ bool ZSocket::CreateClient(const base::StringRef ip,
   BASE_LOGI(kLogTag, "Client set to non-blocking mode");
 #endif
 
-  BASE_LOGI(kLogTag, "Client socket initialized for {}:{}", ip_str.c_str(), port);
+  base::String host(ip.data(), ip.size());
+  if (host == resolved_endpoint.ip) {
+    BASE_LOGI(kLogTag, "Client socket initialized for {}:{}", resolved_endpoint.ip,
+              port);
+  } else {
+    BASE_LOGI(kLogTag, "Client socket initialized for {}:{} (resolved to {})",
+              host.c_str(), port, resolved_endpoint.ip);
+  }
   return true;
+}
+
+bool ZSocket::ResolveAddress(const base::StringRef host,
+                             u16 port,
+                             bool ipv6,
+                             Address& out) {
+  sockaddr_storage resolved{};
+  socklen_t resolved_len = 0;
+  const int requested_family = ipv6 ? AF_INET6 : AF_INET;
+  return ResolveSockaddr(host, port, requested_family, resolved, resolved_len,
+                         &out);
 }
 
 i32 ZSocket::Send(const Address& target, const base::Span<byte> data) {

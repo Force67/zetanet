@@ -20,6 +20,7 @@ using socket_t = SOCKET;
 #define ZNET_SOCKET_ERROR SOCKET_ERROR
 #else
 #include <sys/socket.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -57,6 +58,13 @@ class ZSocket {
       return false;
     }
   };
+
+  // Resolve hostnames or numeric IPs into an endpoint address.
+  // When ipv6 is false, resolves IPv4; when true, resolves IPv6.
+  static bool ResolveAddress(const base::StringRef host,
+                             u16 port,
+                             bool ipv6,
+                             Address& out);
 
   i32 Send(const Address& addr, const base::Span<byte> data);
   i32 Receive(Address& sender, char* buffer, mem_size length);

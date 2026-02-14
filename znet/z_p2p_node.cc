@@ -6,7 +6,6 @@
 #include <znet/z_stl_compat.h>
 
 #include <chrono>
-#include <cstring>
 #include <thread>
 
 namespace tx::network {
@@ -14,16 +13,7 @@ namespace {
 constexpr char kLogTag[] = "z-p2p-node";
 
 bool AddressFromString(const base::StringRef ip, u16 port, ZSocket::Address& out) {
-  if (ip.empty() || ip.size() >= sizeof(out.ip)) {
-    return false;
-  }
-  std::memset(&out, 0, sizeof(out));
-  std::memcpy(out.ip, ip.data(), ip.size());
-  out.port = port;
-  // Detect address family from IP string
-  base::String ip_str(ip.data(), ip.size());
-  out.address_family = (ip_str.find(':') != base::String::npos) ? AF_INET6 : AF_INET;
-  return true;
+  return ZSocket::ResolveAddress(ip, port, /*ipv6=*/false, out);
 }
 }  // namespace
 
