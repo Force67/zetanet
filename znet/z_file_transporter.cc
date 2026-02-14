@@ -543,7 +543,7 @@ bool ZFileTransporter::ParseTransferChunkPayload(const base::Span<byte>& payload
       reinterpret_cast<const char*>(payload.data() + cursor), file_name_size);
   cursor += file_name_size;
   
-  if (IsPathTraversal(chunk.file_name)) {
+  if (chunk.has_file_name && IsPathTraversal(chunk.file_name)) {
     BASE_LOGE(kLogTag, "Path traversal attempt detected in filename");
     return false;
   }

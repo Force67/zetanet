@@ -1,4 +1,4 @@
-project "AllocatorBench"
+project "P2PDemo"
     language "C++"
     kind "ConsoleApp"
     vpaths

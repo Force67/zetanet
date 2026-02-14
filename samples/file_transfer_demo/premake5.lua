@@ -1,4 +1,4 @@
-project "P2PSmoke"
+project "FileTransferDemo"
     language "C++"
     kind "ConsoleApp"
     vpaths
