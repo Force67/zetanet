@@ -6,11 +6,19 @@
 #include <cstring>
 #include <cstdlib>
 
+#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/gcm.h>
+#include <mbedtls/md.h>
+#include <mbedtls/sha256.h>
+#else
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <openssl/kdf.h>
+#endif
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -23,6 +31,17 @@ namespace {
 constexpr char kLogTag[] = "z-crypto";
 
 bool Sha256(const byte* data, mem_size size, base::Array<byte, 32>& out_hash) {
+#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  const int starts_result = mbedtls_sha256_starts(&ctx, 0);
+  const int update_result =
+      starts_result == 0 ? mbedtls_sha256_update(&ctx, data, size) : -1;
+  const int finish_result =
+      update_result == 0 ? mbedtls_sha256_finish(&ctx, out_hash.data()) : -1;
+  mbedtls_sha256_free(&ctx);
+  return starts_result == 0 && update_result == 0 && finish_result == 0;
+#else
   EVP_MD_CTX* ctx = EVP_MD_CTX_new();
   if (!ctx) {
     return false;
@@ -37,6 +56,7 @@ bool Sha256(const byte* data, mem_size size, base::Array<byte, 32>& out_hash) {
             hash_len == out_hash.size();
   EVP_MD_CTX_free(ctx);
   return success;
+#endif
 }
 
 base::String BytesToHex(const byte* data, mem_size size) {
@@ -52,12 +72,45 @@ base::String BytesToHex(const byte* data, mem_size size) {
 bool HmacSha256(const byte* key, mem_size key_size,
                 const byte* data, mem_size data_size,
                 base::Array<byte, 32>& out_mac) {
+#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+  const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!info) {
+    return false;
+  }
+  return mbedtls_md_hmac(info, key, key_size, data, data_size, out_mac.data()) ==
+         0;
+#else
   unsigned int mac_len = 0;
   if (!HMAC(EVP_sha256(), key, static_cast<int>(key_size),
             data, data_size, out_mac.data(), &mac_len)) {
     return false;
   }
   return mac_len == out_mac.size();
+#endif
+}
+
+bool RandomBytes(byte* out, mem_size size) {
+#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+  mbedtls_entropy_context entropy;
+  mbedtls_ctr_drbg_context ctr_drbg;
+  mbedtls_entropy_init(&entropy);
+  mbedtls_ctr_drbg_init(&ctr_drbg);
+
+  constexpr char kPersonalization[] = "znet-crypto";
+  int result = mbedtls_ctr_drbg_seed(
+      &ctr_drbg, mbedtls_entropy_func, &entropy,
+      reinterpret_cast<const byte*>(kPersonalization),
+      sizeof(kPersonalization) - 1);
+  if (result == 0) {
+    result = mbedtls_ctr_drbg_random(&ctr_drbg, out, size);
+  }
+
+  mbedtls_ctr_drbg_free(&ctr_drbg);
+  mbedtls_entropy_free(&entropy);
+  return result == 0;
+#else
+  return RAND_bytes(out, static_cast<int>(size)) == 1;
+#endif
 }
 }  // namespace
 
@@ -74,14 +127,14 @@ bool ZCryptoContext::InitializeKeyExchange() {
   }
 
   byte local_nonce[32]{};
-  if (RAND_bytes(local_nonce, sizeof(local_nonce)) != 1) {
+  if (!RandomBytes(local_nonce, sizeof(local_nonce))) {
     BASE_LOGE(kLogTag, "Failed to generate local key exchange nonce");
     return false;
   }
   local_nonce_ = BytesToHex(local_nonce, sizeof(local_nonce));
   
   byte local_challenge[16]{};
-  if (RAND_bytes(local_challenge, sizeof(local_challenge)) != 1) {
+  if (!RandomBytes(local_challenge, sizeof(local_challenge))) {
     BASE_LOGE(kLogTag, "Failed to generate local challenge");
     return false;
   }
@@ -157,7 +210,7 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
   }
 
   byte nonce[12]{};
-  if (RAND_bytes(nonce, sizeof(nonce)) != 1) {
+  if (!RandomBytes(nonce, sizeof(nonce))) {
     BASE_LOGE(kLogTag, "Failed to generate encryption nonce");
     return false;
   }
@@ -174,45 +227,74 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
     return false;
   }
   
+#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+
+  int result = mbedtls_gcm_setkey(
+      &gcm, MBEDTLS_CIPHER_ID_AES, encryption_key_.data(),
+      static_cast<unsigned int>(encryption_key_.size() * 8));
+  if (result == 0) {
+    result = mbedtls_gcm_crypt_and_tag(
+        &gcm, MBEDTLS_GCM_ENCRYPT, plaintext.size(), nonce, sizeof(nonce),
+        aad.data(), aad.size(), plaintext.data(), encrypted.data() + sizeof(nonce),
+        tag_size, encrypted.data() + sizeof(nonce) + ciphertext_size);
+  }
+  mbedtls_gcm_free(&gcm);
+
+  if (result != 0) {
+    encrypted.clear();
+    BASE_LOGE(kLogTag, "AES-GCM encryption failed ({})", result);
+    return false;
+  }
+#else
   EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
   if (!ctx) {
     encrypted.clear();
     return false;
   }
-  
+
   int out_len = 0;
   int final_len = 0;
-  
-  bool success = EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
-                EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, sizeof(nonce), nullptr) == 1 &&
-                EVP_EncryptInit_ex(ctx, nullptr, nullptr, encryption_key_.data(), nonce) == 1;
-  
+
+  bool success =
+      EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+      EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, sizeof(nonce), nullptr) ==
+          1 &&
+      EVP_EncryptInit_ex(ctx, nullptr, nullptr, encryption_key_.data(), nonce) ==
+          1;
+
   if (success && !aad.empty()) {
-    success = EVP_EncryptUpdate(ctx, nullptr, &out_len, aad.data(), static_cast<int>(aad.size())) == 1;
+    success = EVP_EncryptUpdate(ctx, nullptr, &out_len, aad.data(),
+                                static_cast<int>(aad.size())) == 1;
   }
-  
+
   if (success) {
-    success = EVP_EncryptUpdate(ctx, encrypted.data() + sizeof(nonce), &out_len, 
-                                plaintext.data(), static_cast<int>(plaintext.size())) == 1;
+    success = EVP_EncryptUpdate(ctx, encrypted.data() + sizeof(nonce), &out_len,
+                                plaintext.data(),
+                                static_cast<int>(plaintext.size())) == 1;
   }
-  
+
   if (success) {
-    success = EVP_EncryptFinal_ex(ctx, encrypted.data() + sizeof(nonce) + out_len, &final_len) == 1;
+    success = EVP_EncryptFinal_ex(ctx, encrypted.data() + sizeof(nonce) + out_len,
+                                  &final_len) == 1;
   }
-  
+
   if (success) {
-    success = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, tag_size, 
-                                  encrypted.data() + sizeof(nonce) + ciphertext_size) == 1;
+    success = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, tag_size,
+                                  encrypted.data() + sizeof(nonce) +
+                                      ciphertext_size) == 1;
   }
-  
+
   EVP_CIPHER_CTX_free(ctx);
-  
+
   if (!success) {
     encrypted.clear();
     BASE_LOGE(kLogTag, "AES-GCM encryption failed");
     return false;
   }
-  
+#endif
+
   return true;
 }
 
@@ -244,47 +326,72 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
   }
   
   plaintext.resize(ciphertext_size);
-  
+
+#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+  int result = mbedtls_gcm_setkey(
+      &gcm, MBEDTLS_CIPHER_ID_AES, encryption_key_.data(),
+      static_cast<unsigned int>(encryption_key_.size() * 8));
+  if (result == 0) {
+    result = mbedtls_gcm_auth_decrypt(
+        &gcm, ciphertext_size, nonce, nonce_size, aad.data(), aad.size(), tag,
+        tag_size, ciphertext, plaintext.data());
+  }
+  mbedtls_gcm_free(&gcm);
+
+  if (result != 0) {
+    plaintext.clear();
+    BASE_LOGE(kLogTag, "AES-GCM decryption/authentication failed ({})", result);
+    return false;
+  }
+#else
   EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
   if (!ctx) {
     plaintext.clear();
     return false;
   }
-  
-  bool success = EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
-                EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, nonce_size, nullptr) == 1 &&
-                EVP_DecryptInit_ex(ctx, nullptr, nullptr, encryption_key_.data(), nonce) == 1;
-  
+
+  bool success =
+      EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+      EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, nonce_size, nullptr) == 1 &&
+      EVP_DecryptInit_ex(ctx, nullptr, nullptr, encryption_key_.data(), nonce) ==
+          1;
+
   int aad_len = 0;
   if (success && !aad.empty()) {
-    success = EVP_DecryptUpdate(ctx, nullptr, &aad_len, aad.data(), static_cast<int>(aad.size())) == 1;
+    success = EVP_DecryptUpdate(ctx, nullptr, &aad_len, aad.data(),
+                                static_cast<int>(aad.size())) == 1;
   }
-  
+
   int out_len = 0;
   if (success) {
-    success = EVP_DecryptUpdate(ctx, plaintext.data(), &out_len, ciphertext, 
+    success = EVP_DecryptUpdate(ctx, plaintext.data(), &out_len, ciphertext,
                                 static_cast<int>(ciphertext_size)) == 1;
   }
-  
+
   if (success) {
-    success = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, tag_size, 
+    success = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, tag_size,
                                   const_cast<byte*>(tag)) == 1;
   }
-  
+
   int final_len = 0;
   if (success) {
-    success = EVP_DecryptFinal_ex(ctx, plaintext.data() + out_len, &final_len) == 1;
+    success = EVP_DecryptFinal_ex(ctx, plaintext.data() + out_len, &final_len) ==
+              1;
   }
-  
+
   EVP_CIPHER_CTX_free(ctx);
-  
+
   if (!success) {
     plaintext.clear();
     BASE_LOGE(kLogTag, "AES-GCM decryption/authentication failed");
     return false;
   }
-  
+
   plaintext.resize(static_cast<mem_size>(out_len + final_len));
+#endif
+
   return true;
 }
 

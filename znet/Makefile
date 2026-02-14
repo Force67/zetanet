@@ -30,11 +30,11 @@ endif
 RESCOMP = windres
 TARGETDIR = ../bin
 TARGET = $(TARGETDIR)/libzetanet_64.a
-INCLUDES += -I. -I.. -I../vendor/lz4/lib
+INCLUDES += -I. -I.. -I../vendor/lz4/lib -I/nix/store/0j8ydh92l9hdjibg5d24nasxzha9ibvr-mbedtls-3.6.5/include
 FORCE_INCLUDE +=
 ALL_CPPFLAGS += $(CPPFLAGS) -MD -MP $(DEFINES) $(INCLUDES)
 ALL_RESFLAGS += $(RESFLAGS) $(DEFINES) $(INCLUDES)
-LIBS += ../bin/liblz4_64.a -lpthread -lcrypto -lssl
+LIBS += ../bin/liblz4_64.a -lpthread -lmbedtls -lmbedx509 -lmbedcrypto
 LDDEPS += ../bin/liblz4_64.a
 LINKCMD = $(AR) -rcs "$@" $(OBJECTS)
 define PREBUILDCMDS
@@ -46,24 +46,24 @@ endef
 
 ifeq ($(config),debug)
 OBJDIR = obj/Debug
-DEFINES += -DTK_DBG -DOS_LINUX -DPROJECT_NAME=\"Zetanet\" -DZNET_USE_STL -DCOMPILE_DLL
+DEFINES += -DTK_DBG -DOS_LINUX -DPROJECT_NAME=\"Zetanet\" -DZNET_USE_STL -DCOMPILE_DLL -DZNET_CRYPTO_BACKEND_MBEDTLS
 ALL_CFLAGS += $(CFLAGS) $(ALL_CPPFLAGS) -m64 -O0 -g -msse4.1
 ALL_CXXFLAGS += $(CXXFLAGS) $(ALL_CPPFLAGS) -m64 -O0 -g -msse4.1 -std=c++20
-ALL_LDFLAGS += $(LDFLAGS) -L/usr/lib64 -m64
+ALL_LDFLAGS += $(LDFLAGS) -L/nix/store/0j8ydh92l9hdjibg5d24nasxzha9ibvr-mbedtls-3.6.5/lib -L/usr/lib64 -m64
 
 else ifeq ($(config),release)
 OBJDIR = obj/Release
-DEFINES += -DOS_LINUX -DPROJECT_NAME=\"Zetanet\" -DZNET_USE_STL -DCOMPILE_DLL
+DEFINES += -DOS_LINUX -DPROJECT_NAME=\"Zetanet\" -DZNET_USE_STL -DCOMPILE_DLL -DZNET_CRYPTO_BACKEND_MBEDTLS
 ALL_CFLAGS += $(CFLAGS) $(ALL_CPPFLAGS) -m64 -O3 -msse4.1
 ALL_CXXFLAGS += $(CXXFLAGS) $(ALL_CPPFLAGS) -m64 -O3 -msse4.1 -std=c++20
-ALL_LDFLAGS += $(LDFLAGS) -L/usr/lib64 -m64 -s
+ALL_LDFLAGS += $(LDFLAGS) -L/nix/store/0j8ydh92l9hdjibg5d24nasxzha9ibvr-mbedtls-3.6.5/lib -L/usr/lib64 -m64 -s
 
 else ifeq ($(config),shipping)
 OBJDIR = obj/Shipping
-DEFINES += -DOS_LINUX -DPROJECT_NAME=\"Zetanet\" -DZNET_USE_STL -DCOMPILE_DLL
+DEFINES += -DOS_LINUX -DPROJECT_NAME=\"Zetanet\" -DZNET_USE_STL -DCOMPILE_DLL -DZNET_CRYPTO_BACKEND_MBEDTLS
 ALL_CFLAGS += $(CFLAGS) $(ALL_CPPFLAGS) -m64 -msse4.1
 ALL_CXXFLAGS += $(CXXFLAGS) $(ALL_CPPFLAGS) -m64 -msse4.1 -std=c++20
-ALL_LDFLAGS += $(LDFLAGS) -L/usr/lib64 -m64 -s
+ALL_LDFLAGS += $(LDFLAGS) -L/nix/store/0j8ydh92l9hdjibg5d24nasxzha9ibvr-mbedtls-3.6.5/lib -L/usr/lib64 -m64 -s
 
 endif
 

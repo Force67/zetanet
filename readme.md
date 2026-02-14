@@ -18,25 +18,3 @@ Cool features:
 Originally this library was built on the "base" library of my equilibirium STL-replacement project (because my own STL-replacement is faster than the STL). I've since added a std compat layer, so you can compile without it.
 
 This code is tested working on linux (posix) & windows.
-
-## Task Executor Override
-
-Zetanet now ships with an inbuilt threadpool task executor for packet dispatch.
-You can keep the default, tune it, or provide your own executor implementation.
-
-```cpp
-#include <znet/z_client.h>
-#include <znet/z_task_executor.h>
-
-tx::network::ZClient client;
-
-// Optional: tune the built-in executor before Connect().
-client.SetBuiltInTaskExecutorConfig(/*worker_count=*/4, /*max_queued_tasks=*/8192);
-
-// Optional: override with your own executor instead.
-// class MyExecutor : public tx::network::ITaskExecutor { ... };
-// MyExecutor exec;
-// client.SetTaskExecutor(&exec);
-
-client.Connect("127.0.0.1", 9000);
-```

@@ -6,6 +6,7 @@
 #include <znet/z_stl_compat.h>
 #include <znet/z_transport.h>
 
+#include <chrono>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -33,6 +34,18 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
     JoinHello = 1,
     PeerRoster = 2,
     HostTransition = 3,
+    KeepAlive = 4,
+    PunchProbe = 5,
+    PunchAck = 6,
+    Welcome = 7,
+  };
+
+  struct PunchPeerState {
+    ZSocket::Address address{};
+    u32 attempts_sent{0};
+    bool acknowledged{false};
+    std::chrono::steady_clock::time_point next_probe_time{};
+    std::chrono::steady_clock::time_point last_keepalive_time{};
   };
 
   bool InitAsHost(u16 port);
@@ -46,15 +59,25 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
   void SendJoinHello();
   void BroadcastPeerRoster();
   void BroadcastHostTransition(const ZSocket::Address& endpoint);
+  void SendWelcome(const ZPeer& peer);
+  void SendPunchProbe(const ZSocket::Address& endpoint);
+  void SendPunchAck(const ZSocket::Address& endpoint);
+  void SendKeepAlive(const ZSocket::Address& endpoint);
+  void TickNatPunchthrough();
+  PunchPeerState* FindPunchPeerState(const ZSocket::Address& endpoint);
+  PunchPeerState& GetOrCreatePunchPeerState(const ZSocket::Address& endpoint);
+  void ArmPunchProbe(const ZSocket::Address& endpoint);
+  bool IsSelfAddress(const ZSocket::Address& address) const;
   void PushControlPacket(u32 destination_peer_id, const base::Vector<byte>& payload);
+  void PushControlPacketToAddress(const ZSocket::Address& destination,
+                                  const base::Vector<byte>& payload);
 
   static bool SerializeAddress(base::Vector<byte>& buffer,
                                const ZSocket::Address& address);
-static bool DeserializeAddress(const byte* data,
-                                  mem_size data_size,
-                                  mem_size& cursor,
-                                  ZSocket::Address& address);
-  static bool IsSelfAddress(const ZSocket::Address& address, u16 self_port);
+  static bool DeserializeAddress(const byte* data,
+                                 mem_size data_size,
+                                 mem_size& cursor,
+                                 ZSocket::Address& address);
 
   void QueueIncoming(const IncomingPacket& packet);
   void SetHostEndpoint(const ZSocket::Address& endpoint);
@@ -67,6 +90,10 @@ static bool DeserializeAddress(const byte* data,
   u16 local_port_{0};
   base::String advertised_ip_{"127.0.0.1"};
   ZSocket::Address host_endpoint_{};
+  ZSocket::Address public_endpoint_{};
+  bool has_public_endpoint_{false};
+  std::chrono::steady_clock::time_point last_host_keepalive_time_{};
+  base::Vector<PunchPeerState> punch_peers_;
 
   base::Mutex incoming_mutex_;
   base::Queue<IncomingPacket> incoming_control_;

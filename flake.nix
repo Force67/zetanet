@@ -19,6 +19,7 @@
             premake5
             pkg-config
             openssl
+            mbedtls
             python3
           ] ++ lib.optionals stdenv.isLinux [
             gcc14
@@ -45,6 +46,7 @@
             echo "Zetanet dev shell loaded"
             echo "Generate build files: premake5 gmake2"
             echo "Generate STL build files: premake5 --use-stl gmake2"
+            echo "Generate STL + mbedTLS build files: premake5 --use-stl --crypto-backend=mbedtls --use-system-mbedtls gmake2"
             echo "Build debug targets: make config=debug"
             echo "Build release targets: make config=release"
             echo "Build core library only: make config=debug zetanet"

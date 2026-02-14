@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_file_transporter.h"
+#include "z_crypto_backend.h"
 #include "z_file_write_interface.h"
 #include "z_transport.h"
 #include "z_wire_le.h"
@@ -23,7 +24,9 @@
 
 #include "z_network_allocator.h"
 
-#ifdef ZNET_USE_STL
+#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#include <mbedtls/md.h>
+#elif defined(ZNET_USE_STL)
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 #else
@@ -50,7 +53,11 @@ constexpr mem_size kHmacSize = 32;
 constexpr char kFileHmacKeyEnv[] = "ZNET_FILE_HMAC_KEY";
 
 bool ComputeHmacSha256(const byte* data, mem_size size, const byte* key, mem_size key_size, byte* out_hmac) {
-#ifdef ZNET_USE_STL
+#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+  const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  return info != nullptr &&
+         mbedtls_md_hmac(info, key, key_size, data, size, out_hmac) == 0;
+#elif defined(ZNET_USE_STL)
   unsigned int hmac_len = 0;
   return HMAC(EVP_sha256(), key, static_cast<int>(key_size), data, size, out_hmac, &hmac_len) != nullptr && hmac_len == kHmacSize;
 #else

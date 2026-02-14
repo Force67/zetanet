@@ -5,6 +5,8 @@
 #include <array>
 #include <string>
 
+#include <znet/z_crypto_backend.h>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else

@@ -19,12 +19,6 @@ project "AllocatorBench"
           "zetanet",
           "lz4",
       }
-
-      filter("system:linux")
-        links({ "pthread", "crypto", "ssl" })
-      filter("system:macosx")
-        links({ "crypto", "ssl" })
-      filter({})
     else
       includedirs
       {
@@ -43,6 +37,8 @@ project "AllocatorBench"
           "lz4",
       }
     end
+
+    apply_znet_crypto_links()
 
     files
     {

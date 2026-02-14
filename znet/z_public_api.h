@@ -16,20 +16,20 @@ ZNET_API void SetBaseLogHandlerFwd(void *user_pointer,
                                                     const char *msg));
 
 struct ZPacketAllocatorClassStats {
-  mem_size block_size;
-  mem_size request_count;
-  mem_size hit_count;
-  mem_size target_cached_blocks;
-  mem_size cached_free_blocks;
+  size_t block_size;
+  size_t request_count;
+  size_t hit_count;
+  size_t target_cached_blocks;
+  size_t cached_free_blocks;
   double ewma_demand;
 };
 
 struct ZPacketAllocatorStats {
-  static constexpr mem_size kMaxClasses = 11;
-  mem_size total_requests;
-  mem_size pool_hits;
-  mem_size fallback_allocations;
-  mem_size class_count;
+  static constexpr size_t kMaxClasses = 11;
+  size_t total_requests;
+  size_t pool_hits;
+  size_t fallback_allocations;
+  size_t class_count;
   ZPacketAllocatorClassStats classes[kMaxClasses];
 };
 
