@@ -6,6 +6,7 @@
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
+#include <unordered_set>
 #else
 #include <base/memory/unique_pointer.h>
 #endif
@@ -44,5 +45,8 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
 
   void ProcessSystemMessage(const IncomingPacket& p);
   void SendServerHello(ZPeerId);
+
+ private:
+  std::unordered_set<u32> handshaked_peers_;
 };
 }  // namespace tx::network

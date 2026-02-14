@@ -89,8 +89,12 @@ void ZClient::SendMessage(const ZPeerId id, const base::String& data) {
 void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
   switch (p.type) {
     case PacketType::ServerHello: {
+      if (state_ != State::kConnecting) {
+        BASE_LOGI(kLogTag, "Ignoring duplicate ServerHello (already connected)");
+        break;
+      }
       BASE_LOGI(kLogTag, "Received ServerHello");
-      if (state_ == State::kConnecting) {
+      {
         PacketReader reader((byte*)p.data.data(), p.data.size());
         system_commands::ServerHello response;
         if (!reader.Read(response)) {
@@ -213,11 +217,11 @@ void ZClient::SendClientHello() {
                                      client_challenge.size()));
   }
 
-  const PackageFlags flags{.reliable = 1,
+  const PackageFlags flags{.reliable = 0,
                            .encrypted = 0,
                            .compressed = 0,
                            .priority = (u8)PacketPriority::Critical,
-                           .acknowledged = 1,
+                           .acknowledged = 0,
                            .awaiting_ack = 0,
                            .reserved = 0};
   OutgoingPacket o(ZPeerId::to_server, PacketType::ClientHello,
@@ -233,11 +237,11 @@ void ZClient::SendClientAuthProof(const base::String& proof) {
   writer.PutList(base::Span<byte>(reinterpret_cast<const byte*>(proof.data()),
                                    proof.size()));
 
-  const PackageFlags flags{.reliable = 1,
+  const PackageFlags flags{.reliable = 0,
                            .encrypted = 0,
                            .compressed = 0,
                            .priority = (u8)PacketPriority::Critical,
-                           .acknowledged = 1,
+                           .acknowledged = 0,
                            .awaiting_ack = 0,
                            .reserved = 0};
   OutgoingPacket o(ZPeerId::to_server, PacketType::ClientAuthProof,

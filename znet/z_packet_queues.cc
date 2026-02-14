@@ -7,6 +7,8 @@
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
+#include <unordered_set>
+#include <unordered_map>
 #else
 #include <base/time/time.h>
 #endif
@@ -187,8 +189,7 @@ void ZPacketQueue::ProcessOutgoingPackets() {
           continue;
         }
         if (packet_age > kResendIntervalSeconds) {
-          dispatcher_.DispatchPacket(crypto_context_, packet,
-                                     awaiting_ack_packets_);
+          dispatcher_.RetransmitPacket(crypto_context_, packet, seqNum);
           packet.last_send_time = now;
         }
       }
@@ -233,6 +234,12 @@ mem_size ZPacketQueue::ProcessChannel(PacketChannelType channel,
 }
 
 void ZPacketQueue::ProcessReceiving() {
+  // Per-peer dedup sets live here (not in the class) to avoid changing the
+  // header/ABI.  Sequence numbers are only unique within a single peer's
+  // dispatcher, so dedup must be scoped per source_peer_id.
+  // ProcessReceiving runs on a single dedicated thread per ZPacketQueue instance.
+  std::unordered_map<u32, std::unordered_set<u32>> received_reliable_seqs;
+
   IncomingPacket pack;
   while (!stop_threads_.load()) {
     const auto result = receiver_.ReceivePackets(crypto_context_, pack);
@@ -241,8 +248,15 @@ void ZPacketQueue::ProcessReceiving() {
       auto prio = (PacketPriority)pack.flags.priority;
 
       if (pack.flags.reliable) {
+        // Always ACK so the sender stops retransmitting.
         AddAwaitingAckPacket(pack.source_peer_id, pack.sequence_number,
                              pack.acknowledgement_number);
+        // But only deliver once — drop duplicate sequence numbers per peer.
+        if (!received_reliable_seqs[pack.source_peer_id]
+                 .insert(pack.sequence_number)
+                 .second) {
+          continue;
+        }
       }
       channel_incoming_queues_[pack.channel].enqueue(std::move(pack), prio);
     } else if (result == PacketReceiver::ReceiveResult::Acknowledgement) {
@@ -254,7 +268,9 @@ void ZPacketQueue::ProcessReceiving() {
         const bool has_packet = awaiting_ack_packets_.with_value(
             acked_seq, [&](const OutgoingPacket& packet) {
               destination_matches =
-                  (packet.destination_peer_id == pack.source_peer_id);
+                  (packet.destination_peer_id == pack.source_peer_id) ||
+                  (packet.destination_peer_id == ZPeerId::to_server) ||
+                  (packet.destination_peer_id == ZPeerId::to_all);
               if (destination_matches) {
                 SaturatingSub(awaiting_ack_bytes_, packet.heap_data_size);
               }
@@ -298,7 +314,10 @@ void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
   bool destination_matches = false;
   const bool has_acknowledged_packet = awaiting_ack_packets_.with_value(
       ack_number, [&](const OutgoingPacket& packet) {
-        destination_matches = (packet.destination_peer_id == return_address.id);
+        destination_matches =
+            (packet.destination_peer_id == return_address.id) ||
+            (packet.destination_peer_id == ZPeerId::to_server) ||
+            (packet.destination_peer_id == ZPeerId::to_all);
         if (destination_matches) {
           SaturatingSub(awaiting_ack_bytes_, packet.heap_data_size);
         }

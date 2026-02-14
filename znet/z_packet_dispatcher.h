@@ -34,6 +34,39 @@ class PacketDispatcher {
     awaiting_ack_bytes_ = bytes;
   }
 
+  // Retransmit a packet using its original sequence number.
+  // Does NOT allocate a new sequence number or touch the receipt queue.
+  void RetransmitPacket(ZCryptoContext* crypto,
+                        OutgoingPacket& packet,
+                        u32 original_sequence_number) {
+    tx::network::PacketBuilder builder(crypto);
+
+    if (packet.destination_peer_id == ZPeerId::to_server) {
+      auto bytes =
+          builder.BuildPacket(packet, original_sequence_number);
+      if (!bytes.empty()) {
+        socket_.SendtoServer(bytes);
+      }
+    } else if (packet.destination_peer_id == ZPeerId::to_all) {
+      for (auto& peer : peer_list_.GetPeerList()) {
+        auto bytes =
+            builder.BuildPacket(packet, original_sequence_number);
+        if (!bytes.empty()) {
+          socket_.Send(peer.address, bytes);
+        }
+      }
+    } else {
+      ZPeer* peer = peer_list_.GetPeer(packet.destination_peer_id);
+      if (peer) {
+        auto bytes =
+            builder.BuildPacket(packet, original_sequence_number);
+        if (!bytes.empty()) {
+          socket_.Send(peer->address, bytes);
+        }
+      }
+    }
+  }
+
   void DispatchPacket(
       ZCryptoContext* crypto,
       OutgoingPacket& packet,

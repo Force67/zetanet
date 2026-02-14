@@ -89,7 +89,12 @@ void ZServer::SendMessage(ZPeerId id, const base::String& data) {
 void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
   switch (p.type) {
     case PacketType::ClientHello: {
-      BASE_LOGI(kLogTag, "Received ClientHello");
+      // Guard against duplicate ClientHello from the same peer (e.g. retransmissions)
+      if (handshaked_peers_.count(p.source_peer_id)) {
+        BASE_LOGI(kLogTag, "Ignoring duplicate ClientHello from peer {}", p.source_peer_id);
+        break;
+      }
+      BASE_LOGI(kLogTag, "Received ClientHello from peer {}", p.source_peer_id);
 
       if (crypto_context_) {
         PacketReader reader((byte*)p.data.data(), p.data.size());
@@ -140,6 +145,7 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
         crypto_context_->ProcessServerKey(client_nonce, client_challenge);
       }
 
+      handshaked_peers_.insert(p.source_peer_id);
       SendServerHello(p.source_peer_id);
       break;
     }
@@ -237,11 +243,11 @@ void ZServer::SendServerHello(ZPeerId dest) {
                                      server_proof.size()));
   }
 
-  const PackageFlags flags{.reliable = 1,
+  const PackageFlags flags{.reliable = 0,
                            .encrypted = 0,
                            .compressed = 0,
                            .priority = (u8)PacketPriority::Critical,
-                           .acknowledged = 1,
+                           .acknowledged = 0,
                            .awaiting_ack = 0,
                            .reserved = 0};
   OutgoingPacket out(dest.id, PacketType::ServerHello,
