@@ -65,11 +65,13 @@ bool ZAsyncTransportLayer::Init(const InitOptions& options) {
                                           built_in_executor_worker_count_,
                                           built_in_executor_max_queued_tasks_);
 
-  result = packet_queue_.StartThreads();
-  if (!result) {
-    BASE_LOGE(kLogTag, "Failed to start threads");
-    state_ = State::kDisconnected;
-    return false;
+  if (options.start_threads) {
+    result = packet_queue_.StartThreads();
+    if (!result) {
+      BASE_LOGE(kLogTag, "Failed to start threads");
+      state_ = State::kDisconnected;
+      return false;
+    }
   }
   return true;
 }

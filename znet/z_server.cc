@@ -29,13 +29,17 @@ bool ZServer::Begin(u16 port) {
       .setup_type = ZAsyncTransportLayer::ConnectionType::kServer,
       .use_encryption = use_encryption,
       .use_compression = use_compression,
-      .allow_ipv6 = false};
+      .allow_ipv6 = false,
+      .start_threads = false};  // Adaptive: threads start lazily
   bool result = ZAsyncTransportLayer::Init(options);
   if (!result) {
     BASE_LOGE(kLogTag, "Failed to initialize ZAsyncTransportLayer");
     return false;
   }
 
+  if (scaling_tier_count_ > 0) {
+    packet_queue_.StartIncomingThread();  // Warm the receiving thread at boot
+  }
   state_ = ZAsyncTransportLayer::State::kConnected;
   return true;
 }
@@ -147,6 +151,14 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
 
       handshaked_peers_.insert(p.source_peer_id);
       SendServerHello(p.source_peer_id);
+
+      // Advance through thread scaling tiers as peer count grows.
+      while (current_scaling_tier_ < scaling_tier_count_ &&
+             handshaked_peers_.size() >= scaling_tiers_[current_scaling_tier_].peer_count) {
+        packet_queue_.ReconfigureDispatchWorkers(
+            scaling_tiers_[current_scaling_tier_].dispatch_workers);
+        ++current_scaling_tier_;
+      }
       break;
     }
     case PacketType::ClientAuthProof: {

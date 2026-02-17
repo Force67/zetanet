@@ -153,6 +153,7 @@ bool ZSocket::CreateServer(u16 port, bool ipv6) {
     return false;
   }
 
+
   if (ipv6) {
     // Allow IPv6-only mode
     int v6only = 1;
@@ -214,6 +215,7 @@ bool ZSocket::CreateClient(const base::StringRef ip,
     DestroySocket();
     return false;
   }
+
 
   if (local_bind_port != 0) {
     sockaddr_storage local_addr{};

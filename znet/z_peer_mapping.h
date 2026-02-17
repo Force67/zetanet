@@ -89,6 +89,11 @@ class ZPeerMapping {
     return peer_list_;
   }
 
+  mem_size PeerCount() const {
+    std::shared_lock lock(mutex_);
+    return peer_list_.size();
+  }
+
  private:
   mutable std::shared_mutex mutex_;
   base::IdSet<ZPeerId::id_type, ZPeerId::invalid_id, ZPeerId::max_id>

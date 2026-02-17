@@ -35,15 +35,22 @@ class ZPeerMapping;
 class ZPacketQueue {
  public:
   struct RateLimitConfig {
-    mem_size max_packets_per_second = 1000;
-    mem_size max_bytes_per_second = 10 * 1024 * 1024;
-    mem_size burst_allowance = 2000;
+    mem_size max_packets_per_second = 500000;
+    mem_size max_bytes_per_second = 1024 * 1024 * 1024;  // 1 GB/s
+    mem_size burst_allowance = 100000;
   };
 
   ZPacketQueue(ZSocket&, ZPeerMapping&, base::Atomic<bool>& stop_token);
 
   bool StartThreads();
+  bool StartIncomingThread();
+  bool StartOutgoingThread();
   void StopThreads();
+
+  // Stop outgoing thread, recreate dispatch executor with new worker count,
+  // and restart.  Incoming thread is briefly stopped and restarted.
+  // No-op if an external executor is set.
+  void ReconfigureDispatchWorkers(mem_size new_worker_count);
 
   void ConfigureDispatchExecutor(ITaskExecutor* executor,
                                  mem_size built_in_worker_count = 0,
@@ -53,7 +60,19 @@ class ZPacketQueue {
     rate_limit_config_ = config;
   }
 
+  bool incoming_thread_running() const {
+    return incoming_thread_.joinable();
+  }
+
+  bool outgoing_thread_running() const {
+    return outgoing_thread_.joinable();
+  }
+
   void Push(OutgoingPacket&& package_move_in) {
+    if (!outgoing_thread_running()) {
+      PushDirect(std::move(package_move_in));
+      return;
+    }
     if (!CheckRateLimit(package_move_in.heap_data_size)) {
       return;
     }
@@ -67,10 +86,27 @@ class ZPacketQueue {
       channel_outgoing_bytes_[channel_index].fetch_add(payload_bytes,
                                                        std::memory_order_relaxed);
     }
+    outgoing_wakeup_cv_.notify_one();
+  }
+
+  // Bypass the outgoing queue and dispatch directly from the calling thread.
+  // Use for latency-critical sends where the queue hop is unacceptable.
+  // Thread-safe: sequence numbers and ACK tracking use atomics / lock-free structures.
+  void PushDirect(OutgoingPacket&& packet) {
+    dispatcher_.DispatchPacket(crypto_context_, packet, awaiting_ack_packets_);
   }
   
   bool CheckRateLimit(mem_size payload_bytes);
+
+  // Synchronous receive: call recvfrom() once and process the result.
+  // Use in threadless mode when no incoming thread is running.
+  // Returns true if a packet was received and enqueued to the incoming queue.
+  bool ReceiveOne();
+
   bool Pop(PacketChannelType channel_type, IncomingPacket& p) {
+    if (!incoming_thread_running()) {
+      ReceiveOne();
+    }
     auto& queue = channel_incoming_queues_[channel_type];
     if (!queue.empty()) {
       queue.dequeue(p);
@@ -145,6 +181,9 @@ class ZPacketQueue {
   base::Atomic<mem_size> pending_dispatch_tasks_{0};
   std::mutex dispatch_wait_mutex_;
   std::condition_variable dispatch_wait_cv_;
+
+  std::mutex outgoing_wakeup_mutex_;
+  std::condition_variable outgoing_wakeup_cv_;
 
   base::Array<base::Atomic<mem_size>, 2> channel_outgoing_bytes_{};
   base::Atomic<mem_size> awaiting_ack_packet_count_{0};

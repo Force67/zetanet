@@ -39,6 +39,7 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
   void ProcessSystemMessage(const IncomingPacket& p);
 
   void SendClientHello();
+  void SendClientHelloDirect();
   void SendClientAuthProof(const base::String& proof);
 };
 }  // namespace tx::network

@@ -27,10 +27,11 @@ bool ZClient::Connect(const base::StringRef address, u16 port) {
       .setup_type = ZAsyncTransportLayer::ConnectionType::kClient,
       .use_encryption = use_encryption,
       .use_compression = use_compression,
-      .allow_ipv6 = false};
+      .allow_ipv6 = false,
+      .start_threads = false};  // Adaptive: threads start lazily
   bool result = ZAsyncTransportLayer::Init(options);
   if (result) {
-    SendClientHello();
+    SendClientHelloDirect();  // Direct send (no outgoing thread yet)
     state_ = State::kConnecting;
   }
   return result;
@@ -227,6 +228,57 @@ void ZClient::SendClientHello() {
   OutgoingPacket o(ZPeerId::to_server, PacketType::ClientHello,
                    PacketChannelType::Control, flags, writer.data());
   Push(std::move(o));
+}
+
+void ZClient::SendClientHelloDirect() {
+  constexpr EncryptionAlgorithm encryption_algorithms[] = {
+      EncryptionAlgorithm::AESCBC128};
+  constexpr CompressionAlgorithm compression_algorithms[] = {
+      CompressionAlgorithm::LZ4};
+
+  base::String client_public_key;
+  base::String client_challenge;
+  u8 pub_key_list_len = 0;
+  if (crypto_context_) {
+    client_public_key = crypto_context_->GetPublicKey();
+    client_challenge = crypto_context_->GetChallenge();
+    if (!client_public_key.empty()) {
+      pub_key_list_len = 1;
+    }
+  }
+
+  system_commands::ClientHello request{
+      .encryption_algo_list_len = (u8)_countof(encryption_algorithms),
+      .compression_algo_list_len = (u8)_countof(compression_algorithms),
+      .pub_key_list_len = pub_key_list_len,
+      .challenge_len = static_cast<u8>(client_challenge.size())};
+  PacketWriter writer;
+  writer.Put(request);
+  for (int i = 0; i < request.encryption_algo_list_len; i++) {
+    writer.Put((u8)encryption_algorithms[i]);
+  }
+  for (int i = 0; i < request.compression_algo_list_len; i++) {
+    writer.Put((u8)compression_algorithms[i]);
+  }
+  if (!client_public_key.empty()) {
+    writer.PutList(base::Span<byte>(reinterpret_cast<const byte*>(client_public_key.data()),
+                                     client_public_key.size()));
+  }
+  if (!client_challenge.empty()) {
+    writer.PutList(base::Span<byte>(reinterpret_cast<const byte*>(client_challenge.data()),
+                                     client_challenge.size()));
+  }
+
+  const PackageFlags flags{.reliable = 0,
+                           .encrypted = 0,
+                           .compressed = 0,
+                           .priority = (u8)PacketPriority::Critical,
+                           .acknowledged = 0,
+                           .awaiting_ack = 0,
+                           .reserved = 0};
+  OutgoingPacket o(ZPeerId::to_server, PacketType::ClientHello,
+                   PacketChannelType::Control, flags, writer.data());
+  packet_queue_.PushDirect(std::move(o));
 }
 
 void ZClient::SendClientAuthProof(const base::String& proof) {

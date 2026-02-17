@@ -19,8 +19,8 @@ namespace tx::network {
 static constexpr char kLogTag[] = "z-packet-queue";
 static constexpr u32 kResendIntervalSeconds = 1;
 static constexpr u32 kDropAfterSeconds = 5;
-static constexpr mem_size kMaxDispatchPerChannelPerTick = 64;
-static constexpr auto kIdleSleepDuration = std::chrono::milliseconds(1);
+static constexpr mem_size kMaxDispatchPerChannelPerTick = 4096;
+static constexpr auto kIdleSleepDuration = std::chrono::microseconds(50);
 static constexpr auto kRetryScanInterval = std::chrono::milliseconds(10);
 namespace {
 void SaturatingSub(base::Atomic<mem_size>& value, mem_size delta) {
@@ -113,16 +113,50 @@ bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
   return true;
 }
 
-bool ZPacketQueue::StartThreads() {
-  EnsureDispatchExecutor();
+bool ZPacketQueue::StartIncomingThread() {
+  if (incoming_thread_.joinable()) return true;
   stop_threads_.store(false);
-  outgoing_thread_ = std::thread(&ZPacketQueue::ProcessOutgoingPackets, this);
   incoming_thread_ = std::thread(&ZPacketQueue::ProcessReceiving, this);
   return true;
 }
 
+bool ZPacketQueue::StartOutgoingThread() {
+  if (outgoing_thread_.joinable()) return true;
+  EnsureDispatchExecutor();
+  stop_threads_.store(false);
+  outgoing_thread_ = std::thread(&ZPacketQueue::ProcessOutgoingPackets, this);
+  return true;
+}
+
+bool ZPacketQueue::StartThreads() {
+  if (outgoing_thread_.joinable() && incoming_thread_.joinable()) return true;
+  StartIncomingThread();
+  StartOutgoingThread();
+  return true;
+}
+
+void ZPacketQueue::ReconfigureDispatchWorkers(mem_size new_worker_count) {
+  if (external_dispatch_executor_) return;
+
+  if (outgoing_thread_.joinable()) {
+    // Upgrade: stop all threads, recreate executor, restart.
+    bool had_incoming = incoming_thread_.joinable();
+    StopThreads();
+    owned_dispatch_executor_.Reset();
+    dispatch_executor_ = nullptr;
+    built_in_dispatch_worker_count_ = new_worker_count;
+    if (had_incoming) StartIncomingThread();
+    StartOutgoingThread();
+  } else {
+    // First start: set worker count, then launch outgoing thread.
+    built_in_dispatch_worker_count_ = new_worker_count;
+    StartOutgoingThread();
+  }
+}
+
 void ZPacketQueue::StopThreads() {
   stop_threads_.store(true);
+  outgoing_wakeup_cv_.notify_all();
   const auto current_thread_id = std::this_thread::get_id();
   if (outgoing_thread_.joinable() &&
       outgoing_thread_.get_id() != current_thread_id) {
@@ -197,7 +231,10 @@ void ZPacketQueue::ProcessOutgoingPackets() {
     }
 
     if (dispatched == 0) {
-      std::this_thread::sleep_for(kIdleSleepDuration);
+      // Wait on condvar — Push() calls notify_one() so we wake immediately
+      // when a packet is enqueued.  Falls back to periodic wake for retry scans.
+      std::unique_lock<std::mutex> lock(outgoing_wakeup_mutex_);
+      outgoing_wakeup_cv_.wait_for(lock, kRetryScanInterval);
     }
   }
 }
@@ -231,6 +268,42 @@ mem_size ZPacketQueue::ProcessChannel(PacketChannelType channel,
     ++processed;
   }
   return processed;
+}
+
+bool ZPacketQueue::ReceiveOne() {
+  IncomingPacket pack;
+  const auto result = receiver_.ReceivePackets(crypto_context_, pack);
+  if (result == PacketReceiver::ReceiveResult::Success) {
+    if (pack.flags.reliable) {
+      AddAwaitingAckPacket(pack.source_peer_id, pack.sequence_number,
+                           pack.acknowledgement_number);
+    }
+    auto prio = (PacketPriority)pack.flags.priority;
+    channel_incoming_queues_[pack.channel].enqueue(std::move(pack), prio);
+    return true;
+  } else if (result == PacketReceiver::ReceiveResult::Acknowledgement) {
+    if (pack.data.size() >= 4) {
+      const byte* d = reinterpret_cast<const byte*>(pack.data.data());
+      const u32 acked_seq = wire_le::LoadU32(d);
+      bool destination_matches = false;
+      const bool has_packet = awaiting_ack_packets_.with_value(
+          acked_seq, [&](const OutgoingPacket& packet) {
+            destination_matches =
+                (packet.destination_peer_id == pack.source_peer_id) ||
+                (packet.destination_peer_id == ZPeerId::to_server) ||
+                (packet.destination_peer_id == ZPeerId::to_all);
+            if (destination_matches) {
+              SaturatingSub(awaiting_ack_bytes_, packet.heap_data_size);
+            }
+          });
+      if (has_packet && destination_matches) {
+        awaiting_ack_packets_.remove(acked_seq);
+        SaturatingSub(awaiting_ack_packet_count_, 1);
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 void ZPacketQueue::ProcessReceiving() {
@@ -305,8 +378,12 @@ void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
   OutgoingPacket out(return_address.id, PacketType::Acknowledgement,
                      PacketChannelType::Control, flags,
                      base::Span<byte>(ack_payload, sizeof(ack_payload)));
-  auto& queue = channel_outgoing_queues_[PacketChannelType::Control];
-  queue.enqueue(std::move(out), PacketPriority::High);
+  if (!outgoing_thread_running()) {
+    dispatcher_.DispatchPacket(crypto_context_, out, awaiting_ack_packets_);
+  } else {
+    auto& queue = channel_outgoing_queues_[PacketChannelType::Control];
+    queue.enqueue(std::move(out), PacketPriority::High);
+  }
   if (ack_number == 0) {
     return;
   }

@@ -35,6 +35,7 @@ class ZAsyncTransportLayer {
     bool use_encryption;
     bool use_compression;
     bool allow_ipv6;
+    bool start_threads = true;  // false = synchronous mode (no background threads)
   };
 
   struct OutboundPressure {
@@ -60,6 +61,10 @@ class ZAsyncTransportLayer {
 
   bool EnqueuePacket(OutgoingPacket&& packet);
   OutboundPressure GetOutboundPressure() const;
+
+  void SetRateLimitConfig(const ZPacketQueue::RateLimitConfig& config) {
+    packet_queue_.SetRateLimitConfig(config);
+  }
   bool encryption_enabled() const {
     return crypto_context_.Get_UseOnlyIfYouKnowWhatYouareDoing() != nullptr;
   }
@@ -68,6 +73,33 @@ class ZAsyncTransportLayer {
 
   bool compression_enabled() const { return use_compression_; }
 
+  // Thread scaling tiers: at each peer_count threshold, the dispatch thread
+  // pool is (re)configured with the given number of workers.
+  // The first tier also starts the outgoing thread.
+  // Default tiers: 32 peers → 1 worker, 64 → 2, 128 → 4.
+  // Call DisableAdaptiveThreading() for full direct mode (no threads at all).
+  struct ThreadScalingTier {
+    size_t peer_count;
+    size_t dispatch_workers;
+  };
+
+  void SetThreadScaling(const ThreadScalingTier* tiers, size_t count) {
+    scaling_tier_count_ = count < kMaxScalingTiers ? count : kMaxScalingTiers;
+    for (size_t i = 0; i < scaling_tier_count_; ++i)
+      scaling_tiers_[i] = tiers[i];
+  }
+
+  void DisableAdaptiveThreading() {
+    scaling_tier_count_ = 0;
+  }
+
+  // Start the incoming (receiving) thread immediately.
+  // Useful for throughput-sensitive scenarios where the caller wants
+  // background receive processing without waiting for adaptive scaling.
+  bool WarmIncomingThread() {
+    return packet_queue_.StartIncomingThread();
+  }
+
  private:
   tx::network::ZSocket socket_;
   base::Atomic<bool> stop_threads{false};
@@ -75,6 +107,15 @@ class ZAsyncTransportLayer {
  protected:
   State state_{State::kDisconnected};
   bool use_compression_{false};
+
+  static constexpr size_t kMaxScalingTiers = 4;
+  ThreadScalingTier scaling_tiers_[kMaxScalingTiers] = {
+      {32, 1},
+      {64, 2},
+      {128, 4},
+  };
+  size_t scaling_tier_count_{3};
+  size_t current_scaling_tier_{0};
   base::UniquePointer<ZCryptoContext> crypto_context_;
   ZPacketQueue packet_queue_;
   ZPeerMapping peer_mapping_;
