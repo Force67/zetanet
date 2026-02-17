@@ -1,6 +1,6 @@
 // Copyright (C) 2023-2026 Vincent Hengel.
 // For licensing information see LICENSE at the root of this distribution.
-// --- MODIFIED for lock-freedom AND ordering (with caveats) ---
+// Lock-free ordered hash map with epoch-based safe memory reclamation.
 #pragma once
 
 #ifdef ZNET_USE_STL
@@ -15,30 +15,176 @@
 
 namespace base {
 
-// Forward declaration
-template <typename Key, typename Value>
-class LockFreeOrderedHashMap;
+// ---------------------------------------------------------------------------
+// Epoch-based reclamation (EBR).
+// Protects concurrent readers from use-after-free: a node is only freed
+// once every thread that could possibly hold a pointer to it has exited
+// its read-side critical section.  Based on ParlayHash (CMU).
+// ---------------------------------------------------------------------------
+namespace ebr {
+
+// Maximum concurrent threads that can hold an EBR guard simultaneously.
+// Only live threads consume slots; IDs are recycled when threads exit.
+constexpr int kMaxSlots = 4096;
+
+struct alignas(64) AnnounceSlot {
+  std::atomic<long> epoch{-1};
+};
+
+struct EpochState {
+  alignas(64) std::atomic<long> current{0};
+  AnnounceSlot slots[kMaxSlots];
+
+  // Thread ID pool — mutex only taken on thread birth/death (not hot path).
+  std::mutex pool_mutex;
+  std::vector<int> free_ids;
+  std::atomic<int> high_watermark{0};
+
+  int acquire_id() {
+    std::lock_guard<std::mutex> lk(pool_mutex);
+    if (!free_ids.empty()) {
+      int id = free_ids.back();
+      free_ids.pop_back();
+      return id;
+    }
+    int id = high_watermark.load(std::memory_order_relaxed);
+    // Release: ensures try_advance() (which loads with acquire) sees this
+    // slot as part of its scan range before the new thread announces.
+    high_watermark.store(id + 1, std::memory_order_release);
+    return id;
+  }
+
+  // Slot reuse safety: between the -1 store and a new thread's announce(),
+  // try_advance() may see -1 and skip this slot.  This is correct — the old
+  // thread has exited its critical section, and the new thread has not yet
+  // entered one, so no reader holds a dangling pointer.  The new thread's
+  // announce() retry loop guarantees it pins the current (or later) epoch.
+  void release_id(int id) {
+    slots[id].epoch.store(-1, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(pool_mutex);
+    free_ids.push_back(id);
+  }
+
+  int announce(int id) {
+    while (true) {
+      long e = current.load(std::memory_order_acquire);
+      slots[id].epoch.exchange(e, std::memory_order_seq_cst);
+      if (current.load(std::memory_order_acquire) == e) return id;
+    }
+  }
+
+  void unannounce(int id) {
+    slots[id].epoch.store(-1, std::memory_order_release);
+  }
+
+  void try_advance() {
+    long e = current.load(std::memory_order_acquire);
+    int n = high_watermark.load(std::memory_order_acquire);
+    for (int i = 0; i < n; i++) {
+      long a = slots[i].epoch.load(std::memory_order_acquire);
+      if (a != -1 && a < e) return;
+    }
+    current.compare_exchange_strong(e, e + 1, std::memory_order_release,
+                                    std::memory_order_relaxed);
+  }
+
+  long get_current() const { return current.load(std::memory_order_acquire); }
+};
+
+// Leaking singleton avoids destruction-order issues with thread_local.
+inline EpochState& state() {
+  static EpochState* s = new EpochState();
+  return *s;
+}
+
+// Per-thread registration with automatic ID recycling on thread exit.
+struct ThreadReg {
+  int id;
+  int nest_count = 0;
+  ThreadReg() : id(state().acquire_id()) {}
+  ~ThreadReg() { state().release_id(id); }
+};
+
+inline ThreadReg& thread_reg() {
+  thread_local ThreadReg reg;
+  return reg;
+}
+
+// RAII guard.  Supports nesting (only the outermost announce/unannounce
+// touches the global array) and move semantics (for iterators).
+struct Guard {
+  struct inactive_t {};
+  static constexpr inactive_t inactive{};
+
+  bool active_;
+
+  Guard() : active_(true) {
+    auto& reg = thread_reg();
+    if (reg.nest_count++ == 0) state().announce(reg.id);
+  }
+  explicit Guard(inactive_t) : active_(false) {}
+
+  ~Guard() {
+    if (active_) {
+      auto& reg = thread_reg();
+      if (--reg.nest_count == 0) state().unannounce(reg.id);
+    }
+  }
+
+  Guard(Guard&& o) noexcept : active_(o.active_) { o.active_ = false; }
+  Guard& operator=(Guard&& o) noexcept {
+    if (this != &o) {
+      if (active_) {
+        auto& reg = thread_reg();
+        if (--reg.nest_count == 0) state().unannounce(reg.id);
+      }
+      active_ = o.active_;
+      o.active_ = false;
+    }
+    return *this;
+  }
+  Guard(const Guard&) = delete;
+  Guard& operator=(const Guard&) = delete;
+};
+
+}  // namespace ebr
+
+// ---------------------------------------------------------------------------
+// LockFreeOrderedHashMap
+// ---------------------------------------------------------------------------
 
 template <typename Key, typename Value>
 class LockFreeOrderedHashMap {
  private:
   struct Node {
     ::std::pair<Key, Value> keyValue;
-    base::Atomic<Node*> bucketNext;  // Next node in the same hash bucket
-    base::Atomic<Node*> orderNext;   // Next node in global insertion order
-    base::Atomic<bool> is_deleted;   // Primary flag for logical deletion
+    base::Atomic<Node*> bucketNext;  // next in hash bucket chain
+    base::Atomic<Node*> orderNext;   // next in insertion-order chain
+    base::Atomic<bool> is_deleted;
+    Node* staging_next;              // lock-free staging stack link
+    bool bucket_swept;               // GC unlinked from bucket chain
+    bool order_swept;                // GC unlinked from order chain
+    long retired_epoch;              // epoch when fully unlinked (-1 = live)
 
     Node(const Key& k, Value&& v)
         : keyValue(::std::make_pair(k, ::std::move(v))),
           bucketNext(nullptr),
           orderNext(nullptr),
-          is_deleted(false) {}
+          is_deleted(false),
+          staging_next(nullptr),
+          bucket_swept{false},
+          order_swept(false),
+          retired_epoch(-1) {}
 
     Node(Key&& k, Value&& v)
         : keyValue(::std::make_pair(::std::move(k), ::std::move(v))),
           bucketNext(nullptr),
           orderNext(nullptr),
-          is_deleted(false) {}
+          is_deleted(false),
+          staging_next(nullptr),
+          bucket_swept{false},
+          order_swept(false),
+          retired_epoch(-1) {}
   };
 
   base::Atomic<Node*>* buckets;
@@ -48,28 +194,23 @@ class LockFreeOrderedHashMap {
   base::Atomic<Node*> orderHead;
   base::Atomic<Node*> orderTail;
 
-  // --- Memory Management (Placeholder - Leaks during operation) ---
-  base::Mutex allNodesMutex;  // Protects allNodes vector ONLY.
-  base::Vector<Node*> allNodes;
-  // --- Requires proper SMR scheme for production ---
+  // Lock-free Treiber stack: insert() pushes here via CAS (no mutex).
+  base::Atomic<Node*> staging_head_{nullptr};
 
-  // Finds a node *only* via hash bucket chain. Does NOT check is_deleted.
-  // Returns the node if key matches, nullptr otherwise.
-  // Sets 'prev_bucket_next_ptr' to the atomic 'bucketNext' of the predecessor node,
-  // or to the bucket head atomic itself if the target node is the head.
-  Node* find_in_bucket(const Key& key, base::Atomic<Node*>*& prev_bucket_next_ptr) const {
+  // GC-owned state (only accessed under gc_mutex_).
+  base::Mutex gc_mutex_;
+  base::Vector<Node*> all_nodes_;
+
+  // ---- internal helpers ----
+
+  Node* find_in_bucket(const Key& key) const {
     mem_size index = hash_key(key);
-    prev_bucket_next_ptr = &buckets[index];
     Node* curr = buckets[index].load(::std::memory_order_acquire);
-
     while (curr) {
-      if (curr->keyValue.first == key) {
-        return curr;  // Found the node (might be logically deleted)
-      }
-      prev_bucket_next_ptr = &curr->bucketNext;
+      if (curr->keyValue.first == key) return curr;
       curr = curr->bucketNext.load(::std::memory_order_acquire);
     }
-    return nullptr;  // Not found in this bucket chain
+    return nullptr;
   }
 
   mem_size hash_key(const Key& key) const {
@@ -78,206 +219,199 @@ class LockFreeOrderedHashMap {
     return keyHasher(key) % bucketCount;
   }
 
-  // Tries to physically unlink a node known to be logically deleted
-  // from its bucket chain. Helper function. Optional "helping" mechanism.
-  void try_unlink_bucket(Node* node, base::Atomic<Node*>* prev_bucket_next_ptr) {
-    // This check is needed because prev_bucket_next_ptr is determined *before*
-    // the node is marked deleted. We need to ensure the predecessor hasn't changed.
-    // A simpler way might be to re-find the node and predecessor after marking,
-    // but let's try this direct CAS first.
-    Node* current_prev_points_to = prev_bucket_next_ptr->load(::std::memory_order_relaxed);
-    if (current_prev_points_to ==
-        node) {  // Only attempt if prev still points to the node
-      Node* next = node->bucketNext.load(::std::memory_order_relaxed);
-      // Try to swing predecessor's pointer past the node
-      prev_bucket_next_ptr->compare_exchange_strong(node, next, ::std::memory_order_release,
-                                                    ::std::memory_order_relaxed);
+  // Re-traverse from the bucket head to find the correct predecessor, then
+  // CAS-unlink.  Immune to stale-prev issues: the predecessor is always
+  // fresh at the point of the CAS.
+  bool try_unlink_from_bucket(Node* node) {
+    mem_size index = hash_key(node->keyValue.first);
+    base::Atomic<Node*>* prev_ptr = &buckets[index];
+    Node* curr = prev_ptr->load(::std::memory_order_acquire);
+    while (curr) {
+      if (curr == node) {
+        Node* expected = node;
+        Node* next = node->bucketNext.load(::std::memory_order_relaxed);
+        return prev_ptr->compare_exchange_strong(
+            expected, next, ::std::memory_order_release,
+            ::std::memory_order_relaxed);
+      }
+      prev_ptr = &curr->bucketNext;
+      curr = curr->bucketNext.load(::std::memory_order_acquire);
     }
-    // If CAS fails, another thread likely already unlinked it or modified the
-    // predecessor. That's okay.
+    return false;  // already unlinked
+  }
+
+  void stage_node(Node* node) {
+    Node* old_head = staging_head_.load(::std::memory_order_relaxed);
+    do {
+      node->staging_next = old_head;
+    } while (!staging_head_.compare_exchange_weak(
+        old_head, node, ::std::memory_order_release,
+        ::std::memory_order_relaxed));
   }
 
  public:
-  // --- Iterators ---
+  // ---- Iterators (CRTP, no vtable, epoch-protected) ----
+  // NOTE: Iterators hold an ebr::Guard for the lifetime of traversal.
+  // A long-lived iterator pins the epoch and prevents *all* garbage
+  // collection from making progress.  Avoid storing iterators across
+  // operations; prefer short-lived traversals or ordered_keys_snapshot().
 
-  // Base class for iterators to share skipping logic
   template <typename IteratorType>
   class IteratorBase {
    protected:
     const LockFreeOrderedHashMap<Key, Value>* map;
-    Node* currentNode;  // Always points to a non-deleted node, or nullptr
+    Node* currentNode;
+    ebr::Guard guard_;
 
-    // Advances currentNode to the next non-deleted node based on specific traversal logic
-    virtual void advance_to_next_valid() = 0;
-
-    void find_first_valid(Node* starting_node) {
-      currentNode = starting_node;
-      while (currentNode && currentNode->is_deleted.load(::std::memory_order_acquire)) {
-        advance_to_next_valid();  // Skip deleted nodes
+    void skip_deleted() {
+      while (currentNode &&
+             currentNode->is_deleted.load(::std::memory_order_acquire)) {
+        static_cast<IteratorType*>(this)->advance_impl();
       }
     }
 
    public:
     using KeyValuePair = ::std::pair<Key, Value>;
 
+    // Active iterator: pins the epoch so traversed nodes stay alive.
     IteratorBase(const LockFreeOrderedHashMap<Key, Value>* m, Node* start_node)
-        : map(m), currentNode(nullptr) {
-      find_first_valid(start_node);
+        : map(m), currentNode(start_node), guard_() {
+      skip_deleted();
     }
 
-    // Default constructor for end iterator
+    // End sentinel: no epoch pin needed.
     IteratorBase(const LockFreeOrderedHashMap<Key, Value>* m)
-        : map(m), currentNode(nullptr) {}
+        : map(m), currentNode(nullptr), guard_(ebr::Guard::inactive) {}
 
     KeyValuePair& operator*() const { return currentNode->keyValue; }
-    KeyValuePair* operator->() const { return currentNode->keyValue; }
+    KeyValuePair* operator->() const { return &currentNode->keyValue; }
 
     bool operator==(const IteratorBase& other) const {
-      // Should compare map pointer too for robustness if maps could be copied/moved
       return currentNode == other.currentNode && map == other.map;
     }
-    bool operator!=(const IteratorBase& other) const { return !(*this == other); }
+    bool operator!=(const IteratorBase& other) const {
+      return !(*this == other);
+    }
 
     IteratorType& operator++() {
-      if (currentNode) {          // Only advance if not already at end
-        advance_to_next_valid();  // Find the *next* valid node
-        // After advancing, check again if the new node is deleted
-        while (currentNode && currentNode->is_deleted.load(::std::memory_order_acquire)) {
-          advance_to_next_valid();
-        }
+      if (currentNode) {
+        static_cast<IteratorType*>(this)->advance_impl();
+        skip_deleted();
       }
       return static_cast<IteratorType&>(*this);
     }
   };
 
-  // Iterator for Insertion Order Traversal
   class OrderIterator : public IteratorBase<OrderIterator> {
-    friend class LockFreeOrderedHashMap;  // Allow map to construct it
-   public:
-    void advance_to_next_valid() override {
-      if (this->currentNode) {
-        this->currentNode = this->currentNode->orderNext.load(::std::memory_order_acquire);
-      }
+    friend class IteratorBase<OrderIterator>;
+    friend class LockFreeOrderedHashMap;
+
+    void advance_impl() {
+      if (this->currentNode)
+        this->currentNode =
+            this->currentNode->orderNext.load(::std::memory_order_acquire);
     }
-    // Constructor for map access
-    OrderIterator(const LockFreeOrderedHashMap<Key, Value>* m, Node* start_node)
+
+   public:
+    OrderIterator(const LockFreeOrderedHashMap<Key, Value>* m,
+                  Node* start_node)
         : IteratorBase<OrderIterator>(m, start_node) {}
-    // Constructor for end iterator
     OrderIterator(const LockFreeOrderedHashMap<Key, Value>* m)
         : IteratorBase<OrderIterator>(m) {}
   };
 
-  // Iterator for Bucket Order Traversal
   class BucketIterator : public IteratorBase<BucketIterator> {
-    friend class LockFreeOrderedHashMap;  // Allow map to construct it
+    friend class IteratorBase<BucketIterator>;
+    friend class LockFreeOrderedHashMap;
+
    private:
     mem_size bucketIndex;
 
-   public:
-    void advance_to_next_valid() override {
-      if (!this->currentNode)
-        return;
-
-      // Try next in current bucket's chain
-      this->currentNode = this->currentNode->bucketNext.load(::std::memory_order_acquire);
-
-      // If current chain exhausted, find next bucket
+    void advance_impl() {
+      if (!this->currentNode) return;
+      this->currentNode =
+          this->currentNode->bucketNext.load(::std::memory_order_acquire);
       while (!this->currentNode && bucketIndex < this->map->bucketCount - 1) {
         ++bucketIndex;
         this->currentNode =
             this->map->buckets[bucketIndex].load(::std::memory_order_acquire);
       }
-
-      // If exhausted all buckets, set sentinel to match end() iterator
-      if (!this->currentNode) {
-        bucketIndex = this->map->bucketCount;
-      }
+      if (!this->currentNode) bucketIndex = this->map->bucketCount;
     }
-    // Constructor for map access
+
+   public:
     BucketIterator(const LockFreeOrderedHashMap<Key, Value>* m,
                    mem_size b_idx,
                    Node* start_node)
         : IteratorBase<BucketIterator>(m, start_node), bucketIndex(b_idx) {}
-    // Constructor for end iterator
     BucketIterator(const LockFreeOrderedHashMap<Key, Value>* m)
         : IteratorBase<BucketIterator>(m), bucketIndex(m->bucketCount) {}
 
-    // Need specific equality check including bucketIndex
     bool operator==(const BucketIterator& other) const {
-      return this->currentNode == other.currentNode && bucketIndex == other.bucketIndex &&
-             this->map == other.map;
+      return this->currentNode == other.currentNode &&
+             bucketIndex == other.bucketIndex && this->map == other.map;
     }
-    bool operator!=(const BucketIterator& other) const { return !(*this == other); }
+    bool operator!=(const BucketIterator& other) const {
+      return !(*this == other);
+    }
   };
 
-  // --- Begin/End Methods ---
+  // ---- begin / end ----
 
-  // Insertion Order Iterators
   OrderIterator order_begin() const {
-    return OrderIterator(this, orderHead.load(::std::memory_order_acquire));
+    return OrderIterator(this,
+                         orderHead.load(::std::memory_order_acquire));
   }
-  OrderIterator order_end() const {
-    return OrderIterator(this);  // Creates end iterator with nullptr node
-  }
+  OrderIterator order_end() const { return OrderIterator(this); }
 
-  // Bucket Order Iterators (Default behavior if unqualified begin/end used)
   BucketIterator begin() const {
-    Node* first_node = nullptr;
-    mem_size first_bucket = bucketCount;  // Start assuming no elements
     for (mem_size i = 0; i < bucketCount; ++i) {
-      first_node = buckets[i].load(::std::memory_order_acquire);
-      first_bucket = i;
-      // Skip deleted nodes at the start of the bucket
-      while (first_node && first_node->is_deleted.load(::std::memory_order_acquire)) {
-        first_node = first_node->bucketNext.load(::std::memory_order_acquire);
-      }
-      if (first_node) {  // Found the first non-deleted node
-        break;
-      }
+      Node* node = buckets[i].load(::std::memory_order_acquire);
+      while (node && node->is_deleted.load(::std::memory_order_acquire))
+        node = node->bucketNext.load(::std::memory_order_acquire);
+      if (node) return BucketIterator(this, i, node);
     }
-    // If loop finished without finding a node, first_node is nullptr, first_bucket might
-    // be bucketCount
-    if (!first_node) {
-      return end();  // Return end iterator
-    }
-    return BucketIterator(this, first_bucket, first_node);
+    return end();
   }
-  BucketIterator end() const {
-    return BucketIterator(this);  // Creates end iterator
-  }
+  BucketIterator end() const { return BucketIterator(this); }
 
-  // --- Constructor / Destructor ---
+  // ---- Constructor / Destructor ----
+
   explicit LockFreeOrderedHashMap(mem_size count)
-      : bucketCount(count > 0 ? count : 1), orderHead(nullptr), orderTail(nullptr) {
+      : bucketCount(count > 0 ? count : 1),
+        orderHead(nullptr),
+        orderTail(nullptr) {
     buckets = new base::Atomic<Node*>[bucketCount];
-    for (mem_size i = 0; i < bucketCount; ++i) {
+    for (mem_size i = 0; i < bucketCount; ++i)
       buckets[i].store(nullptr, ::std::memory_order_relaxed);
-    }
   }
 
+  // Destructor assumes no concurrent operations.  The staging stack and
+  // all_nodes_ are disjoint: staging holds nodes pushed since the last GC,
+  // while all_nodes_ holds nodes drained by previous GC passes.  Both sets
+  // are walked and freed unconditionally (EBR safety is irrelevant during
+  // single-threaded teardown).
   ~LockFreeOrderedHashMap() {
-    // --- Proper Cleanup ---
-    // Assumes no other threads are operating. Requires SMR synchronization otherwise.
-    // std::lock_guard<base::Mutex> lock(allNodesMutex); // Protects vector access
-    for (Node* node : allNodes) {
-      delete node;
+    Node* staged = staging_head_.load(::std::memory_order_relaxed);
+    while (staged) {
+      Node* next = staged->staging_next;
+      delete staged;
+      staged = next;
     }
-    allNodes.clear();
+    for (Node* n : all_nodes_)
+      delete n;
     delete[] buckets;
   }
 
-  // --- Rule of 5 ---
   LockFreeOrderedHashMap(const LockFreeOrderedHashMap&) = delete;
   LockFreeOrderedHashMap& operator=(const LockFreeOrderedHashMap&) = delete;
-  // Move operations would need careful handling of atomics and the allNodes list/mutex.
-  // Omitting for brevity, but required for movable types. Mark as deleted if not needed.
   LockFreeOrderedHashMap(LockFreeOrderedHashMap&&) = delete;
   LockFreeOrderedHashMap& operator=(LockFreeOrderedHashMap&&) = delete;
 
-  // --- Core Map Operations ---
+  // ---- Core operations ----
+  // NOTE: No rehashing path — performance degrades at high load factors.
+  // Callers should size the bucket count for expected peak occupancy.
 
-  // Inserts if key doesn't exist and isn't marked deleted.
-  // Returns true if insertion happened, false otherwise.
   bool insert(const Key& key, Value&& value) {
     return insert_internal(key, ::std::move(value));
   }
@@ -288,128 +422,116 @@ class LockFreeOrderedHashMap {
  private:
   template <typename K, typename V>
   bool insert_internal(K&& key, V&& value) {
-    Node* newNode = nullptr;  // Allocate later
+    ebr::Guard guard;
+    Node* newNode = nullptr;
     mem_size index = hash_key(key);
-    base::Atomic<Node*>* prev_bucket_next_ptr = nullptr;
 
-    // --- Phase 1: Insert into Hash Bucket ---
+    // Phase 1: insert into hash bucket.
     while (true) {
-      Node* existingNode = find_in_bucket(key, prev_bucket_next_ptr);
+      Node* existingNode = find_in_bucket(key);
 
       if (existingNode) {
-        // Key found. Check if it's marked deleted.
         if (!existingNode->is_deleted.load(::std::memory_order_acquire)) {
-          // Key exists and is not deleted. Insertion fails.
-          delete newNode;  // Delete if allocated in a previous failed attempt
+          delete newNode;
           return false;
         }
-        // Node exists but is marked deleted. We might be able to replace it,
-        // but standard insert usually fails here. For simplicity, fail.
-        // A more complex `upsert` or `replace` could handle this.
-        delete newNode;
-        return false;  // Or potentially try to replace/undelete.
+        // Deleted node still linked. Help unlink and retry.
+        try_unlink_from_bucket(existingNode);
+        continue;
       }
 
-      // Key not found (or marked deleted and we decided to fail). Attempt insertion.
-      if (!newNode) {  // Allocate only if needed
+      if (!newNode)
         newNode = new Node(::std::forward<K>(key), ::std::forward<V>(value));
-        // --- Track node for eventual deletion ---
-        {  // Minimal lock scope
-          std::lock_guard<base::Mutex> lock(allNodesMutex);
-          allNodes.push_back(newNode);
-        }
-      }
 
-      // Link into bucket chain (insert at head for simplicity)
       Node* oldHead = buckets[index].load(::std::memory_order_acquire);
       newNode->bucketNext.store(oldHead, ::std::memory_order_relaxed);
 
       if (buckets[index].compare_exchange_weak(
-              oldHead, newNode, ::std::memory_order_release, ::std::memory_order_relaxed)) {
-        // Successfully inserted into hash bucket chain. Break to Phase 2.
+              oldHead, newNode, ::std::memory_order_release,
+              ::std::memory_order_relaxed)) {
+        // Post-CAS duplicate detection.
+        //
+        // Correctness relies on the prepend-chain ordering invariant:
+        // the scan follows newNode→bucketNext (toward *older* nodes),
+        // so it only sees nodes that CAS'd *before* us (they are deeper
+        // in the chain).  A node that CAS'd *after* us sits between the
+        // bucket head and us — unreachable from bucketNext.
+        //
+        // Among any set of concurrent duplicates for the same key, exactly
+        // one — the deepest (first to CAS) — finds no duplicate behind
+        // itself and proceeds.  Every shallower node finds the deeper one
+        // and backs off.  No symmetric tiebreaker is needed because the
+        // acyclic singly-linked chain provides natural asymmetry.
+        Node* check =
+            newNode->bucketNext.load(::std::memory_order_acquire);
+        while (check) {
+          if (check->keyValue.first == key &&
+              !check->is_deleted.load(::std::memory_order_acquire)) {
+            // We are shallower; back off. The deeper node wins.
+            newNode->is_deleted.store(true, ::std::memory_order_release);
+            newNode->order_swept = true;  // never entered order chain
+            try_unlink_from_bucket(newNode);
+            stage_node(newNode);
+            return false;
+          }
+          check = check->bucketNext.load(::std::memory_order_acquire);
+        }
+        stage_node(newNode);
         break;
       }
-
-      // CAS failed, retry the find/insert loop for the bucket.
-      // newNode remains allocated for the next attempt.
     }
 
-    // --- Phase 2: Append to Ordered List (Lock-Free) ---
+    // Phase 2: append to insertion-order list (Michael & Scott).
     newNode->orderNext.store(nullptr, ::std::memory_order_relaxed);
-    Node* expected_tail = nullptr;  // Expected value for orderTail CAS
+    Node* expected_tail = nullptr;
 
     while (true) {
       Node* current_tail = orderTail.load(::std::memory_order_acquire);
-      Node* current_tail_order_next = nullptr;
 
       if (current_tail == nullptr) {
-        // List is empty or appears empty, try setting head and tail
-        if (orderHead.compare_exchange_weak(expected_tail, newNode,  // expect nullptr
-                                            ::std::memory_order_release,
-                                            ::std::memory_order_relaxed)) {
-          // Successfully set head, now try to set tail.
-          // Use expected_tail (which was nullptr) for the tail CAS as well.
-          orderTail.compare_exchange_strong(expected_tail, newNode,  // expect nullptr
-                                            ::std::memory_order_release,
-                                            ::std::memory_order_relaxed);
-          // If tail CAS fails, another thread finished inserting the first node. That's
-          // okay. Our node is the head now (or was briefly). The next insert will fix the
-          // tail.
-          return true;  // Insert succeeded
+        if (orderHead.compare_exchange_weak(
+                expected_tail, newNode, ::std::memory_order_release,
+                ::std::memory_order_relaxed)) {
+          orderTail.compare_exchange_strong(
+              expected_tail, newNode, ::std::memory_order_release,
+              ::std::memory_order_relaxed);
+          return true;
         }
-        // Head CAS failed, means list is no longer empty. Reload tail and retry loop.
-        expected_tail = nullptr;  // Reset expectation for next loop iteration
-        continue;                 // Retry the outer loop
-      } else {
-        // List is not empty, try appending after current_tail
-        expected_tail = current_tail;  // Update expectation for tail CAS
-        current_tail_order_next = current_tail->orderNext.load(::std::memory_order_acquire);
-
-        // Check if tail has already moved past where we looked
-        if (orderTail.load(::std::memory_order_acquire) != current_tail) {
-          continue;  // Tail changed, retry outer loop
-        }
-
-        // Check if tail's next is still null (it should be if it's the real tail)
-        if (current_tail_order_next != nullptr) {
-          // Tail's next is not null, means another thread is appending or tail pointer is
-          // stale. Try to help advance the tail pointer.
-          orderTail.compare_exchange_weak(current_tail, current_tail_order_next,
-                                          ::std::memory_order_release,
-                                          ::std::memory_order_relaxed);
-          // Retry outer loop regardless of CAS success/failure
-          continue;
-        }
-
-        // Try to link newNode after current_tail
-        if (current_tail->orderNext.compare_exchange_weak(
-                current_tail_order_next, newNode,  // expect nullptr
-                ::std::memory_order_release, ::std::memory_order_relaxed)) {
-          // Link successful. Now try to swing the main tail pointer.
-          orderTail.compare_exchange_strong(current_tail, newNode,
-                                            ::std::memory_order_release,
-                                            ::std::memory_order_relaxed);
-          // If tail CAS fails, another thread already advanced it. That's okay.
-          return true;  // Insert succeeded
-        }
-
-        // Linking failed (current_tail->orderNext was changed). Retry outer loop.
+        expected_tail = nullptr;
+        continue;
       }
-    }  // End Phase 2 loop
+
+      expected_tail = current_tail;
+      Node* tail_next =
+          current_tail->orderNext.load(::std::memory_order_acquire);
+
+      if (orderTail.load(::std::memory_order_acquire) != current_tail)
+        continue;
+
+      if (tail_next != nullptr) {
+        orderTail.compare_exchange_weak(
+            current_tail, tail_next, ::std::memory_order_release,
+            ::std::memory_order_relaxed);
+        continue;
+      }
+
+      if (current_tail->orderNext.compare_exchange_weak(
+              tail_next, newNode, ::std::memory_order_release,
+              ::std::memory_order_relaxed)) {
+        orderTail.compare_exchange_strong(
+            current_tail, newNode, ::std::memory_order_release,
+            ::std::memory_order_relaxed);
+        return true;
+      }
+    }
   }
 
  public:
-  // Finds the key, copies the value if found and not deleted.
   bool find(const Key& key, Value& value) const {
-    base::Atomic<Node*>* ignore_prev = nullptr;
-    Node* node = find_in_bucket(key, ignore_prev);
-
+    ebr::Guard guard;
+    Node* node = find_in_bucket(key);
     if (node && !node->is_deleted.load(::std::memory_order_acquire)) {
-      // --- SMR Hazard Point Start ---
-      value = node->keyValue.second;  // Read value
-      // --- SMR Hazard Point End ---
-      // Re-check deleted status *after* read if strict consistency needed w.r.t. remove
-      // if (node->is_deleted.load(::std::memory_order_acquire)) return false;
+      value = node->keyValue.second;
       return true;
     }
     return false;
@@ -417,9 +539,8 @@ class LockFreeOrderedHashMap {
 
   template <typename Callback>
   bool with_value(const Key& key, Callback&& callback) const {
-    base::Atomic<Node*>* ignore_prev = nullptr;
-    Node* node = find_in_bucket(key, ignore_prev);
-
+    ebr::Guard guard;
+    Node* node = find_in_bucket(key);
     if (node && !node->is_deleted.load(::std::memory_order_acquire)) {
       callback(node->keyValue.second);
       return true;
@@ -427,76 +548,175 @@ class LockFreeOrderedHashMap {
     return false;
   }
 
-  // Collects deleted nodes. Must be called periodically to reclaim memory.
-  // PATCHED: disabled to avoid double-free race with concurrent readers.
-  // Acceptable for short-lived benchmarks (nodes will leak but process exits).
+  // Epoch-based garbage collector.
+  // 1. Drain staging stack.
+  // 2. Sweep bucket chains (CAS-unlink deleted nodes).
+  // 3. Sweep order chain  (unlink deleted non-tail nodes).
+  // 4. Stamp the retirement epoch on fully-unlinked nodes.
+  // 5. Advance the global epoch.
+  // 6. Free nodes whose retirement epoch is 2+ epochs in the past
+  //    (guaranteed unreachable by any concurrent reader).
   void collect_garbage() {
-    std::lock_guard<base::Mutex> lock(allNodesMutex);
+    std::lock_guard<base::Mutex> lock(gc_mutex_);
+    collect_garbage_locked();
+  }
 
-    // Unlink deleted nodes from order chain (safe: just pointer updates)
+  bool remove(const Key& key) {
+    bool removed = remove_guarded(key);
+    post_mutate();
+    return removed;
+  }
+
+  // Snapshot of keys in insertion order (skips deleted entries).
+  base::Vector<Key> ordered_keys_snapshot() const {
+    ebr::Guard guard;
+    base::Vector<Key> keys;
+    Node* curr = orderHead.load(::std::memory_order_acquire);
+    while (curr) {
+      if (!curr->is_deleted.load(::std::memory_order_acquire))
+        keys.push_back(curr->keyValue.first);
+      curr = curr->orderNext.load(::std::memory_order_acquire);
+    }
+    return keys;
+  }
+
+ private:
+  // ---- Auto-GC infrastructure ----
+
+  static constexpr mem_size kAutoGCThreshold = 4096;
+  base::Atomic<mem_size> delete_since_gc_{0};
+  base::Atomic<mem_size> op_count_{0};
+
+  bool remove_guarded(const Key& key) {
+    ebr::Guard guard;
+    while (true) {
+      Node* node = find_in_bucket(key);
+      if (!node) return false;
+
+      bool expected = false;
+      if (node->is_deleted.compare_exchange_weak(
+              expected, true, ::std::memory_order_release,
+              ::std::memory_order_relaxed)) {
+        try_unlink_from_bucket(node);
+        delete_since_gc_.fetch_add(1, ::std::memory_order_relaxed);
+        return true;
+      }
+      if (expected) return false;
+    }
+  }
+
+  // Called after every insert/remove, outside the EBR guard scope, so the
+  // epoch can advance freely and retired nodes can actually be freed.
+  void post_mutate() {
+    mem_size n = op_count_.fetch_add(1, ::std::memory_order_relaxed);
+    // Periodically advance the epoch so retired nodes become freeable.
+    if ((n & 0xFF) == 0)
+      ebr::state().try_advance();
+    // Trigger GC when enough deletions have accumulated.  Keyed off
+    // delete count (not staging count) so insert-heavy workloads don't
+    // pay for GC sweeps on live nodes.  try_to_lock avoids blocking the
+    // hot path if GC is already running on another thread.
+    if (delete_since_gc_.load(::std::memory_order_relaxed) >=
+        kAutoGCThreshold) {
+      ::std::unique_lock<base::Mutex> lock(gc_mutex_, ::std::try_to_lock);
+      if (lock.owns_lock())
+        collect_garbage_locked();
+    }
+  }
+
+  void collect_garbage_locked() {
+    // 1. Drain lock-free staging stack into the tracked list.
+    Node* staged =
+        staging_head_.exchange(nullptr, ::std::memory_order_acquire);
+    while (staged) {
+      Node* next = staged->staging_next;
+      all_nodes_.push_back(staged);
+      staged = next;
+    }
+    delete_since_gc_.store(0, ::std::memory_order_relaxed);
+
+    // 2. Sweep bucket chains: CAS-unlink deleted nodes.
+    for (mem_size i = 0; i < bucketCount; ++i) {
+      base::Atomic<Node*>* prev_ptr = &buckets[i];
+      Node* curr = prev_ptr->load(::std::memory_order_acquire);
+      while (curr) {
+        Node* next = curr->bucketNext.load(::std::memory_order_acquire);
+        if (curr->is_deleted.load(::std::memory_order_acquire)) {
+          Node* expected = curr;
+          if (prev_ptr->compare_exchange_strong(
+                  expected, next, ::std::memory_order_release,
+                  ::std::memory_order_relaxed)) {
+            curr->bucket_swept = true;
+            curr = next;
+            continue;
+          }
+          prev_ptr = &buckets[i];
+          curr = prev_ptr->load(::std::memory_order_acquire);
+          continue;
+        }
+        prev_ptr = &curr->bucketNext;
+        curr = next;
+      }
+    }
+
+    // 3. CAS-unlink deleted non-tail nodes from the order chain.
     Node* prev = nullptr;
     Node* curr = orderHead.load(::std::memory_order_acquire);
     while (curr) {
       Node* next = curr->orderNext.load(::std::memory_order_acquire);
-      if (curr->is_deleted.load(::std::memory_order_acquire)) {
+      if (curr->is_deleted.load(::std::memory_order_acquire) &&
+          next != nullptr) {
+        Node* expected = curr;
+        bool unlinked;
         if (prev) {
-          prev->orderNext.store(next, ::std::memory_order_release);
+          unlinked = prev->orderNext.compare_exchange_strong(
+              expected, next, ::std::memory_order_release,
+              ::std::memory_order_relaxed);
         } else {
-          orderHead.store(next, ::std::memory_order_release);
+          unlinked = orderHead.compare_exchange_strong(
+              expected, next, ::std::memory_order_release,
+              ::std::memory_order_relaxed);
         }
-        Node* expected_tail = curr;
-        orderTail.compare_exchange_strong(expected_tail,
-                                          prev ? prev : nullptr,
-                                          ::std::memory_order_release,
-                                          ::std::memory_order_relaxed);
+        if (unlinked) {
+          curr->order_swept = true;
+        } else {
+          if (prev)
+            curr = prev->orderNext.load(::std::memory_order_acquire);
+          else
+            curr = orderHead.load(::std::memory_order_acquire);
+          continue;
+        }
       } else {
         prev = curr;
       }
       curr = next;
     }
-    // Skip actual node deletion to avoid use-after-free with concurrent readers
-  }
 
-  // Marks the node as deleted and unlinks from bucket chain.
-  // Does NOT unlink from order chain.
-  bool remove(const Key& key) {
-    base::Atomic<Node*>* prev_bucket_next_ptr = nullptr;
-    Node* node_to_remove = nullptr;
-    bool expected_deleted_status = false;
-
-    while (true) {  // Loop for CAS retry on is_deleted flag
-      node_to_remove = find_in_bucket(key, prev_bucket_next_ptr);
-
-      if (node_to_remove == nullptr) {
-        return false;  // Key not found
-      }
-
-      // Try to atomically mark as deleted
-      expected_deleted_status = false;  // We expect it to be false
-      if (node_to_remove->is_deleted.compare_exchange_weak(expected_deleted_status, true,
-                                                           ::std::memory_order_release,
-                                                           ::std::memory_order_relaxed)) {
-        // Mark successful! Node is logically removed.
-        // Now try to physically unlink from bucket (optional helping).
-        try_unlink_bucket(node_to_remove, prev_bucket_next_ptr);
-        return true;  // Removal succeeded
-      }
-
-      // CAS failed. Check *why*.
-      // expected_deleted_status is now true if the reason was it was already deleted.
-      if (expected_deleted_status == true) {
-        // It was already marked as deleted by another thread.
-        // Optionally help unlink before returning true.
-        try_unlink_bucket(node_to_remove, prev_bucket_next_ptr);
-        return true;  // Considered successful removal
-      }
-
-      // If CAS failed and expected_deleted_status is still false,
-      // it was likely a spurious CAS failure. Retry the loop.
-      // Yield might help prevent livelock in high contention scenarios
-      // ::std::this_thread::yield();
+    // 4. Stamp retirement epoch on fully-swept nodes.
+    long current_e = ebr::state().get_current();
+    for (mem_size i = 0; i < all_nodes_.size(); ++i) {
+      Node* n = all_nodes_[i];
+      if (n->bucket_swept &&
+          n->order_swept && n->retired_epoch < 0)
+        n->retired_epoch = current_e;
     }
+
+    // 5. Advance the global epoch.
+    ebr::state().try_advance();
+
+    // 6. Free nodes retired 2+ epochs ago (provably unreachable).
+    long safe = ebr::state().get_current();
+    mem_size write_idx = 0;
+    for (mem_size i = 0; i < all_nodes_.size(); ++i) {
+      if (all_nodes_[i]->retired_epoch >= 0 &&
+          all_nodes_[i]->retired_epoch + 2 <= safe) {
+        delete all_nodes_[i];
+      } else {
+        all_nodes_[write_idx++] = all_nodes_[i];
+      }
+    }
+    all_nodes_.resize(write_idx);
   }
-};  // End class LockFreeOrderedHashMap
+};
 
 }  // namespace base
