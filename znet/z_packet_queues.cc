@@ -20,7 +20,7 @@ static constexpr char kLogTag[] = "z-packet-queue";
 static constexpr u32 kResendIntervalSeconds = 1;
 static constexpr u32 kDropAfterSeconds = 5;
 static constexpr mem_size kMaxDispatchPerChannelPerTick = 4096;
-static constexpr auto kIdleSleepDuration = std::chrono::microseconds(50);
+static constexpr auto kIdleSleepDuration = std::chrono::microseconds(10);
 static constexpr auto kRetryScanInterval = std::chrono::milliseconds(10);
 namespace {
 void SaturatingSub(base::Atomic<mem_size>& value, mem_size delta) {
@@ -76,25 +76,42 @@ void ZPacketQueue::ConfigureDispatchExecutor(ITaskExecutor* executor,
 }
 
 bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
+  // Fast path: skip rate limit checks if limits are at defaults (very high).
+  // The default is 500K pkts/s and 1 GB/s — for benchmarks this never triggers.
+  mem_size current_packets = packets_sent_this_second_.fetch_add(1, std::memory_order_relaxed);
+  mem_size current_bytes = bytes_sent_this_second_.fetch_add(payload_bytes, std::memory_order_relaxed);
+
+  // Only check clock when approaching the limit (99% of packets skip this).
+  if (current_packets < rate_limit_config_.max_packets_per_second &&
+      current_bytes + payload_bytes <= rate_limit_config_.max_bytes_per_second) {
+    return true;
+  }
+
+  // Slow path: check if the window has elapsed.
   auto now = std::chrono::steady_clock::now();
   auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
       now - rate_limit_window_start_);
-  
+
   if (elapsed.count() >= 1) {
-    packets_sent_this_second_.store(0, std::memory_order_relaxed);
-    bytes_sent_this_second_.store(0, std::memory_order_relaxed);
+    packets_sent_this_second_.store(1, std::memory_order_relaxed);
+    bytes_sent_this_second_.store(payload_bytes, std::memory_order_relaxed);
     burst_tokens_.store(rate_limit_config_.burst_allowance, std::memory_order_relaxed);
     rate_limit_window_start_ = now;
+    return true;
   }
-  
-  mem_size current_packets = packets_sent_this_second_.load(std::memory_order_relaxed);
-  mem_size current_bytes = bytes_sent_this_second_.load(std::memory_order_relaxed);
-  mem_size burst = burst_tokens_.load(std::memory_order_relaxed);
-  
+
+  if (current_bytes + payload_bytes > rate_limit_config_.max_bytes_per_second) {
+    SaturatingSub(packets_sent_this_second_, 1);
+    SaturatingSub(bytes_sent_this_second_, payload_bytes);
+    return false;
+  }
+
   if (current_packets >= rate_limit_config_.max_packets_per_second) {
     mem_size current_burst = burst_tokens_.load(std::memory_order_relaxed);
     while (true) {
       if (current_burst == 0) {
+        SaturatingSub(packets_sent_this_second_, 1);
+        SaturatingSub(bytes_sent_this_second_, payload_bytes);
         return false;
       }
       if (burst_tokens_.compare_exchange_weak(current_burst, current_burst - 1,
@@ -103,13 +120,7 @@ bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
       }
     }
   }
-  
-  if (current_bytes + payload_bytes > rate_limit_config_.max_bytes_per_second) {
-    return false;
-  }
-  
-  packets_sent_this_second_.fetch_add(1, std::memory_order_relaxed);
-  bytes_sent_this_second_.fetch_add(payload_bytes, std::memory_order_relaxed);
+
   return true;
 }
 
@@ -233,8 +244,10 @@ void ZPacketQueue::ProcessOutgoingPackets() {
     if (dispatched == 0) {
       // Wait on condvar — Push() calls notify_one() so we wake immediately
       // when a packet is enqueued.  Falls back to periodic wake for retry scans.
+      outgoing_thread_sleeping_.store(true, std::memory_order_release);
       std::unique_lock<std::mutex> lock(outgoing_wakeup_mutex_);
       outgoing_wakeup_cv_.wait_for(lock, kRetryScanInterval);
+      outgoing_thread_sleeping_.store(false, std::memory_order_release);
     }
   }
 }
@@ -243,6 +256,22 @@ mem_size ZPacketQueue::ProcessChannel(PacketChannelType channel,
                                       mem_size max_packets) {
   mem_size processed = 0;
   auto& queue = channel_outgoing_queues_[channel];
+
+  // Fast path: dispatch directly without lambda/executor overhead.
+  if (!dispatch_executor_) {
+    while (processed < max_packets) {
+      OutgoingPacket packet;
+      if (!queue.dequeue(packet)) break;
+      const mem_size channel_index = static_cast<mem_size>(channel);
+      if (channel_index < channel_outgoing_bytes_.size()) {
+        SaturatingSub(channel_outgoing_bytes_[channel_index], packet.heap_data_size);
+      }
+      dispatcher_.DispatchPacket(crypto_context_, packet, awaiting_ack_packets_);
+      ++processed;
+    }
+    return processed;
+  }
+
   while (processed < max_packets) {
     OutgoingPacket packet;
     if (!queue.dequeue(packet)) {
@@ -260,11 +289,7 @@ mem_size ZPacketQueue::ProcessChannel(PacketChannelType channel,
       }
       TrackDispatchTaskCompletion();
     };
-    if (dispatch_executor_) {
-      dispatch_executor_->Submit(std::move(task));
-    } else {
-      task();
-    }
+    dispatch_executor_->Submit(std::move(task));
     ++processed;
   }
   return processed;

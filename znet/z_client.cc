@@ -169,6 +169,14 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
           }
         }
 
+        if (scaling_tier_count_ > 0 &&
+            !packet_queue_.outgoing_thread_running() &&
+            !packet_queue_.StartOutgoingThread()) {
+          BASE_LOGE(kLogTag, "Failed to start outgoing thread");
+          Disconnect();
+          return;
+        }
+
         state_ = State::kConnected;
       }
       break;

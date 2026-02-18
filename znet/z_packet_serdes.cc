@@ -11,6 +11,7 @@
 #include <base/logging.h>
 #endif
 
+#include <xxhash.h>
 #include <znet/z_compression_wrapper.h>
 
 namespace tx::network {
@@ -18,8 +19,21 @@ namespace tx::network {
 static constexpr char kLogTag[] = "z-packet-serdes";
 static constexpr u32 kTimeshift =
     1701290985;
-static constexpr u32 kFnv1aOffset = 2166136261u;
-static constexpr u32 kFnv1aPrime = 16777619u;
+
+// Coarse thread-local timestamp cache: avoids a syscall per packet without
+// cross-thread sharing/data races.
+static thread_local u32 g_cached_shifted_timestamp{0};
+static thread_local std::chrono::steady_clock::time_point g_timestamp_refresh{};
+
+inline u32 GetCachedShiftedTimestamp() {
+  const auto now = std::chrono::steady_clock::now();
+  if (now - g_timestamp_refresh > std::chrono::milliseconds(250)) {
+    g_cached_shifted_timestamp =
+        static_cast<u32>(base::GetUnixTimeStamp() - kTimeshift);
+    g_timestamp_refresh = now;
+  }
+  return g_cached_shifted_timestamp;
+}
 
 namespace {
 constexpr mem_size kPacketHeaderWireSize = sizeof(PacketHeader);
@@ -68,15 +82,11 @@ void UnpackHeaderFlags(const u8 flags_byte, PacketHeader& out) {
 }
 
 u32 ComputeChecksum32(const byte* data, mem_size size) {
-  u32 hash = kFnv1aOffset;
-  for (mem_size i = 0; i < size; ++i) {
-    hash ^= data[i];
-    hash *= kFnv1aPrime;
-  }
-  return hash;
+  return XXH32(data, size, 0);
 }
 
 u16 ComputePacketHeaderChecksum(const byte* header_wire) {
+  // 20-byte stack copy with checksum field zeroed, then one-shot xxHash.
   byte header_copy[kPacketHeaderWireSize];
   std::memcpy(header_copy, header_wire, kPacketHeaderWireSize);
   wire_le::StoreU16(header_copy + kHeaderChecksumOffset, 0);
@@ -219,9 +229,8 @@ void PacketBuilder::FillPacketHeader(const base::Span<byte> outgoing_data,
   wire_le::StoreU16(write_ptr + kHeaderAlignmentOffset, 0);
   write_ptr[kHeaderPaddingOffset] = 0;
   write_ptr[kHeaderChannelOffset] = static_cast<u8>(packet_info.channel);
-  wire_le::StoreU32(
-      write_ptr + kHeaderTimestampOffset,
-      static_cast<u32>(base::GetUnixTimeStamp() - kTimeshift));
+  wire_le::StoreU32(write_ptr + kHeaderTimestampOffset,
+                    GetCachedShiftedTimestamp());
   write_ptr += kPacketHeaderWireSize;
 
   if (packet_info.flags.reliable) {
@@ -361,37 +370,46 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
                .awaiting_ack = 0,
                .reserved = 0};
 
-  // Read raw payload into a vector for processing
-  base::Vector<byte> payload_data(payload_size);
-  if (payload_size > 0) {
-    std::memcpy(payload_data.data(), in_buffer + offset, payload_size);
-  }
-
-  // Decrypt if needed
-  if (header.flags.is_encrypted) {
-    if (!DecryptPayloadIfNeeded(payload_data, out.sequence_number,
-                                out.acknowledgement_number, header)) {
-      BASE_LOGE(kLogTag, "Encrypted payload authentication/decryption failed");
-      return false;
+  // Fast path: no encryption, no compression — assign directly to output string
+  // without intermediate vector allocation.
+  if (!header.flags.is_encrypted && !header.flags.is_compressed) {
+    if (payload_size > 0) {
+      out.data.assign(reinterpret_cast<const char*>(in_buffer + offset),
+                      payload_size);
+    } else {
+      out.data.clear();
     }
-  }
-
-  // Decompress if needed
-  if (header.flags.is_compressed) {
-    base::Vector<byte> decompressed;
-    if (!ZCompressionContext::Decompress(payload_data.data(), payload_data.size(),
-                                         original_size, decompressed)) {
-      BASE_LOGE(kLogTag, "Decompression failed");
-      return false;
-    }
-    payload_data = std::move(decompressed);
-  }
-
-  if (payload_data.empty()) {
-    out.data.clear();
   } else {
-    out.data.assign(reinterpret_cast<const char*>(payload_data.data()),
-                    payload_data.size());
+    // Slow path: need intermediate buffer for decrypt/decompress.
+    base::Vector<byte> payload_data(payload_size);
+    if (payload_size > 0) {
+      std::memcpy(payload_data.data(), in_buffer + offset, payload_size);
+    }
+
+    if (header.flags.is_encrypted) {
+      if (!DecryptPayloadIfNeeded(payload_data, out.sequence_number,
+                                  out.acknowledgement_number, header)) {
+        BASE_LOGE(kLogTag, "Encrypted payload authentication/decryption failed");
+        return false;
+      }
+    }
+
+    if (header.flags.is_compressed) {
+      base::Vector<byte> decompressed;
+      if (!ZCompressionContext::Decompress(payload_data.data(), payload_data.size(),
+                                           original_size, decompressed)) {
+        BASE_LOGE(kLogTag, "Decompression failed");
+        return false;
+      }
+      payload_data = std::move(decompressed);
+    }
+
+    if (payload_data.empty()) {
+      out.data.clear();
+    } else {
+      out.data.assign(reinterpret_cast<const char*>(payload_data.data()),
+                      payload_data.size());
+    }
   }
 
   return true;

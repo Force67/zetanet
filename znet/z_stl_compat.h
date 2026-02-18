@@ -17,6 +17,7 @@
 #include <memory>
 #include <atomic>
 #include <chrono>
+#include <thread>
 #include <queue>
 #include <mutex>
 #include <functional>
@@ -25,6 +26,9 @@
 #include <utility>
 #include <map>
 #include <array>
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <immintrin.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // Primitive type aliases (matching equilibrium/base/arch.h)
@@ -153,18 +157,42 @@ inline u64 GetUnixTimeStamp() {
           .count());
 }
 
-// --- MPSC Queue (simple lock-based replacement) ---
+// --- Spinlock (faster than std::mutex for very short critical sections) ---
+class SpinLock {
+ public:
+  void lock() noexcept {
+    for (;;) {
+      if (!flag_.exchange(true, std::memory_order_acquire)) return;
+      while (flag_.load(std::memory_order_relaxed)) {
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+        _mm_pause();
+#elif defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+        asm volatile("yield");
+#else
+        std::this_thread::yield();
+#endif
+      }
+    }
+  }
+  void unlock() noexcept { flag_.store(false, std::memory_order_release); }
+ private:
+  std::atomic<bool> flag_{false};
+};
+
+// --- MPSC Queue (spinlock-based for minimum overhead) ---
 template <typename T>
 class MPSCQueue {
  public:
   void enqueue(T&& item) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<SpinLock> lock(lock_);
     queue_.push(std::move(item));
     approx_size_.fetch_add(1, std::memory_order_relaxed);
   }
 
   bool dequeue(T& item) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<SpinLock> lock(lock_);
     if (queue_.empty())
       return false;
     item = std::move(queue_.front());
@@ -174,8 +202,7 @@ class MPSCQueue {
   }
 
   bool empty() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return queue_.empty();
+    return approx_size_.load(std::memory_order_relaxed) == 0;
   }
 
   size_t size_approx() const {
@@ -185,7 +212,7 @@ class MPSCQueue {
  private:
   std::queue<T> queue_;
   std::atomic<size_t> approx_size_{0};
-  mutable std::mutex mutex_;
+  mutable SpinLock lock_;
 };
 
 // --- IdSet (simple counter-based ID generator) ---

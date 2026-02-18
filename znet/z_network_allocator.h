@@ -1,6 +1,7 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
+#include <bit>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -228,13 +229,15 @@ class PacketBufferPool {
     if (requested_size > kMaxClassSize) {
       return kInvalidClassIndex;
     }
-    mem_size class_size = kMinClassSize;
-    mem_size class_index = 0;
-    while (class_size < requested_size && class_index + 1 < kClassCount) {
-      class_size <<= 1;
-      ++class_index;
+    if (requested_size <= kMinClassSize) {
+      return 0;
     }
-    return class_index;
+    // ceil(log2(requested_size)) - log2(kMinClassSize)
+    const unsigned min_bits = 6u;  // log2(64)
+    const unsigned ceil_log2 =
+        static_cast<unsigned>(std::bit_width(requested_size - 1));
+    const unsigned index = ceil_log2 - min_bits;
+    return index < kClassCount ? index : kInvalidClassIndex;
   }
 
   static BlockHeader* HeaderFromData(unsigned char* data) {

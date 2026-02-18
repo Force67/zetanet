@@ -43,7 +43,8 @@ class PacketBuilder {
     if (!crypto_context_) {
       return false;
     }
-    base::Vector<byte> aad(12);
+    // Stack-allocated AAD avoids per-packet heap allocation.
+    byte aad[12];
     const u8 flags =
         (packet_info.flags.reliable ? 1 : 0) |
         (packet_info.flags.encrypted ? (1 << 1) : 0) |
@@ -54,16 +55,16 @@ class PacketBuilder {
         (packet_info.flags.reliable && packet_info.type == PacketType::Acknowledgement)
             ? static_cast<u32>(packet_info.payload.scalar)
             : 0;
-    wire_le::StoreU16(aad.data(), static_cast<u16>(packet_info.type));
+    wire_le::StoreU16(aad, static_cast<u16>(packet_info.type));
     aad[2] = static_cast<u8>(packet_info.channel);
     aad[3] = flags;
-    wire_le::StoreU32(aad.data() + 4, sequence);
-    wire_le::StoreU32(aad.data() + 8, acknowledgement);
+    wire_le::StoreU32(aad + 4, sequence);
+    wire_le::StoreU32(aad + 8, acknowledgement);
 
     base::Vector<byte> encrypted_payload;
     if (!crypto_context_->EncryptPayload(
             base::Span<byte>(payload.data(), payload.size()),
-            base::Span<byte>(aad.data(), aad.size()),
+            base::Span<byte>(aad, sizeof(aad)),
             encrypted_payload)) {
       return false;
     }
@@ -117,22 +118,23 @@ class PacketUnpacker {
     if (!crypto_context_) {
       return false;
     }
-    base::Vector<byte> aad(12);
+    // Stack-allocated AAD avoids per-packet heap allocation.
+    byte aad[12];
     const u8 flags =
         (header.flags.is_reliable ? 1 : 0) |
         (header.flags.is_encrypted ? (1 << 1) : 0) |
         (header.flags.is_compressed ? (1 << 2) : 0) |
         ((header.flags.priority & 0x3) << 4);
-    wire_le::StoreU16(aad.data(), header.type);
+    wire_le::StoreU16(aad, header.type);
     aad[2] = header.channel_id;
     aad[3] = flags;
-    wire_le::StoreU32(aad.data() + 4, sequence_number);
-    wire_le::StoreU32(aad.data() + 8, acknowledgement_number);
+    wire_le::StoreU32(aad + 4, sequence_number);
+    wire_le::StoreU32(aad + 8, acknowledgement_number);
 
     base::Vector<byte> plaintext;
     if (!crypto_context_->DecryptPayload(
             base::Span<byte>(payload.data(), payload.size()),
-            base::Span<byte>(aad.data(), aad.size()), plaintext)) {
+            base::Span<byte>(aad, sizeof(aad)), plaintext)) {
       return false;
     }
     payload = std::move(plaintext);

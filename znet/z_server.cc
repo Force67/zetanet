@@ -152,6 +152,10 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
       handshaked_peers_.insert(p.source_peer_id);
       SendServerHello(p.source_peer_id);
 
+      if (scaling_tier_count_ > 0 && !packet_queue_.outgoing_thread_running()) {
+        packet_queue_.ReconfigureDispatchWorkers(1);
+      }
+
       // Advance through thread scaling tiers as peer count grows.
       while (current_scaling_tier_ < scaling_tier_count_ &&
              handshaked_peers_.size() >= scaling_tiers_[current_scaling_tier_].peer_count) {

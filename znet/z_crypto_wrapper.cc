@@ -139,6 +139,19 @@ bool ZCryptoContext::InitializeKeyExchange() {
     return false;
   }
   local_challenge_ = BytesToHex(local_challenge, sizeof(local_challenge));
+
+  // Seed nonce domain for any early encryption before the full handshake.
+  u32 initial_prefix = 0;
+  if (!RandomBytes(reinterpret_cast<byte*>(&initial_prefix),
+                   sizeof(initial_prefix))) {
+    BASE_LOGE(kLogTag, "Failed to initialize nonce prefix");
+    return false;
+  }
+  if (initial_prefix == 0) {
+    initial_prefix = 1;
+  }
+  nonce_prefix_.store(initial_prefix, std::memory_order_relaxed);
+  nonce_counter_.store(0, std::memory_order_relaxed);
   
   return true;
 }
@@ -209,24 +222,25 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
     return false;
   }
 
+  // Use a per-session/domain prefix + packet counter for fast unique nonces.
   byte nonce[12]{};
-  if (!RandomBytes(nonce, sizeof(nonce))) {
-    BASE_LOGE(kLogTag, "Failed to generate encryption nonce");
-    return false;
-  }
+  const u32 nonce_prefix = nonce_prefix_.load(std::memory_order_relaxed);
+  u64 counter = nonce_counter_.fetch_add(1, std::memory_order_relaxed);
+  std::memcpy(nonce, &nonce_prefix, sizeof(nonce_prefix));
+  std::memcpy(nonce + sizeof(nonce_prefix), &counter, sizeof(counter));
 
   const mem_size tag_size = 16;
   const mem_size ciphertext_size = plaintext.size();
-  
+
   encrypted.resize(sizeof(nonce) + ciphertext_size + tag_size);
   std::memcpy(encrypted.data(), nonce, sizeof(nonce));
-  
+
   if (plaintext.empty()) {
     encrypted.clear();
     BASE_LOGE(kLogTag, "Empty plaintext");
     return false;
   }
-  
+
 #if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   mbedtls_gcm_context gcm;
   mbedtls_gcm_init(&gcm);
@@ -248,11 +262,19 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
     return false;
   }
 #else
-  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-  if (!ctx) {
+  // Reuse a thread-local EVP context to avoid per-packet allocation.
+  // Wrapped in a struct so the destructor frees it on thread exit.
+  struct TlEvpCtx {
+    EVP_CIPHER_CTX* ctx = nullptr;
+    TlEvpCtx() { ctx = EVP_CIPHER_CTX_new(); }
+    ~TlEvpCtx() { if (ctx) EVP_CIPHER_CTX_free(ctx); }
+  };
+  static thread_local TlEvpCtx tl;
+  if (!tl.ctx) {
     encrypted.clear();
     return false;
   }
+  EVP_CIPHER_CTX* ctx = tl.ctx;
 
   int out_len = 0;
   int final_len = 0;
@@ -285,8 +307,6 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
                                   encrypted.data() + sizeof(nonce) +
                                       ciphertext_size) == 1;
   }
-
-  EVP_CIPHER_CTX_free(ctx);
 
   if (!success) {
     encrypted.clear();
@@ -346,11 +366,19 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
     return false;
   }
 #else
-  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-  if (!ctx) {
+  // Reuse a thread-local EVP context to avoid per-packet allocation.
+  // Wrapped in a struct so the destructor frees it on thread exit.
+  struct TlEvpCtx {
+    EVP_CIPHER_CTX* ctx = nullptr;
+    TlEvpCtx() { ctx = EVP_CIPHER_CTX_new(); }
+    ~TlEvpCtx() { if (ctx) EVP_CIPHER_CTX_free(ctx); }
+  };
+  static thread_local TlEvpCtx tl;
+  if (!tl.ctx) {
     plaintext.clear();
     return false;
   }
+  EVP_CIPHER_CTX* ctx = tl.ctx;
 
   bool success =
       EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
@@ -380,8 +408,6 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
     success = EVP_DecryptFinal_ex(ctx, plaintext.data() + out_len, &final_len) ==
               1;
   }
-
-  EVP_CIPHER_CTX_free(ctx);
 
   if (!success) {
     plaintext.clear();
@@ -486,8 +512,29 @@ bool ZCryptoContext::DeriveSessionKeys() {
     return false;
   }
 
+  // Derive per-direction nonce prefix so peers using the same session key
+  // never reuse the same GCM nonce space.
+  base::String nonce_input = first_nonce + second_nonce + "session-nonce-domain";
+  base::Array<byte, 32> nonce_hash{};
+  if (!Sha256(reinterpret_cast<const byte*>(nonce_input.data()),
+              nonce_input.size(), nonce_hash)) {
+    return false;
+  }
+  u32 nonce_prefix = 0;
+  std::memcpy(&nonce_prefix, nonce_hash.data(), sizeof(nonce_prefix));
+  const bool local_first =
+      (local_nonce_ < server_nonce_) ||
+      (local_nonce_ == server_nonce_ && local_challenge_ < server_challenge_);
+  const u32 direction_tag = local_first ? 0xA5A5A5A5u : 0x5A5A5A5Au;
+  nonce_prefix ^= direction_tag;
+  if (nonce_prefix == 0) {
+    nonce_prefix = direction_tag;
+  }
+
   encryption_key_ = new_enc_key;
   authentication_key_ = new_auth_key;
+  nonce_prefix_.store(nonce_prefix, std::memory_order_relaxed);
+  nonce_counter_.store(0, std::memory_order_relaxed);
   return true;
 }
 

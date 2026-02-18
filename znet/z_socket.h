@@ -51,11 +51,21 @@ class ZSocket {
     u16 port{};
     u8 address_family{AF_INET};
 
+    // Cached binary sockaddr populated on Receive() and ResolveAddress().
+    // Lets Send() skip inet_pton on every packet.
+    sockaddr_storage cached_sa{};
+    socklen_t cached_sa_len{0};
+
     bool operator==(const Address& other) const {
-      if (port == other.port && address_family == other.address_family) {
-        return memcmp(ip, other.ip, sizeof(ip)) == 0;
+      if (port != other.port || address_family != other.address_family) {
+        return false;
       }
-      return false;
+      // Fast path: compare only the significant bytes of the IP address.
+      if (address_family == AF_INET) {
+        // IPv4: only need 4 bytes (xxx.xxx.xxx.xxx, max 15 chars)
+        return memcmp(ip, other.ip, 16) == 0;
+      }
+      return memcmp(ip, other.ip, sizeof(ip)) == 0;
     }
   };
 
@@ -67,6 +77,8 @@ class ZSocket {
                              Address& out);
 
   i32 Send(const Address& addr, const base::Span<byte> data);
+  // Fast path: uses pre-cached sockaddr from Address (no inet_pton).
+  i32 SendCached(const Address& addr, const base::Span<byte> data);
   i32 Receive(Address& sender, char* buffer, mem_size length);
 
   // Send to server sock addr

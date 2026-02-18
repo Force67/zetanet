@@ -33,24 +33,27 @@ class PriorityMPSCQueue {
     }
   }
 
-  // Dequeue item (highest priority first)
+  // Dequeue item (highest priority first).
+  // Uses lock-free size_approx() to skip empty queues without acquiring a mutex.
   bool dequeue(T& item) {
-    if (!critial_priority_queue_.empty()) {
-      return critial_priority_queue_.dequeue(item);
-    } else if (!high_priority_queue_.empty()) {
-      return high_priority_queue_.dequeue(item);
-    } else if (!medium_priority_queue_.empty()) {
-      return medium_priority_queue_.dequeue(item);
-    } else if (!low_priority_queue_.empty()) {
-      return low_priority_queue_.dequeue(item);
-    }
-    return false;  // All queues are empty
+    if (critial_priority_queue_.size_approx() > 0 &&
+        critial_priority_queue_.dequeue(item))
+      return true;
+    if (high_priority_queue_.size_approx() > 0 &&
+        high_priority_queue_.dequeue(item))
+      return true;
+    if (medium_priority_queue_.size_approx() > 0 &&
+        medium_priority_queue_.dequeue(item))
+      return true;
+    if (low_priority_queue_.size_approx() > 0 &&
+        low_priority_queue_.dequeue(item))
+      return true;
+    return false;
   }
 
-  // Check if the queue is empty
+  // Check if the queue is empty (lock-free).
   bool empty() const {
-    return critial_priority_queue_.empty() && high_priority_queue_.empty() &&
-           medium_priority_queue_.empty() && low_priority_queue_.empty();
+    return size_approx() == 0;
   }
 
   mem_size size_approx() const {

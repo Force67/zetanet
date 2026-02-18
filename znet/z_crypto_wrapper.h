@@ -3,6 +3,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <string>
 
 #include <znet/z_crypto_backend.h>
@@ -59,6 +60,8 @@ class ZCryptoContext {
   base::String local_challenge_;
   base::String server_nonce_;
   base::String server_challenge_;
+  std::atomic<u32> nonce_prefix_{0};
+  std::atomic<u64> nonce_counter_{0};
 };
 
 }  // namespace tx::network

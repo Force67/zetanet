@@ -161,6 +161,15 @@ bool ZSocket::CreateServer(u16 port, bool ipv6) {
                reinterpret_cast<const char*>(&v6only), sizeof(v6only));
   }
 
+  // Enlarge socket buffers to reduce kernel-level drops under high throughput.
+  {
+    int buf_size = 4 * 1024 * 1024;  // 4 MB
+    setsockopt(socket_, SOL_SOCKET, SO_RCVBUF,
+               reinterpret_cast<const char*>(&buf_size), sizeof(buf_size));
+    setsockopt(socket_, SOL_SOCKET, SO_SNDBUF,
+               reinterpret_cast<const char*>(&buf_size), sizeof(buf_size));
+  }
+
   if (::bind(socket_, reinterpret_cast<struct sockaddr*>(&server_), server_len_) ==
       ZNET_SOCKET_ERROR) {
     BASE_LOGE(kLogTag, "Bind failed with error : {}", ZSocket::GetErrorString());
@@ -216,6 +225,14 @@ bool ZSocket::CreateClient(const base::StringRef ip,
     return false;
   }
 
+  // Enlarge socket buffers to reduce kernel-level drops under high throughput.
+  {
+    int buf_size = 4 * 1024 * 1024;  // 4 MB
+    setsockopt(socket_, SOL_SOCKET, SO_RCVBUF,
+               reinterpret_cast<const char*>(&buf_size), sizeof(buf_size));
+    setsockopt(socket_, SOL_SOCKET, SO_SNDBUF,
+               reinterpret_cast<const char*>(&buf_size), sizeof(buf_size));
+  }
 
   if (local_bind_port != 0) {
     sockaddr_storage local_addr{};
@@ -286,6 +303,12 @@ bool ZSocket::ResolveAddress(const base::StringRef host,
 }
 
 i32 ZSocket::Send(const Address& target, const base::Span<byte> data) {
+  // Fast path: use cached sockaddr if available (populated by Receive).
+  if (target.cached_sa_len > 0) {
+    sockaddr_storage sa = target.cached_sa;
+    return InternalSend(sa, target.cached_sa_len, data);
+  }
+
   sockaddr_storage target_addr{};
   socklen_t addr_len = 0;
 
@@ -310,6 +333,14 @@ i32 ZSocket::Send(const Address& target, const base::Span<byte> data) {
   }
 
   return InternalSend(target_addr, addr_len, data);
+}
+
+i32 ZSocket::SendCached(const Address& addr, const base::Span<byte> data) {
+  if (addr.cached_sa_len > 0) {
+    sockaddr_storage sa = addr.cached_sa;
+    return InternalSend(sa, addr.cached_sa_len, data);
+  }
+  return Send(addr, data);
 }
 
 const char* ZSocket::GetErrorString(Error error) {
@@ -353,6 +384,18 @@ i32 ZSocket::Receive(Address& sender, char* buffer, mem_size length) {
   socklen_t sender_len = sizeof(sender_addr);
   i32 result = InternalReceive(sender_addr, sender_len, buffer, length);
   if (result > 0) {
+    // Fast path: if the raw binary address matches the previous receive,
+    // skip the expensive inet_ntop conversion.  This is the common case
+    // when the same peer sends many packets in a row.
+    if (sender.cached_sa_len == sender_len &&
+        memcmp(&sender.cached_sa, &sender_addr, sender_len) == 0) {
+      return result;  // ip/port/family already correct from last time
+    }
+
+    // New or changed sender — do the full conversion.
+    sender.cached_sa = sender_addr;
+    sender.cached_sa_len = sender_len;
+
     if (sender_addr.ss_family == AF_INET6) {
       auto* addr6 = reinterpret_cast<sockaddr_in6*>(&sender_addr);
       ::inet_ntop(AF_INET6, &addr6->sin6_addr, sender.ip, sizeof(sender.ip));

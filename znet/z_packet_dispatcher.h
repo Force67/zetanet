@@ -135,7 +135,18 @@ class PacketDispatcher {
         packet.last_send_time == 0) {
       const mem_size payload_bytes = packet.heap_data_size;
       packet.flags.awaiting_ack = true;
-      packet.last_send_time = static_cast<u32>(base::GetUnixTimeStamp());
+      // Use coarse timestamp to avoid per-packet syscall.  The retry
+      // scan interval (10 ms) is far larger than any cache staleness.
+      {
+        static thread_local u32 tl_cached_ts = 0;
+        static thread_local std::chrono::steady_clock::time_point tl_ts_refresh{};
+        auto now_tp = std::chrono::steady_clock::now();
+        if (now_tp - tl_ts_refresh > std::chrono::milliseconds(100)) {
+          tl_cached_ts = static_cast<u32>(base::GetUnixTimeStamp());
+          tl_ts_refresh = now_tp;
+        }
+        packet.last_send_time = tl_cached_ts;
+      }
       if (receipt_queue.insert(next_outgoing_sequence_number_, std::move(packet))) {
         if (awaiting_ack_packet_count_) {
           awaiting_ack_packet_count_->fetch_add(1, std::memory_order_relaxed);

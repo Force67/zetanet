@@ -86,7 +86,11 @@ class ZPacketQueue {
       channel_outgoing_bytes_[channel_index].fetch_add(payload_bytes,
                                                        std::memory_order_relaxed);
     }
-    outgoing_wakeup_cv_.notify_one();
+    // Only notify if the outgoing thread is sleeping.  If it's actively
+    // dispatching, it will pick up the new packet on its next loop iteration.
+    if (outgoing_thread_sleeping_.load(std::memory_order_acquire)) {
+      outgoing_wakeup_cv_.notify_one();
+    }
   }
 
   // Bypass the outgoing queue and dispatch directly from the calling thread.
@@ -190,6 +194,7 @@ class ZPacketQueue {
   base::Atomic<mem_size> awaiting_ack_bytes_{0};
 
   base::Atomic<bool>& stop_threads_;
+  base::Atomic<bool> outgoing_thread_sleeping_{false};
 
   RateLimitConfig rate_limit_config_;
   base::Atomic<mem_size> packets_sent_this_second_{0};
