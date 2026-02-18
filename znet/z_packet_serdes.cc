@@ -62,6 +62,17 @@ constexpr mem_size kCompressedFlagsOffset = 12;
 
 constexpr mem_size kUncompressedChecksumOffset = 0;
 
+bool IsHandshakePacketType(const PacketType type) {
+  switch (type) {
+    case PacketType::ClientHello:
+    case PacketType::ServerHello:
+    case PacketType::ClientAuthProof:
+      return true;
+    default:
+      return false;
+  }
+}
+
 u8 PackHeaderFlags(const u8 reliable,
                    const u8 encrypted,
                    const u8 compressed,
@@ -290,6 +301,7 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
   const PacketType packet_type = static_cast<PacketType>(header.type);
   const PacketChannelType channel =
       static_cast<PacketChannelType>(header.channel_id);
+  const bool is_handshake_packet = IsHandshakePacketType(packet_type);
   if (IsSystemMessage(packet_type) && channel != PacketChannelType::Control) {
     BASE_LOGE(kLogTag, "System packet on non-control channel");
     return false;
@@ -297,6 +309,16 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
   if (!IsSystemMessage(packet_type) && channel != PacketChannelType::Data) {
     BASE_LOGE(kLogTag, "Data packet on non-data channel");
     return false;
+  }
+  if (crypto_context_) {
+    if (!header.flags.is_encrypted && !is_handshake_packet) {
+      BASE_LOGE(kLogTag, "Rejected plaintext packet while encryption is enabled");
+      return false;
+    }
+    if (!crypto_context_->IsAuthenticated() && !is_handshake_packet) {
+      BASE_LOGE(kLogTag, "Rejected packet before authentication completed");
+      return false;
+    }
   }
 
   mem_size offset = kPacketHeaderWireSize;

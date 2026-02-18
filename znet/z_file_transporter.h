@@ -6,6 +6,8 @@
 #include <znet/z_packets.h>
 #include <znet/z_file_write_interface.h>
 
+#include <chrono>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -21,6 +23,13 @@ class ZAsyncTransportLayer;
 
 class ZFileTransporter {
  public:
+  static constexpr u64 kMaxIncomingFileSize = 1024ull * 1024ull * 1024ull;  // 1 GiB
+  static constexpr u32 kMaxIncomingChunkSize = 64u * 1024u;                  // 64 KiB
+  static constexpr u32 kMaxIncomingTotalChunks = 262144u;
+  static constexpr mem_size kMaxActiveIncomingTransfers = 64;
+  static constexpr u64 kMaxActiveIncomingBytes = 1024ull * 1024ull * 1024ull;  // 1 GiB
+  static constexpr u32 kIncomingTransferIdleTimeoutMs = 120000;  // 2 minutes
+
   struct TransferChunk {
     u64 transfer_id{0};
     u64 file_size{0};
@@ -94,10 +103,14 @@ class ZFileTransporter {
     base::UniquePointer<IFileWriteHandle> temp_file;
     base::Vector<u8> received_chunks;
     u32 received_chunk_count{0};
+    std::chrono::steady_clock::time_point last_activity{};
   };
 
   bool WaitForSendWindow(const TransferTuning& tuning) const;
   bool ComputeFileChecksum(const base::Path& path, u32& out_checksum) const;
+  bool ValidateIncomingChunkLimits(const TransferChunk& chunk) const;
+  u64 ComputeActiveIncomingBytesLocked() const;
+  void PruneExpiredStreamsLocked(base::Vector<base::String>& expired_temp_paths);
   bool EnsureStreamSession(const TransferChunk& chunk,
                            const base::Path& temp_directory,
                            StreamReceiveSession*& out_session);

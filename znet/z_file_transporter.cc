@@ -175,16 +175,28 @@ bool ZFileTransporter::SendFile(const base::Path& path,
     return false;
   }
   const u64 file_size = static_cast<u64>(signed_file_size);
+  if (file_size > kMaxIncomingFileSize) {
+    BASE_LOGE(kLogTag, "File exceeds transfer size limit ({} bytes)", file_size);
+    return false;
+  }
   if (tuning.chunk_size == 0 ||
       tuning.chunk_size > static_cast<mem_size>(std::numeric_limits<u32>::max())) {
     BASE_LOGE(kLogTag, "Invalid chunk_size in transfer tuning");
     return false;
   }
   const u32 chunk_size = static_cast<u32>(tuning.chunk_size);
+  if (chunk_size > kMaxIncomingChunkSize) {
+    BASE_LOGE(kLogTag, "Chunk size exceeds transfer limit ({} bytes)", chunk_size);
+    return false;
+  }
   const mem_size total_chunks_64 = CalculateTotalChunks(file_size, chunk_size);
   if (total_chunks_64 == 0 ||
       total_chunks_64 > static_cast<mem_size>(std::numeric_limits<u32>::max())) {
     BASE_LOGE(kLogTag, "Unsupported chunk count for file {}", path.ToAsciiString());
+    return false;
+  }
+  if (total_chunks_64 > static_cast<mem_size>(kMaxIncomingTotalChunks)) {
+    BASE_LOGE(kLogTag, "Chunk count exceeds transfer limit ({})", total_chunks_64);
     return false;
   }
 
@@ -526,6 +538,9 @@ bool ZFileTransporter::ParseTransferChunkPayload(const base::Span<byte>& payload
   if (!chunk.is_last_chunk && chunk.file_checksum != 0) {
     return false;
   }
+  if (!ValidateIncomingChunkLimits(chunk)) {
+    return false;
+  }
   if (chunk.is_last_chunk && chunk.chunk_index != (chunk.total_chunks - 1)) {
     return false;
   }
@@ -656,9 +671,72 @@ bool ZFileTransporter::ComputeFileChecksum(const base::Path& path,
   return true;
 }
 
+bool ZFileTransporter::ValidateIncomingChunkLimits(
+    const TransferChunk& chunk) const {
+  if (chunk.file_size > kMaxIncomingFileSize) {
+    BASE_LOGE(kLogTag, "Rejected transfer {}: file too large ({} bytes)",
+              chunk.transfer_id, chunk.file_size);
+    return false;
+  }
+  if (chunk.chunk_size == 0 || chunk.chunk_size > kMaxIncomingChunkSize) {
+    BASE_LOGE(kLogTag, "Rejected transfer {}: invalid chunk size {}",
+              chunk.transfer_id, chunk.chunk_size);
+    return false;
+  }
+  if (chunk.total_chunks == 0 || chunk.total_chunks > kMaxIncomingTotalChunks) {
+    BASE_LOGE(kLogTag, "Rejected transfer {}: invalid total chunks {}",
+              chunk.transfer_id, chunk.total_chunks);
+    return false;
+  }
+  if (chunk.total_chunks >
+      static_cast<u64>(std::numeric_limits<mem_size>::max())) {
+    BASE_LOGE(kLogTag, "Rejected transfer {}: chunk bitmap overflow",
+              chunk.transfer_id);
+    return false;
+  }
+  return true;
+}
+
+u64 ZFileTransporter::ComputeActiveIncomingBytesLocked() const {
+  u64 total = 0;
+  for (const auto& [_, session] : active_streams_) {
+    if (session.file_size > std::numeric_limits<u64>::max() - total) {
+      return std::numeric_limits<u64>::max();
+    }
+    total += session.file_size;
+  }
+  return total;
+}
+
+void ZFileTransporter::PruneExpiredStreamsLocked(
+    base::Vector<base::String>& expired_temp_paths) {
+  expired_temp_paths.clear();
+  const auto now = std::chrono::steady_clock::now();
+  const auto idle_timeout =
+      std::chrono::milliseconds(kIncomingTransferIdleTimeoutMs);
+  for (auto it = active_streams_.begin(); it != active_streams_.end();) {
+    StreamReceiveSession& session = it->second;
+    if (session.last_activity.time_since_epoch().count() != 0 &&
+        now - session.last_activity < idle_timeout) {
+      ++it;
+      continue;
+    }
+    if (session.temp_file) {
+      session.temp_file.Get_UseOnlyIfYouKnowWhatYouareDoing()->Close();
+      session.temp_file.Reset();
+    }
+    expired_temp_paths.push_back(session.temp_path.ToAsciiString());
+    it = active_streams_.erase(it);
+  }
+}
+
 bool ZFileTransporter::EnsureStreamSession(const TransferChunk& chunk,
                                            const base::Path& temp_directory,
                                            StreamReceiveSession*& out_session) {
+  if (!ValidateIncomingChunkLimits(chunk)) {
+    return false;
+  }
+  const auto now = std::chrono::steady_clock::now();
   auto it = active_streams_.find(chunk.transfer_id);
   if (it != active_streams_.end()) {
     StreamReceiveSession& session = it->second;
@@ -666,11 +744,25 @@ bool ZFileTransporter::EnsureStreamSession(const TransferChunk& chunk,
         session.total_chunks != chunk.total_chunks) {
       return false;
     }
+    session.last_activity = now;
     out_session = &session;
     return true;
   }
 
   if (chunk.has_file_name == false) {
+    return false;
+  }
+  if (active_streams_.size() >= kMaxActiveIncomingTransfers) {
+    BASE_LOGE(kLogTag, "Rejected transfer {}: too many active transfers ({})",
+              chunk.transfer_id, active_streams_.size());
+    return false;
+  }
+  const u64 active_bytes = ComputeActiveIncomingBytesLocked();
+  if (active_bytes > kMaxActiveIncomingBytes ||
+      chunk.file_size > (kMaxActiveIncomingBytes - active_bytes)) {
+    BASE_LOGE(kLogTag,
+              "Rejected transfer {}: active transfer byte budget exceeded",
+              chunk.transfer_id);
     return false;
   }
 
@@ -687,6 +779,7 @@ bool ZFileTransporter::EnsureStreamSession(const TransferChunk& chunk,
   session.chunk_size = chunk.chunk_size;
   session.total_chunks = chunk.total_chunks;
   session.temp_path = temp_path;
+  session.last_activity = now;
   if (!file_write_factory_) {
     return false;
   }
@@ -711,8 +804,18 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
   if (out_completed) {
     *out_completed = false;
   }
+  if (!ValidateIncomingChunkLimits(chunk)) {
+    return false;
+  }
 
   std::lock_guard<base::Mutex> lock(stream_mutex_);
+  base::Vector<base::String> expired_temp_paths;
+  PruneExpiredStreamsLocked(expired_temp_paths);
+  for (const base::String& temp_path : expired_temp_paths) {
+    if (!temp_path.empty()) {
+      std::remove(temp_path.c_str());
+    }
+  }
   StreamReceiveSession* session = nullptr;
   if (!EnsureStreamSession(chunk, temp_directory, session) || !session ||
       !session->temp_file) {
@@ -720,6 +823,7 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
   }
 
   if (session->received_chunks[chunk.chunk_index] != 0) {
+    session->last_activity = std::chrono::steady_clock::now();
     if (out_completed) {
       *out_completed = session->received_chunk_count == session->total_chunks &&
                        session->has_expected_file_checksum;
@@ -734,6 +838,7 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
     return false;
   }
 
+  session->last_activity = std::chrono::steady_clock::now();
   session->received_chunks[chunk.chunk_index] = 1;
   session->received_chunk_count++;
   if (chunk.is_last_chunk) {

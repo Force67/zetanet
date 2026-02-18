@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_file_write_interface.h"
+#include "z_file_transporter.h"
 
 #include <cstring>
 #include <limits>
@@ -71,6 +72,9 @@ class MemoryMappedFileWriteFactory final : public IFileWriteFactory {
  public:
   base::UniquePointer<IFileWriteHandle> Open(const base::Path& path,
                                              u64 expected_size) override {
+    if (expected_size > ZFileTransporter::kMaxIncomingFileSize) {
+      return {};
+    }
     const base::String file_path = path.ToAsciiString();
     const int fd = open(file_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
