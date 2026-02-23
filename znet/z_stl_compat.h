@@ -150,6 +150,21 @@ template <typename T, size_t N>
 using Array = std::array<T, N>;
 
 // --- Time ---
+#ifndef ZNET_BASE_CLOCK_DEFINED
+#define ZNET_BASE_CLOCK_DEFINED 1
+class Clock {
+ public:
+  using clock = std::chrono::steady_clock;
+  using rep = clock::rep;
+  using period = clock::period;
+  using duration = clock::duration;
+  using time_point = clock::time_point;
+  static constexpr bool is_steady = clock::is_steady;
+
+  static time_point now() noexcept { return clock::now(); }
+};
+#endif
+
 inline u64 GetUnixTimeStamp() {
   return static_cast<u64>(
       std::chrono::duration_cast<std::chrono::seconds>(

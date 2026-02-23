@@ -45,6 +45,8 @@ bool ZServer::Begin(u16 port) {
 }
 
 bool ZServer::Update() {
+  UpdateSynchronizedClock();
+
   IncomingPacket packet;
   if (Poll(PacketChannelType::Control, packet)) {
     // Control packets are handled by ProcessSystemMessage inside Poll
@@ -93,9 +95,13 @@ void ZServer::SendMessage(ZPeerId id, const base::String& data) {
 void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
   switch (p.type) {
     case PacketType::ClientHello: {
-      // Guard against duplicate ClientHello from the same peer (e.g. retransmissions)
+      // Duplicate ClientHello can happen due reliable retransmits; respond with
+      // ServerHello again so the client can complete handshake if it missed the
+      // previous response.
       if (handshaked_peers_.count(p.source_peer_id)) {
-        BASE_LOGI(kLogTag, "Ignoring duplicate ClientHello from peer {}", p.source_peer_id);
+        BASE_LOGI(kLogTag, "Re-sending ServerHello for duplicate ClientHello from peer {}",
+                  p.source_peer_id);
+        SendServerHello(p.source_peer_id);
         break;
       }
       BASE_LOGI(kLogTag, "Received ClientHello from peer {}", p.source_peer_id);
@@ -190,6 +196,21 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
       BASE_LOGI(kLogTag, "Client authenticated successfully");
       break;
     }
+    case PacketType::ClockSyncRequest: {
+      if (!handshaked_peers_.count(p.source_peer_id)) {
+        break;
+      }
+      const u64 server_receive_tick_ms = GetLocalClockTickMs();
+      PacketReader reader((byte*)p.data.data(), p.data.size());
+      u64 client_tick_ms = 0;
+      if (!reader.Read(client_tick_ms)) {
+        BASE_LOGE(kLogTag, "Malformed ClockSyncRequest payload");
+        return;
+      }
+      SendClockSyncResponse(ZPeerId(p.source_peer_id), client_tick_ms,
+                            server_receive_tick_ms);
+      break;
+    }
     default:
       break;
   }
@@ -259,14 +280,35 @@ void ZServer::SendServerHello(ZPeerId dest) {
                                      server_proof.size()));
   }
 
-  const PackageFlags flags{.reliable = 0,
+  const PackageFlags flags{.reliable = 1,
                            .encrypted = 0,
                            .compressed = 0,
                            .priority = (u8)PacketPriority::Critical,
                            .acknowledged = 0,
-                           .awaiting_ack = 0,
+                           .awaiting_ack = 1,
                            .reserved = 0};
   OutgoingPacket out(dest.id, PacketType::ServerHello,
+                     PacketChannelType::Control, flags, writer.data());
+  Push(std::move(out));
+}
+
+void ZServer::SendClockSyncResponse(ZPeerId dest,
+                                    u64 echoed_client_tick_ms,
+                                    u64 server_receive_tick_ms) {
+  PacketWriter writer;
+  writer.Put(echoed_client_tick_ms);
+  writer.Put(server_receive_tick_ms);
+  writer.Put(GetLocalClockTickMs());
+
+  const u8 use_encryption = crypto_context_ ? 1 : 0;
+  const PackageFlags flags{.reliable = 0,
+                           .encrypted = use_encryption,
+                           .compressed = 0,
+                           .priority = static_cast<u8>(PacketPriority::High),
+                           .acknowledged = 0,
+                           .awaiting_ack = 0,
+                           .reserved = 0};
+  OutgoingPacket out(dest.id, PacketType::ClockSyncResponse,
                      PacketChannelType::Control, flags, writer.data());
   Push(std::move(out));
 }

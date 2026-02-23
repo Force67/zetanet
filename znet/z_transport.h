@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -16,6 +17,8 @@
 #include <znet/z_task_executor.h>
 #include <znet/z_socket.h>
 #include <znet/z_peer_mapping.h>
+#include <znet/z_clock.h>
+#include <znet/z_synchronized_clock.h>
 
 namespace tx::network {
 
@@ -72,6 +75,11 @@ class ZAsyncTransportLayer {
   State state() const { return state_; }
 
   bool compression_enabled() const { return use_compression_; }
+  u64 GetLocalClockTickMs() const;
+  u64 GetSynchronizedClockTickMs() const;
+  bool IsClockSynchronized() const;
+  void SetClockAsymmetryCompensationMs(i32 compensation_ms);
+  i32 GetClockAsymmetryCompensationMs() const;
 
   // Thread scaling tiers: at each peer_count threshold, the dispatch thread
   // pool is (re)configured with the given number of workers.
@@ -122,5 +130,16 @@ class ZAsyncTransportLayer {
   ITaskExecutor* task_executor_override_{nullptr};
   mem_size built_in_executor_worker_count_{0};
   mem_size built_in_executor_max_queued_tasks_{0};
+  base::Clock::time_point local_clock_epoch_{
+      base::Clock::now()};
+  ZSynchronizedClock synchronized_clock_{};
+
+ protected:
+  void ResetSynchronizedClock();
+  void SynchronizeClockSample(u64 client_send_tick_ms,
+                              u64 client_receive_tick_ms,
+                              u64 server_receive_tick_ms,
+                              u64 server_send_tick_ms);
+  void UpdateSynchronizedClock();
 };
 }  // namespace tx::network

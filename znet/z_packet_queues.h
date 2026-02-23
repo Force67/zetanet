@@ -6,6 +6,7 @@
 #include <map>
 #include <znet/z_packets.h>
 #include <znet/z_task_executor.h>
+#include <znet/z_clock.h>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -200,7 +201,7 @@ class ZPacketQueue {
   base::Atomic<mem_size> packets_sent_this_second_{0};
   base::Atomic<mem_size> bytes_sent_this_second_{0};
   base::Atomic<mem_size> burst_tokens_{0};
-  std::chrono::steady_clock::time_point rate_limit_window_start_;
+  base::Clock::time_point rate_limit_window_start_;
   u32 gc_counter_{0};
 };
 }  // namespace tx::network

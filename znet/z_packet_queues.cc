@@ -44,7 +44,7 @@ ZPacketQueue::ZPacketQueue(ZSocket& socket,
       receiver_(socket, peer_list),
       stop_threads_(stop_token),
       rate_limit_config_({}),
-      rate_limit_window_start_(std::chrono::steady_clock::now()) {
+      rate_limit_window_start_(base::Clock::now()) {
     // Default-construct queues via operator[] (PriorityMPSCQueue is not moveable due to mutex)
     channel_outgoing_queues_[PacketChannelType::Control];
     channel_outgoing_queues_[PacketChannelType::Data];
@@ -88,7 +88,7 @@ bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
   }
 
   // Slow path: check if the window has elapsed.
-  auto now = std::chrono::steady_clock::now();
+  auto now = base::Clock::now();
   auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
       now - rate_limit_window_start_);
 
@@ -207,7 +207,7 @@ void ZPacketQueue::TrackDispatchTaskCompletion() {
 }
 
 void ZPacketQueue::ProcessOutgoingPackets() {
-  auto next_retry_scan = std::chrono::steady_clock::now();
+  auto next_retry_scan = base::Clock::now();
   while (!stop_threads_.load()) {
     mem_size dispatched = 0;
     dispatched += ProcessChannel(PacketChannelType::Control,
@@ -220,7 +220,7 @@ void ZPacketQueue::ProcessOutgoingPackets() {
       awaiting_ack_packets_.collect_garbage();
     }
 
-    const auto now_tp = std::chrono::steady_clock::now();
+    const auto now_tp = base::Clock::now();
     if (now_tp >= next_retry_scan) {
       const auto now = static_cast<u32>(base::GetUnixTimeStamp());
       for (auto& [seqNum, packet] : awaiting_ack_packets_) {

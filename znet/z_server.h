@@ -45,6 +45,9 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
 
   void ProcessSystemMessage(const IncomingPacket& p);
   void SendServerHello(ZPeerId);
+  void SendClockSyncResponse(ZPeerId dest,
+                             u64 echoed_client_tick_ms,
+                             u64 server_receive_tick_ms);
 
  private:
   std::unordered_set<u32> handshaked_peers_;

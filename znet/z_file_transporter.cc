@@ -612,7 +612,7 @@ bool ZFileTransporter::WaitForSendWindow(const TransferTuning& tuning) const {
     return true;
   }
 
-  const auto start = std::chrono::steady_clock::now();
+  const auto start = base::Clock::now();
   const auto sleep_duration = std::chrono::milliseconds(
       std::max<u32>(1, tuning.backpressure_sleep_ms));
   while (true) {
@@ -635,7 +635,7 @@ bool ZFileTransporter::WaitForSendWindow(const TransferTuning& tuning) const {
 
     if (tuning.backpressure_timeout_ms > 0) {
       const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now() - start);
+          base::Clock::now() - start);
       if (waited.count() >= tuning.backpressure_timeout_ms) {
         return false;
       }
@@ -711,7 +711,7 @@ u64 ZFileTransporter::ComputeActiveIncomingBytesLocked() const {
 void ZFileTransporter::PruneExpiredStreamsLocked(
     base::Vector<base::String>& expired_temp_paths) {
   expired_temp_paths.clear();
-  const auto now = std::chrono::steady_clock::now();
+  const auto now = base::Clock::now();
   const auto idle_timeout =
       std::chrono::milliseconds(kIncomingTransferIdleTimeoutMs);
   for (auto it = active_streams_.begin(); it != active_streams_.end();) {
@@ -736,7 +736,7 @@ bool ZFileTransporter::EnsureStreamSession(const TransferChunk& chunk,
   if (!ValidateIncomingChunkLimits(chunk)) {
     return false;
   }
-  const auto now = std::chrono::steady_clock::now();
+  const auto now = base::Clock::now();
   auto it = active_streams_.find(chunk.transfer_id);
   if (it != active_streams_.end()) {
     StreamReceiveSession& session = it->second;
@@ -823,7 +823,7 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
   }
 
   if (session->received_chunks[chunk.chunk_index] != 0) {
-    session->last_activity = std::chrono::steady_clock::now();
+    session->last_activity = base::Clock::now();
     if (out_completed) {
       *out_completed = session->received_chunk_count == session->total_chunks &&
                        session->has_expected_file_checksum;
@@ -838,7 +838,7 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
     return false;
   }
 
-  session->last_activity = std::chrono::steady_clock::now();
+  session->last_activity = base::Clock::now();
   session->received_chunks[chunk.chunk_index] = 1;
   session->received_chunk_count++;
   if (chunk.is_last_chunk) {

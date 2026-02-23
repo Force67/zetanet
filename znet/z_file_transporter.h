@@ -5,6 +5,7 @@
 #include <znet/z_peer.h>
 #include <znet/z_packets.h>
 #include <znet/z_file_write_interface.h>
+#include <znet/z_clock.h>
 
 #include <chrono>
 
@@ -103,7 +104,7 @@ class ZFileTransporter {
     base::UniquePointer<IFileWriteHandle> temp_file;
     base::Vector<u8> received_chunks;
     u32 received_chunk_count{0};
-    std::chrono::steady_clock::time_point last_activity{};
+    base::Clock::time_point last_activity{};
   };
 
   bool WaitForSendWindow(const TransferTuning& tuning) const;

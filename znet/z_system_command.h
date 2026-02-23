@@ -259,6 +259,26 @@ struct ClientAuthProof {
   }
 };
 
+struct ClockSyncRequest {
+  u64 client_tick_ms;
+
+  static void Build(PacketWriter& builder, const ClockSyncRequest& packet) {
+    builder.Put(packet.client_tick_ms);
+  }
+};
+
+struct ClockSyncResponse {
+  u64 echoed_client_tick_ms;
+  u64 server_receive_tick_ms;
+  u64 server_send_tick_ms;
+
+  static void Build(PacketWriter& builder, const ClockSyncResponse& packet) {
+    builder.Put(packet.echoed_client_tick_ms);
+    builder.Put(packet.server_receive_tick_ms);
+    builder.Put(packet.server_send_tick_ms);
+  }
+};
+
 struct ServerGoodbye {
   u8 reason;
 

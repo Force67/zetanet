@@ -8,6 +8,7 @@
 #include <znet/z_packets.h>
 #include <znet/z_peer_mapping.h>
 #include <znet/z_packet_serdes.h>
+#include <znet/z_clock.h>
 #include <znet/fancy_queue.h>
 
 #ifdef ZNET_USE_STL
@@ -139,8 +140,8 @@ class PacketDispatcher {
       // scan interval (10 ms) is far larger than any cache staleness.
       {
         static thread_local u32 tl_cached_ts = 0;
-        static thread_local std::chrono::steady_clock::time_point tl_ts_refresh{};
-        auto now_tp = std::chrono::steady_clock::now();
+        static thread_local base::Clock::time_point tl_ts_refresh{};
+        auto now_tp = base::Clock::now();
         if (now_tp - tl_ts_refresh > std::chrono::milliseconds(100)) {
           tl_cached_ts = static_cast<u32>(base::GetUnixTimeStamp());
           tl_ts_refresh = now_tp;

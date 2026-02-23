@@ -76,6 +76,8 @@ enum class PacketType : u16 {
   // used to request a file transfer (native feature of this library)
   FileTransfer,
   StreamingData,
+  ClockSyncRequest,
+  ClockSyncResponse,
 
   // from here, message ids can be defined (those are sent on the Data channel)
   // message is a generic type, but you can define your own types starting from

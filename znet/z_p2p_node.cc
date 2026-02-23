@@ -136,7 +136,7 @@ bool ZP2PNode::InitAsHost(u16 port) {
   SetHostEndpoint(endpoint);
   type_ = Type::Host;
   state_ = State::kConnected;
-  last_host_keepalive_time_ = std::chrono::steady_clock::now();
+  last_host_keepalive_time_ = base::Clock::now();
   return true;
 }
 
@@ -178,7 +178,7 @@ bool ZP2PNode::InitAsClient(const base::StringRef host_ip,
   SetHostEndpoint(endpoint);
   type_ = Type::Client;
   state_ = State::kConnected;
-  last_host_keepalive_time_ = std::chrono::steady_clock::now();
+  last_host_keepalive_time_ = base::Clock::now();
   return true;
 }
 
@@ -370,7 +370,7 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
       }
       if (!IsSelfAddress(source_peer->address)) {
         auto& state = GetOrCreatePunchPeerState(source_peer->address);
-        state.last_keepalive_time = std::chrono::steady_clock::now();
+        state.last_keepalive_time = base::Clock::now();
       }
       break;
     }
@@ -380,7 +380,7 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
       }
       if (!IsSelfAddress(source_peer->address)) {
         auto& state = GetOrCreatePunchPeerState(source_peer->address);
-        state.last_keepalive_time = std::chrono::steady_clock::now();
+        state.last_keepalive_time = base::Clock::now();
         ArmPunchProbe(source_peer->address);
         SendPunchAck(source_peer->address);
       }
@@ -393,7 +393,7 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
       if (!IsSelfAddress(source_peer->address)) {
         auto& state = GetOrCreatePunchPeerState(source_peer->address);
         state.acknowledged = true;
-        state.last_keepalive_time = std::chrono::steady_clock::now();
+        state.last_keepalive_time = base::Clock::now();
       }
       break;
     }
@@ -503,7 +503,7 @@ void ZP2PNode::TickNatPunchthrough() {
     return;
   }
 
-  const auto now = std::chrono::steady_clock::now();
+  const auto now = base::Clock::now();
 
   if (type_ == Type::Client && !IsSelfAddress(host_endpoint_)) {
     if (last_host_keepalive_time_.time_since_epoch().count() == 0 ||
@@ -558,7 +558,7 @@ ZP2PNode::PunchPeerState& ZP2PNode::GetOrCreatePunchPeerState(
 
   PunchPeerState state{};
   state.address = endpoint;
-  state.next_probe_time = std::chrono::steady_clock::now();
+  state.next_probe_time = base::Clock::now();
   state.last_keepalive_time = state.next_probe_time;
   punch_peers_.push_back(state);
   return punch_peers_.back();
@@ -580,7 +580,7 @@ void ZP2PNode::ArmPunchProbe(const ZSocket::Address& endpoint) {
   if (state.attempts_sent >= kMaxPunchProbeAttempts) {
     state.attempts_sent = 0;
   }
-  state.next_probe_time = std::chrono::steady_clock::now();
+  state.next_probe_time = base::Clock::now();
 }
 
 bool ZP2PNode::IsSelfAddress(const ZSocket::Address& address) const {

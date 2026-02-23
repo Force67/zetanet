@@ -2,6 +2,8 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#include <znet/z_clock.h>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -41,5 +43,10 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
   void SendClientHello();
   void SendClientHelloDirect();
   void SendClientAuthProof(const base::String& proof);
+  void SendClockSyncRequest();
+
+ private:
+  base::Clock::time_point next_clock_sync_request_time_{};
+  base::Clock::time_point next_client_hello_retry_time_{};
 };
 }  // namespace tx::network

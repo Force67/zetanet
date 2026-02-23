@@ -18,7 +18,9 @@ static constexpr char kLogTag[] = "z-async-transportlayer";
 ZAsyncTransportLayer::ZAsyncTransportLayer()
     : socket_(),
       stop_threads(false),
-      packet_queue_(socket_, peer_mapping_, stop_threads) {}
+      packet_queue_(socket_, peer_mapping_, stop_threads) {
+  local_clock_epoch_ = base::Clock::now();
+}
 
 ZAsyncTransportLayer::~ZAsyncTransportLayer() {
   Deinit();
@@ -26,6 +28,8 @@ ZAsyncTransportLayer::~ZAsyncTransportLayer() {
 
 bool ZAsyncTransportLayer::Init(const InitOptions& options) {
   state_ = State::kConnecting;
+  local_clock_epoch_ = base::Clock::now();
+  ResetSynchronizedClock();
 
   bool result = false;
   if (options.setup_type == ConnectionType::kClient) {
@@ -101,6 +105,7 @@ void ZAsyncTransportLayer::Deinit() {
   socket_.DestroySocket();
   packet_queue_.StopThreads();
   state_ = State::kDisconnected;
+  ResetSynchronizedClock();
 }
 
 bool ZAsyncTransportLayer::EnqueuePacket(OutgoingPacket&& packet) {
@@ -126,6 +131,45 @@ ZAsyncTransportLayer::OutboundPressure ZAsyncTransportLayer::GetOutboundPressure
   pressure.awaiting_ack_packets = packet_queue_.GetApproxAwaitingAckPacketCount();
   pressure.awaiting_ack_bytes = packet_queue_.GetApproxAwaitingAckBytes();
   return pressure;
+}
+
+u64 ZAsyncTransportLayer::GetLocalClockTickMs() const {
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      base::Clock::now() - local_clock_epoch_);
+  return elapsed.count() > 0 ? static_cast<u64>(elapsed.count()) : 0;
+}
+
+u64 ZAsyncTransportLayer::GetSynchronizedClockTickMs() const {
+  return synchronized_clock_.GetCurrentTick();
+}
+
+bool ZAsyncTransportLayer::IsClockSynchronized() const {
+  return synchronized_clock_.IsSynchronized();
+}
+
+void ZAsyncTransportLayer::SetClockAsymmetryCompensationMs(i32 compensation_ms) {
+  synchronized_clock_.SetAsymmetryCompensationMs(compensation_ms);
+}
+
+i32 ZAsyncTransportLayer::GetClockAsymmetryCompensationMs() const {
+  return synchronized_clock_.GetAsymmetryCompensationMs();
+}
+
+void ZAsyncTransportLayer::ResetSynchronizedClock() {
+  synchronized_clock_.Reset();
+}
+
+void ZAsyncTransportLayer::SynchronizeClockSample(u64 client_send_tick_ms,
+                                                  u64 client_receive_tick_ms,
+                                                  u64 server_receive_tick_ms,
+                                                  u64 server_send_tick_ms) {
+  synchronized_clock_.SynchronizeFromNtpSample(
+      client_send_tick_ms, client_receive_tick_ms, server_receive_tick_ms,
+      server_send_tick_ms);
+}
+
+void ZAsyncTransportLayer::UpdateSynchronizedClock() {
+  synchronized_clock_.Update(GetLocalClockTickMs());
 }
 
 }  // namespace tx::network

@@ -5,6 +5,7 @@
 
 #include <limits>
 
+#include <znet/z_clock.h>
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -23,10 +24,10 @@ static constexpr u32 kTimeshift =
 // Coarse thread-local timestamp cache: avoids a syscall per packet without
 // cross-thread sharing/data races.
 static thread_local u32 g_cached_shifted_timestamp{0};
-static thread_local std::chrono::steady_clock::time_point g_timestamp_refresh{};
+static thread_local base::Clock::time_point g_timestamp_refresh{};
 
 inline u32 GetCachedShiftedTimestamp() {
-  const auto now = std::chrono::steady_clock::now();
+  const auto now = base::Clock::now();
   if (now - g_timestamp_refresh > std::chrono::milliseconds(250)) {
     g_cached_shifted_timestamp =
         static_cast<u32>(base::GetUnixTimeStamp() - kTimeshift);

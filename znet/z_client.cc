@@ -4,7 +4,9 @@
 #include "z_client.h"
 #include "z_system_command.h"
 
+#include <cerrno>
 #include <cstdlib>
+#include <limits>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -14,6 +16,8 @@
 
 namespace tx::network {
 static constexpr char kLogTag[] = "z-client";
+static constexpr auto kClockSyncInterval = std::chrono::milliseconds(1000);
+static constexpr auto kClientHelloRetryInterval = std::chrono::milliseconds(500);
 
 bool ZClient::Connect(const base::StringRef address, u16 port) {
   const char* encryption_env = std::getenv("ZNET_ENABLE_ENCRYPTION");
@@ -31,8 +35,38 @@ bool ZClient::Connect(const base::StringRef address, u16 port) {
       .start_threads = false};  // Adaptive: threads start lazily
   bool result = ZAsyncTransportLayer::Init(options);
   if (result) {
-    SendClientHelloDirect();  // Direct send (no outgoing thread yet)
+    const char* asymmetry_env = std::getenv("ZNET_CLOCK_ASYMMETRY_COMP_MS");
+    if (asymmetry_env && asymmetry_env[0] != '\0') {
+      errno = 0;
+      char* end = nullptr;
+      const long parsed = std::strtol(asymmetry_env, &end, 10);
+      if (errno == 0 && end != asymmetry_env && *end == '\0') {
+        long clamped = parsed;
+        if (clamped < std::numeric_limits<i32>::min()) {
+          clamped = std::numeric_limits<i32>::min();
+        } else if (clamped > std::numeric_limits<i32>::max()) {
+          clamped = std::numeric_limits<i32>::max();
+        }
+        SetClockAsymmetryCompensationMs(static_cast<i32>(clamped));
+      } else {
+        BASE_LOGW(kLogTag,
+                  "Ignoring invalid ZNET_CLOCK_ASYMMETRY_COMP_MS='{}'",
+                  asymmetry_env);
+      }
+    }
+
+    if (scaling_tier_count_ > 0 && !packet_queue_.outgoing_thread_running() &&
+        !packet_queue_.StartOutgoingThread()) {
+      BASE_LOGE(kLogTag, "Failed to start outgoing thread");
+      Disconnect();
+      return false;
+    }
+
+    SendClientHello();
     state_ = State::kConnecting;
+    next_clock_sync_request_time_ = base::Clock::time_point{};
+    next_client_hello_retry_time_ =
+        base::Clock::now() + kClientHelloRetryInterval;
   }
   return result;
 }
@@ -40,9 +74,13 @@ bool ZClient::Connect(const base::StringRef address, u16 port) {
 void ZClient::Disconnect() {
   ZAsyncTransportLayer::Deinit();
   state_ = State::kDisconnected;
+  next_clock_sync_request_time_ = base::Clock::time_point{};
+  next_client_hello_retry_time_ = base::Clock::time_point{};
 }
 
 void ZClient::Update() {
+  UpdateSynchronizedClock();
+
   IncomingPacket packet;
   if (Poll(PacketChannelType::Control, packet)) {
     // Control packets are handled by ProcessSystemMessage inside Poll
@@ -57,9 +95,27 @@ void ZClient::Update() {
       BASE_LOGI(kLogTag, "Disconnected");
       break;
     case ZAsyncTransportLayer::State::kConnecting:
-      BASE_LOGI(kLogTag, "Connecting");
+      if (!packet_queue_.outgoing_thread_running()) {
+        const auto now = base::Clock::now();
+        if (next_client_hello_retry_time_.time_since_epoch().count() == 0 ||
+            now >= next_client_hello_retry_time_) {
+          SendClientHelloDirect();
+          next_client_hello_retry_time_ = now + kClientHelloRetryInterval;
+        }
+      }
       break;
     case ZAsyncTransportLayer::State::kConnected:
+      if (crypto_context_ && !crypto_context_->IsAuthenticated()) {
+        break;
+      }
+      {
+        const auto now = base::Clock::now();
+        if (next_clock_sync_request_time_.time_since_epoch().count() == 0 ||
+            now >= next_clock_sync_request_time_) {
+          SendClockSyncRequest();
+          next_clock_sync_request_time_ = now + kClockSyncInterval;
+        }
+      }
       break;
     case ZAsyncTransportLayer::State::kDisconnecting:
       BASE_LOGI(kLogTag, "Disconnecting");
@@ -178,7 +234,31 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
         }
 
         state_ = State::kConnected;
+        next_client_hello_retry_time_ = base::Clock::time_point{};
       }
+      break;
+    }
+    case PacketType::ClockSyncResponse: {
+      if (state_ != State::kConnected) {
+        break;
+      }
+
+      const u64 local_recv_tick_ms = GetLocalClockTickMs();
+      PacketReader reader((byte*)p.data.data(), p.data.size());
+      u64 client_send_tick_ms = 0;
+      u64 server_receive_tick_ms = 0;
+      u64 server_send_tick_ms = 0;
+      if (!reader.Read(client_send_tick_ms) || !reader.Read(server_receive_tick_ms) ||
+          !reader.Read(server_send_tick_ms)) {
+        BASE_LOGE(kLogTag, "Malformed ClockSyncResponse payload");
+        return;
+      }
+
+      if (local_recv_tick_ms < client_send_tick_ms) {
+        return;
+      }
+      SynchronizeClockSample(client_send_tick_ms, local_recv_tick_ms,
+                             server_receive_tick_ms, server_send_tick_ms);
       break;
     }
     default:
@@ -226,12 +306,12 @@ void ZClient::SendClientHello() {
                                      client_challenge.size()));
   }
 
-  const PackageFlags flags{.reliable = 0,
+  const PackageFlags flags{.reliable = 1,
                            .encrypted = 0,
                            .compressed = 0,
                            .priority = (u8)PacketPriority::Critical,
                            .acknowledged = 0,
-                           .awaiting_ack = 0,
+                           .awaiting_ack = 1,
                            .reserved = 0};
   OutgoingPacket o(ZPeerId::to_server, PacketType::ClientHello,
                    PacketChannelType::Control, flags, writer.data());
@@ -277,12 +357,12 @@ void ZClient::SendClientHelloDirect() {
                                      client_challenge.size()));
   }
 
-  const PackageFlags flags{.reliable = 0,
+  const PackageFlags flags{.reliable = 1,
                            .encrypted = 0,
                            .compressed = 0,
                            .priority = (u8)PacketPriority::Critical,
                            .acknowledged = 0,
-                           .awaiting_ack = 0,
+                           .awaiting_ack = 1,
                            .reserved = 0};
   OutgoingPacket o(ZPeerId::to_server, PacketType::ClientHello,
                    PacketChannelType::Control, flags, writer.data());
@@ -297,15 +377,39 @@ void ZClient::SendClientAuthProof(const base::String& proof) {
   writer.PutList(base::Span<byte>(reinterpret_cast<const byte*>(proof.data()),
                                    proof.size()));
 
-  const PackageFlags flags{.reliable = 0,
+  const PackageFlags flags{.reliable = 1,
                            .encrypted = 0,
                            .compressed = 0,
                            .priority = (u8)PacketPriority::Critical,
                            .acknowledged = 0,
-                           .awaiting_ack = 0,
+                           .awaiting_ack = 1,
                            .reserved = 0};
   OutgoingPacket o(ZPeerId::to_server, PacketType::ClientAuthProof,
                    PacketChannelType::Control, flags, writer.data());
   Push(std::move(o));
+}
+
+void ZClient::SendClockSyncRequest() {
+  if (state_ != State::kConnected) {
+    return;
+  }
+  if (crypto_context_ && !crypto_context_->IsAuthenticated()) {
+    return;
+  }
+
+  PacketWriter writer;
+  writer.Put(GetLocalClockTickMs());
+
+  const u8 use_encryption = crypto_context_ ? 1 : 0;
+  const PackageFlags flags{.reliable = 0,
+                           .encrypted = use_encryption,
+                           .compressed = 0,
+                           .priority = static_cast<u8>(PacketPriority::High),
+                           .acknowledged = 0,
+                           .awaiting_ack = 0,
+                           .reserved = 0};
+  OutgoingPacket out(ZPeerId::to_server, PacketType::ClockSyncRequest,
+                     PacketChannelType::Control, flags, writer.data());
+  Push(std::move(out));
 }
 }  // namespace tx::network

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <znet/z_abi.h>
+#include <znet/z_clock.h>
 #include <znet/z_stl_compat.h>
 #include <znet/z_transport.h>
 
@@ -44,8 +45,8 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
     ZSocket::Address address{};
     u32 attempts_sent{0};
     bool acknowledged{false};
-    std::chrono::steady_clock::time_point next_probe_time{};
-    std::chrono::steady_clock::time_point last_keepalive_time{};
+    base::Clock::time_point next_probe_time{};
+    base::Clock::time_point last_keepalive_time{};
   };
 
   bool InitAsHost(u16 port);
@@ -92,7 +93,7 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
   ZSocket::Address host_endpoint_{};
   ZSocket::Address public_endpoint_{};
   bool has_public_endpoint_{false};
-  std::chrono::steady_clock::time_point last_host_keepalive_time_{};
+  base::Clock::time_point last_host_keepalive_time_{};
   base::Vector<PunchPeerState> punch_peers_;
 
   base::Mutex incoming_mutex_;
