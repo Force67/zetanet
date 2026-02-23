@@ -32,3 +32,4 @@ ntloader/ntloader.vcxproj.user
 /bin
 /samples/allocator_bench/obj
 /samples/p2p_smoke/obj
+/samples/handshake_integration/obj

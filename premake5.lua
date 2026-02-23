@@ -211,9 +211,16 @@ function apply_znet_crypto_links()
   filter({})
 end
 
-architecture("x86_64")
+local host_arch = (os.outputof("uname -m 2>/dev/null") or ""):lower()
+if host_arch:find("aarch64", 1, true) or host_arch:find("arm64", 1, true) then
+  architecture("ARM64")
+else
+  architecture("x86_64")
+end
 
 filter("architecture:x86_64")
+    targetsuffix("_64")
+filter("architecture:ARM64")
     targetsuffix("_64")
 
 filter("configurations:Debug")
@@ -225,8 +232,10 @@ filter("configurations:Release")
     runtime("Release")
     optimize("Speed")
 
-filter("language:C or C++")
+filter({ "language:C or C++", "architecture:x86_64" })
     vectorextensions("SSE4.1")
+    staticruntime("on")
+filter({ "language:C or C++", "architecture:ARM64" })
     staticruntime("on")
 
 filter("language:C++")

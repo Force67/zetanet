@@ -18,3 +18,11 @@ Cool features:
 Originally this library was built on the "base" library of my equilibirium STL-replacement project (because my own STL-replacement is faster than the STL). I've since added a std compat layer, so you can compile without it.
 
 This code is tested working on linux (posix) & windows.
+
+## Handshake Integration Test
+
+Run the handshake integration checks with nix:
+
+```bash
+nix --extra-experimental-features 'nix-command flakes' develop -c bash -lc 'premake5 --use-stl gmake2 && make config=debug HandshakeIntegration -j$(nproc) && ./bin/HandshakeIntegration_64'
+```

@@ -1,0 +1,29 @@
+name: Handshake Integration
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  handshake-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build HandshakeIntegration
+        run: |
+          nix develop -c bash -lc 'premake5 --use-stl gmake2 && make config=debug HandshakeIntegration -j$(nproc)'
+
+      - name: Run HandshakeIntegration
+        run: |
+          nix develop -c bash -lc './bin/HandshakeIntegration_64'
