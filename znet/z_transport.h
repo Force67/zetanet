@@ -68,6 +68,13 @@ class ZAsyncTransportLayer {
   void SetRateLimitConfig(const ZPacketQueue::RateLimitConfig& config) {
     packet_queue_.SetRateLimitConfig(config);
   }
+  void SetCongestionControlConfig(
+      const ZPacketQueue::CongestionControlConfig& config) {
+    packet_queue_.SetCongestionControlConfig(config);
+  }
+  mem_size GetCongestionScalePerMille() const {
+    return packet_queue_.GetCongestionScalePerMille();
+  }
   bool encryption_enabled() const {
     return crypto_context_.Get_UseOnlyIfYouKnowWhatYouareDoing() != nullptr;
   }

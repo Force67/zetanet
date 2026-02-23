@@ -41,6 +41,17 @@ class ZPacketQueue {
     mem_size burst_allowance = 100000;
   };
 
+  struct CongestionControlConfig {
+    bool enabled = true;
+    mem_size min_scale_per_mille = 300;
+    mem_size max_scale_per_mille = 1600;
+    mem_size additive_increase_per_window = 25;
+    mem_size ack_events_per_window = 64;
+    mem_size retransmit_backoff_per_mille = 900;
+    mem_size drop_backoff_per_mille = 700;
+    mem_size min_data_dispatch_per_tick = 64;
+  };
+
   ZPacketQueue(ZSocket&, ZPeerMapping&, base::Atomic<bool>& stop_token);
 
   bool StartThreads();
@@ -59,6 +70,12 @@ class ZPacketQueue {
 
   void SetRateLimitConfig(const RateLimitConfig& config) {
     rate_limit_config_ = config;
+  }
+  void SetCongestionControlConfig(const CongestionControlConfig& config) {
+    congestion_control_config_ = config;
+  }
+  mem_size GetCongestionScalePerMille() const {
+    return congestion_scale_per_mille_.load(std::memory_order_relaxed);
   }
 
   bool incoming_thread_running() const {
@@ -150,6 +167,11 @@ class ZPacketQueue {
  private:
   void ProcessOutgoingPackets();
   mem_size ProcessChannel(PacketChannelType, mem_size max_packets);
+  mem_size GetDataDispatchBudget() const;
+  void OnReliablePacketAcknowledged();
+  void OnReliablePacketRetransmit();
+  void OnReliablePacketDrop();
+  void MaybeApplyCongestionRecovery(base::Clock::time_point now_tp);
   void EnsureDispatchExecutor();
   void WaitForPendingDispatchTasks();
   void TrackDispatchTaskCompletion();
@@ -201,6 +223,10 @@ class ZPacketQueue {
   base::Atomic<mem_size> packets_sent_this_second_{0};
   base::Atomic<mem_size> bytes_sent_this_second_{0};
   base::Atomic<mem_size> burst_tokens_{0};
+  CongestionControlConfig congestion_control_config_;
+  base::Atomic<mem_size> congestion_scale_per_mille_{1000};
+  base::Atomic<mem_size> ack_events_since_adjust_{0};
+  base::Clock::time_point next_congestion_recovery_time_{};
   base::Clock::time_point rate_limit_window_start_;
   u32 gc_counter_{0};
 };

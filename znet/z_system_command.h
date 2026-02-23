@@ -213,13 +213,36 @@ class PacketReader {
 
 namespace system_commands {
 
+static constexpr u16 kProtocolVersionCurrent = 1;
+static constexpr u16 kProtocolVersionMinSupported = 1;
+
+enum FeatureFlag : u32 {
+  kFeatureClockSync = 1u << 0,
+  kFeatureCompression = 1u << 1,
+  kFeatureEncryption = 1u << 2,
+  kFeatureAdaptiveCongestion = 1u << 3,
+};
+
+enum class HandshakeRejectReason : u8 {
+  None = 0,
+  Timeout = 1,
+  ProtocolVersionMismatch = 2,
+  FeatureMismatch = 3,
+  MalformedPacket = 4,
+  AuthenticationFailed = 5,
+};
+
 struct ClientHello {
+  u16 protocol_version;
+  u32 feature_flags;
   u8 encryption_algo_list_len;
   u8 compression_algo_list_len;
   u8 pub_key_list_len;
   u8 challenge_len;
 
   static void Build(PacketWriter& builder, ClientHello& packet) {
+    builder.Put<u16>(packet.protocol_version);
+    builder.Put<u32>(packet.feature_flags);
     builder.Put<u8>(packet.encryption_algo_list_len);
     builder.Put<u8>(packet.compression_algo_list_len);
     builder.Put<u8>(packet.pub_key_list_len);
@@ -228,6 +251,8 @@ struct ClientHello {
 };
 
 struct ServerHello {
+  u16 protocol_version;
+  u32 feature_flags;
   u8 encryption_algo_list_len;
   u8 compression_algo_list_len;
   u8 pub_key_list_len;
@@ -235,6 +260,8 @@ struct ServerHello {
   u8 proof_len;
 
   static void Build(PacketWriter& builder, ServerHello& packet) {
+    builder.Put<u16>(packet.protocol_version);
+    builder.Put<u32>(packet.feature_flags);
     builder.Put<u8>(packet.encryption_algo_list_len);
     builder.Put<u8>(packet.compression_algo_list_len);
     builder.Put<u8>(packet.pub_key_list_len);
@@ -280,10 +307,10 @@ struct ClockSyncResponse {
 };
 
 struct ServerGoodbye {
-  u8 reason;
+  HandshakeRejectReason reason;
 
   static void Build(PacketWriter& builder, ServerGoodbye& packet) {
-    builder.Put<u8>(packet.reason);
+    builder.Put(packet.reason);
   }
 };
 }  // namespace system_commands

@@ -5,6 +5,8 @@
 #include "z_packet_serdes.h"
 #include "z_wire_le.h"
 
+#include <limits>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #include <unordered_set>
@@ -22,6 +24,7 @@ static constexpr u32 kDropAfterSeconds = 5;
 static constexpr mem_size kMaxDispatchPerChannelPerTick = 4096;
 static constexpr auto kIdleSleepDuration = std::chrono::microseconds(10);
 static constexpr auto kRetryScanInterval = std::chrono::milliseconds(10);
+static constexpr auto kCongestionRecoveryInterval = std::chrono::milliseconds(100);
 namespace {
 void SaturatingSub(base::Atomic<mem_size>& value, mem_size delta) {
   mem_size current = value.load(std::memory_order_relaxed);
@@ -31,6 +34,19 @@ void SaturatingSub(base::Atomic<mem_size>& value, mem_size delta) {
       return;
     }
   }
+}
+
+mem_size ScaleLimitByPerMille(mem_size base_limit, mem_size per_mille) {
+  if (base_limit == 0) {
+    return 0;
+  }
+  const u64 scaled =
+      (static_cast<u64>(base_limit) * static_cast<u64>(per_mille)) / 1000u;
+  if (scaled == 0) {
+    return 1;
+  }
+  const u64 max_mem_size = static_cast<u64>(std::numeric_limits<mem_size>::max());
+  return static_cast<mem_size>(scaled > max_mem_size ? max_mem_size : scaled);
 }
 }  // namespace
 
@@ -44,6 +60,8 @@ ZPacketQueue::ZPacketQueue(ZSocket& socket,
       receiver_(socket, peer_list),
       stop_threads_(stop_token),
       rate_limit_config_({}),
+      congestion_control_config_({}),
+      next_congestion_recovery_time_(base::Clock::now() + kCongestionRecoveryInterval),
       rate_limit_window_start_(base::Clock::now()) {
     // Default-construct queues via operator[] (PriorityMPSCQueue is not moveable due to mutex)
     channel_outgoing_queues_[PacketChannelType::Control];
@@ -55,6 +73,8 @@ ZPacketQueue::ZPacketQueue(ZSocket& socket,
     packets_sent_this_second_.store(0, std::memory_order_relaxed);
     bytes_sent_this_second_.store(0, std::memory_order_relaxed);
     burst_tokens_.store(rate_limit_config_.burst_allowance, std::memory_order_relaxed);
+    congestion_scale_per_mille_.store(1000, std::memory_order_relaxed);
+    ack_events_since_adjust_.store(0, std::memory_order_relaxed);
     pending_dispatch_tasks_.store(0, std::memory_order_relaxed);
     dispatcher_.SetAwaitingAckCounters(&awaiting_ack_packet_count_, &awaiting_ack_bytes_);
 }
@@ -76,14 +96,27 @@ void ZPacketQueue::ConfigureDispatchExecutor(ITaskExecutor* executor,
 }
 
 bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
+  const mem_size congestion_scale =
+      congestion_control_config_.enabled
+          ? congestion_scale_per_mille_.load(std::memory_order_relaxed)
+          : 1000;
+  const mem_size max_packets_per_second =
+      ScaleLimitByPerMille(rate_limit_config_.max_packets_per_second,
+                           congestion_scale);
+  const mem_size max_bytes_per_second =
+      ScaleLimitByPerMille(rate_limit_config_.max_bytes_per_second,
+                           congestion_scale);
+  const mem_size burst_allowance =
+      ScaleLimitByPerMille(rate_limit_config_.burst_allowance, congestion_scale);
+
   // Fast path: skip rate limit checks if limits are at defaults (very high).
   // The default is 500K pkts/s and 1 GB/s — for benchmarks this never triggers.
   mem_size current_packets = packets_sent_this_second_.fetch_add(1, std::memory_order_relaxed);
   mem_size current_bytes = bytes_sent_this_second_.fetch_add(payload_bytes, std::memory_order_relaxed);
 
   // Only check clock when approaching the limit (99% of packets skip this).
-  if (current_packets < rate_limit_config_.max_packets_per_second &&
-      current_bytes + payload_bytes <= rate_limit_config_.max_bytes_per_second) {
+  if (current_packets < max_packets_per_second &&
+      current_bytes + payload_bytes <= max_bytes_per_second) {
     return true;
   }
 
@@ -95,18 +128,18 @@ bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
   if (elapsed.count() >= 1) {
     packets_sent_this_second_.store(1, std::memory_order_relaxed);
     bytes_sent_this_second_.store(payload_bytes, std::memory_order_relaxed);
-    burst_tokens_.store(rate_limit_config_.burst_allowance, std::memory_order_relaxed);
+    burst_tokens_.store(burst_allowance, std::memory_order_relaxed);
     rate_limit_window_start_ = now;
     return true;
   }
 
-  if (current_bytes + payload_bytes > rate_limit_config_.max_bytes_per_second) {
+  if (current_bytes + payload_bytes > max_bytes_per_second) {
     SaturatingSub(packets_sent_this_second_, 1);
     SaturatingSub(bytes_sent_this_second_, payload_bytes);
     return false;
   }
 
-  if (current_packets >= rate_limit_config_.max_packets_per_second) {
+  if (current_packets >= max_packets_per_second) {
     mem_size current_burst = burst_tokens_.load(std::memory_order_relaxed);
     while (true) {
       if (current_burst == 0) {
@@ -212,8 +245,8 @@ void ZPacketQueue::ProcessOutgoingPackets() {
     mem_size dispatched = 0;
     dispatched += ProcessChannel(PacketChannelType::Control,
                                  kMaxDispatchPerChannelPerTick);
-    dispatched += ProcessChannel(PacketChannelType::Data,
-                                 kMaxDispatchPerChannelPerTick);
+    dispatched +=
+        ProcessChannel(PacketChannelType::Data, GetDataDispatchBudget());
 
     // Periodically collect garbage from the ack tracking map
     if ((gc_counter_++ % 1000) == 0) {
@@ -227,6 +260,7 @@ void ZPacketQueue::ProcessOutgoingPackets() {
         const u32 packet_age = now - packet.last_send_time;
         // Drop packets that have exceeded retry budget to cap memory growth.
         if (packet_age > kDropAfterSeconds) {
+          OnReliablePacketDrop();
           const mem_size dropped_bytes = packet.heap_data_size;
           awaiting_ack_packets_.remove(seqNum);
           SaturatingSub(awaiting_ack_packet_count_, 1);
@@ -234,12 +268,15 @@ void ZPacketQueue::ProcessOutgoingPackets() {
           continue;
         }
         if (packet_age > kResendIntervalSeconds) {
+          OnReliablePacketRetransmit();
           dispatcher_.RetransmitPacket(crypto_context_, packet, seqNum);
           packet.last_send_time = now;
         }
       }
       next_retry_scan = now_tp + kRetryScanInterval;
     }
+
+    MaybeApplyCongestionRecovery(now_tp);
 
     if (dispatched == 0) {
       // Wait on condvar — Push() calls notify_one() so we wake immediately
@@ -295,6 +332,97 @@ mem_size ZPacketQueue::ProcessChannel(PacketChannelType channel,
   return processed;
 }
 
+mem_size ZPacketQueue::GetDataDispatchBudget() const {
+  if (!congestion_control_config_.enabled) {
+    return kMaxDispatchPerChannelPerTick;
+  }
+  const mem_size scale =
+      congestion_scale_per_mille_.load(std::memory_order_relaxed);
+  const u64 scaled =
+      (static_cast<u64>(kMaxDispatchPerChannelPerTick) * static_cast<u64>(scale)) / 1000u;
+  mem_size budget = static_cast<mem_size>(scaled == 0 ? 1 : scaled);
+  if (budget < congestion_control_config_.min_data_dispatch_per_tick) {
+    budget = congestion_control_config_.min_data_dispatch_per_tick;
+  }
+  if (budget > kMaxDispatchPerChannelPerTick) {
+    budget = kMaxDispatchPerChannelPerTick;
+  }
+  return budget;
+}
+
+void ZPacketQueue::OnReliablePacketAcknowledged() {
+  if (!congestion_control_config_.enabled) {
+    return;
+  }
+  ack_events_since_adjust_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void ZPacketQueue::OnReliablePacketRetransmit() {
+  if (!congestion_control_config_.enabled) {
+    return;
+  }
+  mem_size current = congestion_scale_per_mille_.load(std::memory_order_relaxed);
+  while (true) {
+    const mem_size reduced =
+        (current * congestion_control_config_.retransmit_backoff_per_mille) / 1000;
+    const mem_size clamped =
+        reduced < congestion_control_config_.min_scale_per_mille
+            ? congestion_control_config_.min_scale_per_mille
+            : reduced;
+    if (congestion_scale_per_mille_.compare_exchange_weak(
+            current, clamped, std::memory_order_relaxed)) {
+      break;
+    }
+  }
+}
+
+void ZPacketQueue::OnReliablePacketDrop() {
+  if (!congestion_control_config_.enabled) {
+    return;
+  }
+  mem_size current = congestion_scale_per_mille_.load(std::memory_order_relaxed);
+  while (true) {
+    const mem_size reduced =
+        (current * congestion_control_config_.drop_backoff_per_mille) / 1000;
+    const mem_size clamped =
+        reduced < congestion_control_config_.min_scale_per_mille
+            ? congestion_control_config_.min_scale_per_mille
+            : reduced;
+    if (congestion_scale_per_mille_.compare_exchange_weak(
+            current, clamped, std::memory_order_relaxed)) {
+      break;
+    }
+  }
+}
+
+void ZPacketQueue::MaybeApplyCongestionRecovery(base::Clock::time_point now_tp) {
+  if (!congestion_control_config_.enabled) {
+    return;
+  }
+  if (now_tp < next_congestion_recovery_time_) {
+    return;
+  }
+  const mem_size ack_events =
+      ack_events_since_adjust_.exchange(0, std::memory_order_relaxed);
+  if (ack_events < congestion_control_config_.ack_events_per_window) {
+    next_congestion_recovery_time_ = now_tp + kCongestionRecoveryInterval;
+    return;
+  }
+  mem_size current = congestion_scale_per_mille_.load(std::memory_order_relaxed);
+  while (true) {
+    mem_size raised =
+        current + congestion_control_config_.additive_increase_per_window;
+    if (raised > congestion_control_config_.max_scale_per_mille) {
+      raised = congestion_control_config_.max_scale_per_mille;
+    }
+    if (congestion_scale_per_mille_.compare_exchange_weak(
+            current, raised, std::memory_order_relaxed)) {
+      break;
+    }
+  }
+  next_congestion_recovery_time_ = now_tp + kCongestionRecoveryInterval;
+}
+
 bool ZPacketQueue::ReceiveOne() {
   IncomingPacket pack;
   const auto result = receiver_.ReceivePackets(crypto_context_, pack);
@@ -324,6 +452,7 @@ bool ZPacketQueue::ReceiveOne() {
       if (has_packet && destination_matches) {
         awaiting_ack_packets_.remove(acked_seq);
         SaturatingSub(awaiting_ack_packet_count_, 1);
+        OnReliablePacketAcknowledged();
       }
     }
     return true;
@@ -376,6 +505,7 @@ void ZPacketQueue::ProcessReceiving() {
         if (has_packet && destination_matches) {
           awaiting_ack_packets_.remove(acked_seq);
           SaturatingSub(awaiting_ack_packet_count_, 1);
+          OnReliablePacketAcknowledged();
         }
       }
     } else if (result == PacketReceiver::ReceiveResult::Goodbye) {
@@ -427,6 +557,7 @@ void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
   if (has_acknowledged_packet && destination_matches) {
     awaiting_ack_packets_.remove(ack_number);
     SaturatingSub(awaiting_ack_packet_count_, 1);
+    OnReliablePacketAcknowledged();
   }
 }
 

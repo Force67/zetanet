@@ -18,6 +18,7 @@ namespace tx::network {
 static constexpr char kLogTag[] = "z-client";
 static constexpr auto kClockSyncInterval = std::chrono::milliseconds(1000);
 static constexpr auto kClientHelloRetryInterval = std::chrono::milliseconds(500);
+static constexpr auto kHandshakeTimeout = std::chrono::seconds(8);
 
 bool ZClient::Connect(const base::StringRef address, u16 port) {
   const char* encryption_env = std::getenv("ZNET_ENABLE_ENCRYPTION");
@@ -64,6 +65,11 @@ bool ZClient::Connect(const base::StringRef address, u16 port) {
 
     SendClientHello();
     state_ = State::kConnecting;
+    handshake_phase_ = HandshakePhase::kAwaitingServerHello;
+    handshake_failure_reason_ = HandshakeFailureReason::kNone;
+    negotiated_protocol_version_ = 0;
+    negotiated_feature_flags_ = 0;
+    handshake_start_time_ = base::Clock::now();
     next_clock_sync_request_time_ = base::Clock::time_point{};
     next_client_hello_retry_time_ =
         base::Clock::now() + kClientHelloRetryInterval;
@@ -74,8 +80,16 @@ bool ZClient::Connect(const base::StringRef address, u16 port) {
 void ZClient::Disconnect() {
   ZAsyncTransportLayer::Deinit();
   state_ = State::kDisconnected;
+  if (handshake_phase_ == HandshakePhase::kAwaitingServerHello) {
+    handshake_phase_ = HandshakePhase::kFailed;
+  } else if (handshake_phase_ == HandshakePhase::kConnected) {
+    handshake_phase_ = HandshakePhase::kIdle;
+  }
   next_clock_sync_request_time_ = base::Clock::time_point{};
   next_client_hello_retry_time_ = base::Clock::time_point{};
+  handshake_start_time_ = base::Clock::time_point{};
+  negotiated_protocol_version_ = 0;
+  negotiated_feature_flags_ = 0;
 }
 
 void ZClient::Update() {
@@ -95,6 +109,16 @@ void ZClient::Update() {
       BASE_LOGI(kLogTag, "Disconnected");
       break;
     case ZAsyncTransportLayer::State::kConnecting:
+      {
+        const auto now = base::Clock::now();
+        if (handshake_start_time_.time_since_epoch().count() != 0 &&
+            now - handshake_start_time_ >= kHandshakeTimeout) {
+          MarkHandshakeFailure(HandshakeFailureReason::kTimeout,
+                               "Handshake timed out waiting for ServerHello");
+          Disconnect();
+          break;
+        }
+      }
       if (!packet_queue_.outgoing_thread_running()) {
         const auto now = base::Clock::now();
         if (next_client_hello_retry_time_.time_since_epoch().count() == 0 ||
@@ -106,6 +130,9 @@ void ZClient::Update() {
       break;
     case ZAsyncTransportLayer::State::kConnected:
       if (crypto_context_ && !crypto_context_->IsAuthenticated()) {
+        break;
+      }
+      if ((negotiated_feature_flags_ & system_commands::kFeatureClockSync) == 0) {
         break;
       }
       {
@@ -153,33 +180,72 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
       BASE_LOGI(kLogTag, "Received ServerHello");
       {
         PacketReader reader((byte*)p.data.data(), p.data.size());
-        system_commands::ServerHello response;
-        if (!reader.Read(response)) {
-          BASE_LOGE(kLogTag, "Malformed ServerHello: missing header");
+        system_commands::ServerHello response{};
+        if (!reader.Read(response.protocol_version) ||
+            !reader.Read(response.feature_flags) ||
+            !reader.Read(response.encryption_algo_list_len) ||
+            !reader.Read(response.compression_algo_list_len) ||
+            !reader.Read(response.pub_key_list_len) ||
+            !reader.Read(response.challenge_len) ||
+            !reader.Read(response.proof_len)) {
+          MarkHandshakeFailure(HandshakeFailureReason::kMalformedServerHello,
+                               "Malformed ServerHello: missing header");
+          Disconnect();
           return;
         }
+        if (!IsProtocolVersionSupported(response.protocol_version)) {
+          MarkHandshakeFailure(
+              HandshakeFailureReason::kProtocolVersionMismatch,
+              "ServerHello protocol version is unsupported");
+          Disconnect();
+          return;
+        }
+        const u32 local_features = BuildSupportedFeatureFlags();
+        if ((response.feature_flags & ~local_features) != 0) {
+          MarkHandshakeFailure(
+              HandshakeFailureReason::kFeatureMismatch,
+              "ServerHello negotiated unsupported features");
+          Disconnect();
+          return;
+        }
+        if (crypto_context_ &&
+            (response.feature_flags & system_commands::kFeatureEncryption) == 0) {
+          MarkHandshakeFailure(
+              HandshakeFailureReason::kFeatureMismatch,
+              "Server did not negotiate required encryption feature");
+          Disconnect();
+          return;
+        }
+        negotiated_protocol_version_ = response.protocol_version;
+        negotiated_feature_flags_ = response.feature_flags;
         BASE_LOGI(kLogTag, "ServerHello: enc_algo={}, comp_algo={}",
                   response.encryption_algo_list_len, response.compression_algo_list_len);
 
         base::Vector<byte> encryption_algorithms(
             response.encryption_algo_list_len);
         if (!reader.ReadS(encryption_algorithms)) {
-          BASE_LOGE(kLogTag,
-                    "Malformed ServerHello: invalid encryption algorithm list");
+          MarkHandshakeFailure(
+              HandshakeFailureReason::kMalformedServerHello,
+              "Malformed ServerHello: invalid encryption algorithm list");
+          Disconnect();
           return;
         }
 
         base::Vector<byte> compression_algorithms(
             response.compression_algo_list_len);
         if (!reader.ReadS(compression_algorithms)) {
-          BASE_LOGE(kLogTag,
-                    "Malformed ServerHello: invalid compression algorithm list");
+          MarkHandshakeFailure(
+              HandshakeFailureReason::kMalformedServerHello,
+              "Malformed ServerHello: invalid compression algorithm list");
+          Disconnect();
           return;
         }
 
         base::Vector<byte> key;
         if (!reader.ReadList(key)) {
-          BASE_LOGE(kLogTag, "Malformed ServerHello: invalid public key list");
+          MarkHandshakeFailure(HandshakeFailureReason::kMalformedServerHello,
+                               "Malformed ServerHello: invalid public key list");
+          Disconnect();
           return;
         }
         
@@ -187,7 +253,9 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
         if (response.challenge_len > 0) {
           base::Vector<byte> temp_challenge;
           if (!reader.ReadList(temp_challenge)) {
-            BASE_LOGE(kLogTag, "Malformed ServerHello: missing server challenge");
+            MarkHandshakeFailure(HandshakeFailureReason::kMalformedServerHello,
+                                 "Malformed ServerHello: missing server challenge");
+            Disconnect();
             return;
           }
           server_challenge.assign(reinterpret_cast<const char*>(temp_challenge.data()), 
@@ -198,7 +266,9 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
         if (response.proof_len > 0) {
           base::Vector<byte> temp_proof;
           if (!reader.ReadList(temp_proof)) {
-            BASE_LOGE(kLogTag, "Malformed ServerHello: missing server proof");
+            MarkHandshakeFailure(HandshakeFailureReason::kMalformedServerHello,
+                                 "Malformed ServerHello: missing server proof");
+            Disconnect();
             return;
           }
           server_proof.assign(reinterpret_cast<const char*>(temp_proof.data()), 
@@ -212,7 +282,8 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
           
           if (!server_proof.empty()) {
             if (!crypto_context_->VerifyServerResponse(server_proof)) {
-              BASE_LOGE(kLogTag, "Server authentication failed!");
+              MarkHandshakeFailure(HandshakeFailureReason::kAuthenticationFailed,
+                                   "Server authentication failed");
               Disconnect();
               return;
             }
@@ -234,8 +305,41 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
         }
 
         state_ = State::kConnected;
+        handshake_phase_ = HandshakePhase::kConnected;
         next_client_hello_retry_time_ = base::Clock::time_point{};
+        handshake_start_time_ = base::Clock::time_point{};
       }
+      break;
+    }
+    case PacketType::ServerGoodbye: {
+      PacketReader reader((byte*)p.data.data(), p.data.size());
+      system_commands::ServerGoodbye goodbye{.reason =
+                                                 system_commands::HandshakeRejectReason::None};
+      if (!reader.Read(goodbye.reason)) {
+        MarkHandshakeFailure(HandshakeFailureReason::kServerRejected,
+                             "Received malformed ServerGoodbye");
+      } else {
+        BASE_LOGE(kLogTag, "Server rejected handshake with reason={}",
+                  static_cast<u32>(goodbye.reason));
+        if (goodbye.reason ==
+            system_commands::HandshakeRejectReason::ProtocolVersionMismatch) {
+          handshake_failure_reason_ =
+              HandshakeFailureReason::kProtocolVersionMismatch;
+        } else if (goodbye.reason ==
+                   system_commands::HandshakeRejectReason::FeatureMismatch) {
+          handshake_failure_reason_ = HandshakeFailureReason::kFeatureMismatch;
+        } else if (goodbye.reason ==
+                   system_commands::HandshakeRejectReason::AuthenticationFailed) {
+          handshake_failure_reason_ =
+              HandshakeFailureReason::kAuthenticationFailed;
+        } else if (goodbye.reason == system_commands::HandshakeRejectReason::Timeout) {
+          handshake_failure_reason_ = HandshakeFailureReason::kTimeout;
+        } else {
+          handshake_failure_reason_ = HandshakeFailureReason::kServerRejected;
+        }
+      }
+      handshake_phase_ = HandshakePhase::kFailed;
+      Disconnect();
       break;
     }
     case PacketType::ClockSyncResponse: {
@@ -283,12 +387,14 @@ void ZClient::SendClientHello() {
   }
 
   system_commands::ClientHello request{
+      .protocol_version = system_commands::kProtocolVersionCurrent,
+      .feature_flags = BuildSupportedFeatureFlags(),
       .encryption_algo_list_len = (u8)_countof(encryption_algorithms),
       .compression_algo_list_len = (u8)_countof(compression_algorithms),
       .pub_key_list_len = pub_key_list_len,
       .challenge_len = static_cast<u8>(client_challenge.size())};
   PacketWriter writer;
-  writer.Put(request);
+  system_commands::ClientHello::Build(writer, request);
   for (int i = 0; i < request.encryption_algo_list_len; i++) {
     writer.Put((u8)encryption_algorithms[i]);
   }
@@ -336,12 +442,14 @@ void ZClient::SendClientHelloDirect() {
   }
 
   system_commands::ClientHello request{
+      .protocol_version = system_commands::kProtocolVersionCurrent,
+      .feature_flags = BuildSupportedFeatureFlags(),
       .encryption_algo_list_len = (u8)_countof(encryption_algorithms),
       .compression_algo_list_len = (u8)_countof(compression_algorithms),
       .pub_key_list_len = pub_key_list_len,
       .challenge_len = static_cast<u8>(client_challenge.size())};
   PacketWriter writer;
-  writer.Put(request);
+  system_commands::ClientHello::Build(writer, request);
   for (int i = 0; i < request.encryption_algo_list_len; i++) {
     writer.Put((u8)encryption_algorithms[i]);
   }
@@ -393,6 +501,9 @@ void ZClient::SendClockSyncRequest() {
   if (state_ != State::kConnected) {
     return;
   }
+  if ((negotiated_feature_flags_ & system_commands::kFeatureClockSync) == 0) {
+    return;
+  }
   if (crypto_context_ && !crypto_context_->IsAuthenticated()) {
     return;
   }
@@ -411,5 +522,31 @@ void ZClient::SendClockSyncRequest() {
   OutgoingPacket out(ZPeerId::to_server, PacketType::ClockSyncRequest,
                      PacketChannelType::Control, flags, writer.data());
   Push(std::move(out));
+}
+
+u32 ZClient::BuildSupportedFeatureFlags() const {
+  u32 flags = system_commands::kFeatureClockSync |
+              system_commands::kFeatureAdaptiveCongestion;
+  if (compression_enabled()) {
+    flags |= system_commands::kFeatureCompression;
+  }
+  if (crypto_context_) {
+    flags |= system_commands::kFeatureEncryption;
+  }
+  return flags;
+}
+
+bool ZClient::IsProtocolVersionSupported(u16 version) const {
+  return version >= system_commands::kProtocolVersionMinSupported &&
+         version <= system_commands::kProtocolVersionCurrent;
+}
+
+void ZClient::MarkHandshakeFailure(HandshakeFailureReason reason,
+                                   const char* message) {
+  handshake_phase_ = HandshakePhase::kFailed;
+  handshake_failure_reason_ = reason;
+  if (message) {
+    BASE_LOGE(kLogTag, "{}", message);
+  }
 }
 }  // namespace tx::network
