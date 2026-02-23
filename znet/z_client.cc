@@ -25,16 +25,27 @@ bool ZClient::Connect(const base::StringRef address, u16 port) {
   const bool use_encryption = encryption_env && encryption_env[0] != '0';
   const char* compression_env = std::getenv("ZNET_ENABLE_COMPRESSION");
   const bool use_compression = compression_env && compression_env[0] != '0';
-  const ZAsyncTransportLayer::InitOptions options{
+  const ConnectionOptions options{
+      .use_encryption = use_encryption,
+      .use_compression = use_compression,
+      .allow_ipv6 = false,
+      .start_threads = false};
+  return Connect(address, port, options);
+}
+
+bool ZClient::Connect(const base::StringRef address,
+                      u16 port,
+                      const ConnectionOptions& options) {
+  const ZAsyncTransportLayer::InitOptions init_options{
       .ip = address,
       .port = port,
       .local_bind_port = 0,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kClient,
-      .use_encryption = use_encryption,
-      .use_compression = use_compression,
-      .allow_ipv6 = false,
-      .start_threads = false};  // Adaptive: threads start lazily
-  bool result = ZAsyncTransportLayer::Init(options);
+      .use_encryption = options.use_encryption,
+      .use_compression = options.use_compression,
+      .allow_ipv6 = options.allow_ipv6,
+      .start_threads = options.start_threads};
+  bool result = ZAsyncTransportLayer::Init(init_options);
   if (result) {
     const char* asymmetry_env = std::getenv("ZNET_CLOCK_ASYMMETRY_COMP_MS");
     if (asymmetry_env && asymmetry_env[0] != '\0') {

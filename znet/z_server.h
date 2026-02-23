@@ -21,7 +21,15 @@ namespace tx::network {
 
 class ZNET_API ZServer final : public ZAsyncTransportLayer {
  public:
+  struct StartOptions {
+    bool use_encryption{false};
+    bool use_compression{false};
+    bool allow_ipv6{false};
+    bool start_threads{false};
+  };
+
   bool Begin(u16 port);
+  bool Begin(u16 port, const StartOptions& options);
 
   bool Update();
   void SendMessage(ZPeerId id, const base::String& data);

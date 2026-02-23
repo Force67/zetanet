@@ -16,10 +16,22 @@ namespace tx::network {
 
 class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
  public:
+  struct StartOptions {
+    bool use_encryption{false};
+    bool use_compression{false};
+    bool allow_ipv6{false};
+    bool start_threads{true};
+  };
+
   enum class Type { Host, Client };
 
   bool Begin(u16 port);
+  bool Begin(u16 port, const StartOptions& options);
   bool Connect(const base::StringRef host_ip, u16 host_port, u16 local_port);
+  bool Connect(const base::StringRef host_ip,
+               u16 host_port,
+               u16 local_port,
+               const StartOptions& options);
 
   bool Update();
   bool Poll(PacketChannelType channel, IncomingPacket& packet);
@@ -88,6 +100,7 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
   static constexpr u8 kControlVersion = 1;
 
   Type type_{Type::Host};
+  StartOptions start_options_{};
   u16 local_port_{0};
   base::String advertised_ip_{"127.0.0.1"};
   ZSocket::Address host_endpoint_{};

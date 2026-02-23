@@ -17,16 +17,24 @@ constexpr u32 kMaxPunchProbeAttempts = 12;
 constexpr auto kPeerKeepAliveInterval = std::chrono::seconds(10);
 constexpr auto kHostKeepAliveInterval = std::chrono::seconds(2);
 
-bool AddressFromString(const base::StringRef ip, u16 port, ZSocket::Address& out) {
-  return ZSocket::ResolveAddress(ip, port, /*ipv6=*/false, out);
+bool AddressFromString(const base::StringRef ip,
+                       u16 port,
+                       bool ipv6,
+                       ZSocket::Address& out) {
+  return ZSocket::ResolveAddress(ip, port, ipv6, out);
 }
 }  // namespace
 
 bool ZP2PNode::Begin(u16 port) {
+  return Begin(port, StartOptions{});
+}
+
+bool ZP2PNode::Begin(u16 port, const StartOptions& options) {
   if (port == 0) {
     BASE_LOGE(kLogTag, "Begin() requires a non-zero port");
     return false;
   }
+  start_options_ = options;
   local_port_ = port;
   has_public_endpoint_ = false;
   std::memset(&public_endpoint_, 0, sizeof(public_endpoint_));
@@ -36,10 +44,18 @@ bool ZP2PNode::Begin(u16 port) {
 bool ZP2PNode::Connect(const base::StringRef host_ip,
                        u16 host_port,
                        u16 local_port) {
+  return Connect(host_ip, host_port, local_port, StartOptions{});
+}
+
+bool ZP2PNode::Connect(const base::StringRef host_ip,
+                       u16 host_port,
+                       u16 local_port,
+                       const StartOptions& options) {
   if (host_port == 0 || local_port == 0) {
     BASE_LOGE(kLogTag, "Connect() requires non-zero host_port/local_port");
     return false;
   }
+  start_options_ = options;
   local_port_ = local_port;
   if (!InitAsClient(host_ip, host_port, local_port_)) {
     return false;
@@ -115,9 +131,10 @@ bool ZP2PNode::InitAsHost(u16 port) {
       .port = port,
       .local_bind_port = 0,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kServer,
-      .use_encryption = false,
-      .use_compression = false,
-      .allow_ipv6 = false};
+      .use_encryption = start_options_.use_encryption,
+      .use_compression = start_options_.use_compression,
+      .allow_ipv6 = start_options_.allow_ipv6,
+      .start_threads = start_options_.start_threads};
   if (!ZAsyncTransportLayer::Init(options)) {
     return false;
   }
@@ -127,7 +144,7 @@ bool ZP2PNode::InitAsHost(u16 port) {
     endpoint = public_endpoint_;
   } else if (!AddressFromString(
                  base::StringRef(advertised_ip_.data(), advertised_ip_.size()),
-                 port, endpoint)) {
+                 port, start_options_.allow_ipv6, endpoint)) {
     BASE_LOGE(kLogTag, "Failed to build host endpoint");
     Deinit();
     return false;
@@ -161,15 +178,16 @@ bool ZP2PNode::InitAsClient(const base::StringRef host_ip,
       .port = host_port,
       .local_bind_port = local_port,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kClient,
-      .use_encryption = false,
-      .use_compression = false,
-      .allow_ipv6 = false};
+      .use_encryption = start_options_.use_encryption,
+      .use_compression = start_options_.use_compression,
+      .allow_ipv6 = start_options_.allow_ipv6,
+      .start_threads = start_options_.start_threads};
   if (!ZAsyncTransportLayer::Init(options)) {
     return false;
   }
 
   ZSocket::Address endpoint{};
-  if (!AddressFromString(host_ip, host_port, endpoint)) {
+  if (!AddressFromString(host_ip, host_port, start_options_.allow_ipv6, endpoint)) {
     BASE_LOGE(kLogTag, "Failed to store host endpoint");
     Deinit();
     return false;
@@ -204,7 +222,7 @@ bool ZP2PNode::PromoteToHost(bool announce_transition) {
       new_host = public_endpoint_;
     } else if (!AddressFromString(
                    base::StringRef(advertised_ip_.data(), advertised_ip_.size()),
-                   local_port_, new_host)) {
+                   local_port_, start_options_.allow_ipv6, new_host)) {
       BASE_LOGE(kLogTag, "Failed to create transition host endpoint");
       return false;
     }

@@ -41,16 +41,25 @@ bool ZServer::Begin(u16 port) {
   const bool use_encryption = encryption_env && encryption_env[0] != '0';
   const char* compression_env = std::getenv("ZNET_ENABLE_COMPRESSION");
   const bool use_compression = compression_env && compression_env[0] != '0';
-  const ZAsyncTransportLayer::InitOptions options{
+  const StartOptions options{
+      .use_encryption = use_encryption,
+      .use_compression = use_compression,
+      .allow_ipv6 = false,
+      .start_threads = false};
+  return Begin(port, options);
+}
+
+bool ZServer::Begin(u16 port, const StartOptions& options) {
+  const ZAsyncTransportLayer::InitOptions init_options{
       .ip = kSelfAddress,
       .port = port,
       .local_bind_port = 0,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kServer,
-      .use_encryption = use_encryption,
-      .use_compression = use_compression,
-      .allow_ipv6 = false,
-      .start_threads = false};  // Adaptive: threads start lazily
-  bool result = ZAsyncTransportLayer::Init(options);
+      .use_encryption = options.use_encryption,
+      .use_compression = options.use_compression,
+      .allow_ipv6 = options.allow_ipv6,
+      .start_threads = options.start_threads};
+  bool result = ZAsyncTransportLayer::Init(init_options);
   if (!result) {
     BASE_LOGE(kLogTag, "Failed to initialize ZAsyncTransportLayer");
     return false;

@@ -20,6 +20,13 @@ namespace tx::network {
 
 class ZNET_API ZClient final : public ZAsyncTransportLayer {
  public:
+  struct ConnectionOptions {
+    bool use_encryption{false};
+    bool use_compression{false};
+    bool allow_ipv6{false};
+    bool start_threads{false};
+  };
+
   enum class HandshakePhase : u8 {
     kIdle = 0,
     kAwaitingServerHello,
@@ -38,6 +45,9 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
   };
 
   bool Connect(const base::StringRef address, u16 port);
+  bool Connect(const base::StringRef address,
+               u16 port,
+               const ConnectionOptions& options);
   void Disconnect();
   void Update();
   void SendMessage(const ZPeerId, const base::String& data);
