@@ -4,7 +4,6 @@
 #include "z_crypto_wrapper.h"
 
 #include <cstring>
-#include <cstdlib>
 
 #if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
 #include <mbedtls/ctr_drbg.h>
@@ -116,6 +115,16 @@ bool RandomBytes(byte* out, mem_size size) {
 
 ZCryptoContext::ZCryptoContext() = default;
 ZCryptoContext::~ZCryptoContext() = default;
+
+void ZCryptoContext::SetPreSharedKey(const base::StringRef& secret) {
+  if (secret.empty()) {
+    pre_shared_key_.clear();
+  } else {
+    pre_shared_key_.assign(secret.data(), secret.size());
+  }
+  keys_initialized_ = false;
+  authenticated_ = false;
+}
 
 bool ZCryptoContext::InitializeKeyExchange() {
   if (keys_initialized_) {
@@ -543,17 +552,16 @@ bool ZCryptoContext::EnsureKeyMaterialReady() {
     return true;
   }
 
-  const char* psk_env = std::getenv("ZNET_PSK");
-  if (!psk_env || psk_env[0] == '\0') {
-    BASE_LOGE(kLogTag, "ZNET_PSK is required when encryption is enabled");
+  if (pre_shared_key_.empty()) {
+    BASE_LOGE(kLogTag,
+              "A pre-shared key is required when encryption is enabled");
     return false;
   }
-  const base::String secret(psk_env);
-  if (secret.size() < 16) {
-    BASE_LOGE(kLogTag, "ZNET_PSK must be at least 16 characters");
+  if (pre_shared_key_.size() < 16) {
+    BASE_LOGE(kLogTag, "Pre-shared key must be at least 16 characters");
     return false;
   }
-  if (!DeriveKeyMaterial(secret)) {
+  if (!DeriveKeyMaterial(pre_shared_key_)) {
     BASE_LOGE(kLogTag, "Failed to derive encryption and auth key material");
     return false;
   }

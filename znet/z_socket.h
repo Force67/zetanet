@@ -7,8 +7,11 @@
 #else
 #include <base/arch.h>
 #include <base/containers/span.h>
+#include <base/containers/vector.h>
 #include <base/strings/string_ref.h>
 #endif
+
+#include <mutex>
 
 // Platform-specific socket includes and typedefs
 #if defined(_WIN32)
@@ -46,6 +49,13 @@ class ZSocket {
                     bool ipv6 = false,
                     u16 local_bind_port = 0);
 
+  struct ChaosOptions {
+    u32 drop_percent{0};
+    u32 reorder_percent{0};
+    u32 jitter_ms{0};
+    u32 seed{1};
+  };
+
   struct Address {
     char ip[46]{};  // INET6_ADDRSTRLEN
     u16 port{};
@@ -80,6 +90,7 @@ class ZSocket {
   // Fast path: uses pre-cached sockaddr from Address (no inet_pton).
   i32 SendCached(const Address& addr, const base::Span<byte> data);
   i32 Receive(Address& sender, char* buffer, mem_size length);
+  void SetChaosOptions(const ChaosOptions& options);
 
   // Send to server sock addr
   i32 SendtoServer(const base::Span<byte> data) {
@@ -125,5 +136,12 @@ class ZSocket {
   sockaddr_storage server_{};
   socklen_t server_len_{0};
   int address_family_{AF_INET};
+  ChaosOptions chaos_options_{};
+  std::mutex chaos_mutex_;
+  bool chaos_pending_{false};
+  sockaddr_storage chaos_pending_target_{};
+  socklen_t chaos_pending_len_{0};
+  base::Vector<byte> chaos_pending_bytes_{};
+  u32 chaos_rng_state_{0};
 };
 }  // namespace tx::network

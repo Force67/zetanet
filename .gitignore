@@ -33,3 +33,8 @@ ntloader/ntloader.vcxproj.user
 /samples/allocator_bench/obj
 /samples/p2p_smoke/obj
 /samples/handshake_integration/obj
+
+# Premake-generated GNU Makefiles
+/Makefile
+/vendor/Makefile
+/samples/*/Makefile

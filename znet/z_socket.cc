@@ -9,6 +9,9 @@
 #include <base/logging.h>
 #endif
 
+#include <chrono>
+#include <thread>
+
 namespace tx::network {
 static constexpr char kLogTag[] = "z-socket";
 
@@ -113,6 +116,23 @@ bool ResolveSockaddr(const base::StringRef host,
   ::WSACleanup();
 #endif
   return success;
+}
+
+u32 NextRandom(u32& state) {
+  state ^= state << 13;
+  state ^= state >> 17;
+  state ^= state << 5;
+  if (state == 0) {
+    state = 1;
+  }
+  return state;
+}
+
+bool RollPercent(u32 percentage, u32& state) {
+  if (percentage == 0) {
+    return false;
+  }
+  return (NextRandom(state) % 100u) < percentage;
 }
 }  // namespace
 
@@ -371,10 +391,84 @@ i32 ZSocket::InternalSend(sockaddr_storage& target, socklen_t addr_len,
                           const base::Span<byte> data) {
   if (socket_ == ZNET_INVALID_SOCKET)
     return -1;
-  return ::sendto(socket_, reinterpret_cast<const char*>(data.data()),
-                  static_cast<int>(data.size()), 0,
-                  reinterpret_cast<struct sockaddr*>(&target),
-                  addr_len);
+
+  const auto send_direct = [&](sockaddr_storage& out_target,
+                               socklen_t out_len,
+                               const byte* bytes,
+                               mem_size size) -> i32 {
+    return ::sendto(socket_, reinterpret_cast<const char*>(bytes),
+                    static_cast<int>(size), 0,
+                    reinterpret_cast<struct sockaddr*>(&out_target), out_len);
+  };
+
+  const bool chaos_enabled = chaos_options_.drop_percent > 0 ||
+                             chaos_options_.reorder_percent > 0 ||
+                             chaos_options_.jitter_ms > 0;
+  if (!chaos_enabled) {
+    return send_direct(target, addr_len, data.data(), data.size());
+  }
+
+  std::lock_guard<std::mutex> lock(chaos_mutex_);
+  if (chaos_rng_state_ == 0) {
+    chaos_rng_state_ = chaos_options_.seed != 0 ? chaos_options_.seed : 1;
+  }
+
+  const auto send_with_chaos = [&](sockaddr_storage& out_target,
+                                   socklen_t out_len,
+                                   const byte* bytes,
+                                   mem_size size) -> i32 {
+    if (RollPercent(chaos_options_.drop_percent, chaos_rng_state_)) {
+      return static_cast<i32>(size);
+    }
+    if (chaos_options_.jitter_ms > 0) {
+      const u32 delay = NextRandom(chaos_rng_state_) %
+                        (chaos_options_.jitter_ms + 1u);
+      if (delay > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+      }
+    }
+    return send_direct(out_target, out_len, bytes, size);
+  };
+
+  if (chaos_pending_) {
+    i32 current_result =
+        send_with_chaos(target, addr_len, data.data(), data.size());
+    if (!chaos_pending_bytes_.empty()) {
+      send_with_chaos(chaos_pending_target_, chaos_pending_len_,
+                      chaos_pending_bytes_.data(), chaos_pending_bytes_.size());
+    }
+    chaos_pending_ = false;
+    chaos_pending_bytes_.clear();
+    return current_result;
+  }
+
+  if (data.size() > 0 &&
+      RollPercent(chaos_options_.reorder_percent, chaos_rng_state_)) {
+    chaos_pending_ = true;
+    chaos_pending_target_ = target;
+    chaos_pending_len_ = addr_len;
+    chaos_pending_bytes_.assign(data.data(), data.data() + data.size());
+    return static_cast<i32>(data.size());
+  }
+
+  return send_with_chaos(target, addr_len, data.data(), data.size());
+}
+
+void ZSocket::SetChaosOptions(const ChaosOptions& options) {
+  std::lock_guard<std::mutex> lock(chaos_mutex_);
+  chaos_options_ = options;
+  if (chaos_options_.drop_percent > 100) {
+    chaos_options_.drop_percent = 100;
+  }
+  if (chaos_options_.reorder_percent > 100) {
+    chaos_options_.reorder_percent = 100;
+  }
+  if (chaos_options_.seed == 0) {
+    chaos_options_.seed = 1;
+  }
+  chaos_pending_ = false;
+  chaos_pending_bytes_.clear();
+  chaos_rng_state_ = chaos_options_.seed;
 }
 
 i32 ZSocket::Receive(Address& sender, char* buffer, mem_size length) {

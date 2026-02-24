@@ -25,6 +25,7 @@ class ZCryptoContext {
   ZCryptoContext();
   ~ZCryptoContext();
 
+  void SetPreSharedKey(const base::StringRef& secret);
   bool InitializeKeyExchange();
 
   base::String GetPublicKey() const;
@@ -62,6 +63,7 @@ class ZCryptoContext {
   base::String server_challenge_;
   std::atomic<u32> nonce_prefix_{0};
   std::atomic<u64> nonce_counter_{0};
+  base::String pre_shared_key_{};
 };
 
 }  // namespace tx::network

@@ -16,6 +16,7 @@
 #endif
 
 #include <array>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -34,6 +35,13 @@ struct ZNetContext {
   base::UniquePointer<tx::network::ZFileTransporter> file_transporter{};
   base::Vector<byte> packet_payload_scratch{};
   base::String last_error{};
+  base::Queue<ZNetPeerEvent> peer_events{};
+  void* peer_event_user_pointer{nullptr};
+  ZNetPeerEventHandler peer_event_handler{nullptr};
+  ZNetConnectionState last_connection_state{ZNET_STATE_DISCONNECTED};
+  bool last_connection_state_valid{false};
+  bool seen_connected_once{false};
+  uint8_t last_emitted_handshake_failure{ZNET_HANDSHAKE_FAILURE_NONE};
 };
 
 namespace {
@@ -50,6 +58,9 @@ using tx::network::ZFileTransporter;
 using tx::network::ZP2PNode;
 using tx::network::ZPeerId;
 using tx::network::ZServer;
+
+ZAsyncTransportLayer* ActiveTransport(ZNetContext* context);
+const ZAsyncTransportLayer* ActiveTransport(const ZNetContext* context);
 
 base::StringRef MakeStringRef(const char* text) {
   if (!text) {
@@ -90,6 +101,125 @@ PacketPriority ToPriority(u8 priority) {
     default:
       return PacketPriority::Medium;
   }
+}
+
+void DispatchPeerEvent(ZNetContext* context, const ZNetPeerEvent& event) {
+  if (!context) {
+    return;
+  }
+  context->peer_events.push(event);
+  if (context->peer_event_handler) {
+    context->peer_event_handler(context->peer_event_user_pointer, &event);
+  }
+}
+
+void EmitPeerEvent(ZNetContext* context,
+                   ZNetPeerEventType type,
+                   u32 peer_id,
+                   u32 detail = 0) {
+  ZNetPeerEvent event{};
+  event.type = static_cast<u8>(type);
+  event.peer_id = peer_id;
+  event.detail = detail;
+  DispatchPeerEvent(context, event);
+}
+
+void DrainP2PPeerEvents(ZNetContext* context) {
+  if (!context || context->role != ContextRole::kP2P || !context->p2p) {
+    return;
+  }
+  ZP2PNode::PeerEvent event{};
+  while (context->p2p->PollPeerEvent(event)) {
+    ZNetPeerEventType type = ZNET_PEER_EVENT_NONE;
+    switch (event.type) {
+      case ZP2PNode::PeerEventType::PeerJoined:
+        type = ZNET_PEER_EVENT_PEER_JOINED;
+        break;
+      case ZP2PNode::PeerEventType::PeerLeft:
+        type = ZNET_PEER_EVENT_PEER_LEFT;
+        break;
+      case ZP2PNode::PeerEventType::RelayFallback:
+        type = ZNET_PEER_EVENT_RELAY_FALLBACK;
+        break;
+      case ZP2PNode::PeerEventType::Reconnected:
+        type = ZNET_PEER_EVENT_RECONNECTED;
+        break;
+      case ZP2PNode::PeerEventType::ConnectionFailure:
+        type = ZNET_PEER_EVENT_FAILURE;
+        break;
+    }
+    if (type != ZNET_PEER_EVENT_NONE) {
+      EmitPeerEvent(context, type, event.peer_id, event.detail);
+    }
+  }
+}
+
+void EmitConnectionStateTransitionEvents(ZNetContext* context) {
+  const ZAsyncTransportLayer* transport = ActiveTransport(context);
+  const ZNetConnectionState current_state =
+      transport ? ToPublicState(transport->state()) : ZNET_STATE_DISCONNECTED;
+  if (!context->last_connection_state_valid) {
+    context->last_connection_state = current_state;
+    context->last_connection_state_valid = true;
+    return;
+  }
+
+  const ZNetConnectionState previous = context->last_connection_state;
+  if (previous == current_state) {
+    return;
+  }
+
+  if (current_state == ZNET_STATE_CONNECTED) {
+    const ZNetPeerEventType type =
+        context->seen_connected_once ? ZNET_PEER_EVENT_RECONNECTED
+                                     : ZNET_PEER_EVENT_CONNECTION_ESTABLISHED;
+    EmitPeerEvent(context, type, 0, 0);
+    context->seen_connected_once = true;
+  } else if (previous == ZNET_STATE_CONNECTED &&
+             (current_state == ZNET_STATE_CONNECTING ||
+              current_state == ZNET_STATE_DISCONNECTING)) {
+    EmitPeerEvent(context, ZNET_PEER_EVENT_RECONNECTING, 0, 0);
+  } else if (previous == ZNET_STATE_CONNECTED &&
+             current_state == ZNET_STATE_DISCONNECTED) {
+    EmitPeerEvent(context, ZNET_PEER_EVENT_CONNECTION_LOST, 0, 0);
+  }
+  context->last_connection_state = current_state;
+}
+
+void EmitHandshakeFailureEvent(ZNetContext* context) {
+  if (!context || context->role != ContextRole::kClient || !context->client) {
+    return;
+  }
+  const auto phase = context->client->handshake_phase();
+  if (phase != ZClient::HandshakePhase::kFailed) {
+    return;
+  }
+  const uint8_t reason =
+      static_cast<uint8_t>(context->client->handshake_failure_reason());
+  if (reason == ZNET_HANDSHAKE_FAILURE_NONE ||
+      reason == context->last_emitted_handshake_failure) {
+    return;
+  }
+  context->last_emitted_handshake_failure = reason;
+  EmitPeerEvent(context, ZNET_PEER_EVENT_FAILURE, 0, reason);
+}
+
+void DrainRuntimeEvents(ZNetContext* context) {
+  EmitConnectionStateTransitionEvents(context);
+  EmitHandshakeFailureEvent(context);
+  DrainP2PPeerEvents(context);
+}
+
+void WriteCappedFileName(char* output, const base::String& file_name) {
+  if (!output) {
+    return;
+  }
+  const size_t copy_size =
+      std::min<size_t>(ZNET_MAX_FILE_NAME_LENGTH, file_name.size());
+  if (copy_size > 0) {
+    std::memcpy(output, file_name.data(), copy_size);
+  }
+  output[copy_size] = '\0';
 }
 
 void SetLastError(ZNetContext* context, const char* message) {
@@ -150,6 +280,7 @@ const ZAsyncTransportLayer* ActiveTransport(const ZNetContext* context) {
 void CopyDefaultTransportConfig(ZNetTransportConfig& config) {
   std::memset(&config, 0, sizeof(config));
   config.use_encryption = 0;
+  config.pre_shared_key = nullptr;
   config.use_compression = 0;
   config.allow_ipv6 = 0;
   config.start_threads = 0;
@@ -161,6 +292,10 @@ void CopyDefaultTransportConfig(ZNetTransportConfig& config) {
   config.thread_scaling_tiers[1] = {64, 2};
   config.thread_scaling_tiers[2] = {128, 4};
   config.clock_asymmetry_compensation_ms = 0;
+  config.chaos.drop_percent = 0;
+  config.chaos.reorder_percent = 0;
+  config.chaos.jitter_ms = 0;
+  config.chaos.seed = 1;
 }
 
 void ApplyTransportConfig(const ZNetTransportConfig& config,
@@ -203,6 +338,13 @@ ZNetResult StopAndResetContext(ZNetContext* context) {
   context->p2p.Reset();
   context->role = ContextRole::kNone;
   context->packet_payload_scratch.clear();
+  while (!context->peer_events.empty()) {
+    context->peer_events.pop();
+  }
+  context->last_connection_state = ZNET_STATE_DISCONNECTED;
+  context->last_connection_state_valid = false;
+  context->seen_connected_once = false;
+  context->last_emitted_handshake_failure = ZNET_HANDSHAKE_FAILURE_NONE;
   return ZNET_RESULT_OK;
 }
 
@@ -300,6 +442,28 @@ void ZNetSetLogHandler(void* user_pointer, ZNetLogHandler callback) {
 #endif
 }
 
+void ZNetSetPeerEventHandler(ZNetContext* context,
+                             void* user_pointer,
+                             ZNetPeerEventHandler callback) {
+  if (!context) {
+    return;
+  }
+  context->peer_event_user_pointer = user_pointer;
+  context->peer_event_handler = callback;
+}
+
+ZNetResult ZNetPollPeerEvent(ZNetContext* context, ZNetPeerEvent* out_event) {
+  if (!context || !out_event) {
+    return ZNET_RESULT_INVALID_ARGUMENT;
+  }
+  if (context->peer_events.empty()) {
+    return ZNET_RESULT_NOT_READY;
+  }
+  *out_event = context->peer_events.front();
+  context->peer_events.pop();
+  return ZNET_RESULT_OK;
+}
+
 void ZNetGetDefaultTransportConfig(ZNetTransportConfig* out_config) {
   if (!out_config) {
     return;
@@ -382,9 +546,15 @@ ZNetResult ZNetStartClient(ZNetContext* context,
 
   const ZClient::ConnectionOptions options{
       .use_encryption = cfg.use_encryption != 0,
+      .pre_shared_key = MakeStringRef(cfg.pre_shared_key),
       .use_compression = cfg.use_compression != 0,
       .allow_ipv6 = cfg.allow_ipv6 != 0,
-      .start_threads = cfg.start_threads != 0};
+      .start_threads = cfg.start_threads != 0,
+      .chaos =
+          {.drop_percent = cfg.chaos.drop_percent,
+           .reorder_percent = cfg.chaos.reorder_percent,
+           .jitter_ms = cfg.chaos.jitter_ms,
+           .seed = cfg.chaos.seed}};
   if (!context->client->Connect(MakeStringRef(address), port, options)) {
     context->client.Reset();
     return ReturnError(context, ZNET_RESULT_IO_ERROR, "Failed to start client");
@@ -393,6 +563,10 @@ ZNetResult ZNetStartClient(ZNetContext* context,
   context->role = ContextRole::kClient;
   context->client->SetClockAsymmetryCompensationMs(
       cfg.clock_asymmetry_compensation_ms);
+  context->last_connection_state = ZNET_STATE_DISCONNECTED;
+  context->last_connection_state_valid = true;
+  context->seen_connected_once = false;
+  context->last_emitted_handshake_failure = ZNET_HANDSHAKE_FAILURE_NONE;
   ClearLastError(context);
   return ZNET_RESULT_OK;
 }
@@ -417,9 +591,15 @@ ZNetResult ZNetStartServer(ZNetContext* context,
 
   const ZServer::StartOptions options{
       .use_encryption = cfg.use_encryption != 0,
+      .pre_shared_key = MakeStringRef(cfg.pre_shared_key),
       .use_compression = cfg.use_compression != 0,
       .allow_ipv6 = cfg.allow_ipv6 != 0,
-      .start_threads = cfg.start_threads != 0};
+      .start_threads = cfg.start_threads != 0,
+      .chaos =
+          {.drop_percent = cfg.chaos.drop_percent,
+           .reorder_percent = cfg.chaos.reorder_percent,
+           .jitter_ms = cfg.chaos.jitter_ms,
+           .seed = cfg.chaos.seed}};
   if (!context->server->Begin(port, options)) {
     context->server.Reset();
     return ReturnError(context, ZNET_RESULT_IO_ERROR, "Failed to start server");
@@ -428,6 +608,10 @@ ZNetResult ZNetStartServer(ZNetContext* context,
   context->role = ContextRole::kServer;
   context->server->SetClockAsymmetryCompensationMs(
       cfg.clock_asymmetry_compensation_ms);
+  context->last_connection_state = ZNET_STATE_DISCONNECTED;
+  context->last_connection_state_valid = true;
+  context->seen_connected_once = false;
+  context->last_emitted_handshake_failure = ZNET_HANDSHAKE_FAILURE_NONE;
   ClearLastError(context);
   return ZNET_RESULT_OK;
 }
@@ -452,9 +636,15 @@ ZNetResult ZNetStartP2PHost(ZNetContext* context,
 
   const ZP2PNode::StartOptions options{
       .use_encryption = cfg.use_encryption != 0,
+      .pre_shared_key = MakeStringRef(cfg.pre_shared_key),
       .use_compression = cfg.use_compression != 0,
       .allow_ipv6 = cfg.allow_ipv6 != 0,
-      .start_threads = cfg.start_threads != 0};
+      .start_threads = cfg.start_threads != 0,
+      .chaos =
+          {.drop_percent = cfg.chaos.drop_percent,
+           .reorder_percent = cfg.chaos.reorder_percent,
+           .jitter_ms = cfg.chaos.jitter_ms,
+           .seed = cfg.chaos.seed}};
   if (!context->p2p->Begin(port, options)) {
     context->p2p.Reset();
     return ReturnError(context, ZNET_RESULT_IO_ERROR, "Failed to start p2p host");
@@ -462,6 +652,10 @@ ZNetResult ZNetStartP2PHost(ZNetContext* context,
 
   context->role = ContextRole::kP2P;
   context->p2p->SetClockAsymmetryCompensationMs(cfg.clock_asymmetry_compensation_ms);
+  context->last_connection_state = ZNET_STATE_DISCONNECTED;
+  context->last_connection_state_valid = true;
+  context->seen_connected_once = false;
+  context->last_emitted_handshake_failure = ZNET_HANDSHAKE_FAILURE_NONE;
   ClearLastError(context);
   return ZNET_RESULT_OK;
 }
@@ -489,9 +683,15 @@ ZNetResult ZNetStartP2PClient(ZNetContext* context,
 
   const ZP2PNode::StartOptions options{
       .use_encryption = cfg.use_encryption != 0,
+      .pre_shared_key = MakeStringRef(cfg.pre_shared_key),
       .use_compression = cfg.use_compression != 0,
       .allow_ipv6 = cfg.allow_ipv6 != 0,
-      .start_threads = cfg.start_threads != 0};
+      .start_threads = cfg.start_threads != 0,
+      .chaos =
+          {.drop_percent = cfg.chaos.drop_percent,
+           .reorder_percent = cfg.chaos.reorder_percent,
+           .jitter_ms = cfg.chaos.jitter_ms,
+           .seed = cfg.chaos.seed}};
   if (!context->p2p->Connect(MakeStringRef(host_ip), host_port, local_port,
                              options)) {
     context->p2p.Reset();
@@ -501,6 +701,10 @@ ZNetResult ZNetStartP2PClient(ZNetContext* context,
 
   context->role = ContextRole::kP2P;
   context->p2p->SetClockAsymmetryCompensationMs(cfg.clock_asymmetry_compensation_ms);
+  context->last_connection_state = ZNET_STATE_DISCONNECTED;
+  context->last_connection_state_valid = true;
+  context->seen_connected_once = false;
+  context->last_emitted_handshake_failure = ZNET_HANDSHAKE_FAILURE_NONE;
   ClearLastError(context);
   return ZNET_RESULT_OK;
 }
@@ -524,6 +728,7 @@ ZNetResult ZNetUpdate(ZNetContext* context) {
         return ReturnError(context, ZNET_RESULT_INVALID_STATE, "Client is null");
       }
       context->client->Update();
+      DrainRuntimeEvents(context);
       ClearLastError(context);
       return ZNET_RESULT_OK;
     case ContextRole::kServer:
@@ -533,6 +738,7 @@ ZNetResult ZNetUpdate(ZNetContext* context) {
       if (!context->server->Update()) {
         return ReturnError(context, ZNET_RESULT_IO_ERROR, "Server update failed");
       }
+      DrainRuntimeEvents(context);
       ClearLastError(context);
       return ZNET_RESULT_OK;
     case ContextRole::kP2P:
@@ -543,6 +749,7 @@ ZNetResult ZNetUpdate(ZNetContext* context) {
         return ReturnError(context, ZNET_RESULT_IO_ERROR,
                            "P2P node update failed");
       }
+      DrainRuntimeEvents(context);
       ClearLastError(context);
       return ZNET_RESULT_OK;
     case ContextRole::kNone:
@@ -788,7 +995,13 @@ ZNetResult ZNetSend(ZNetContext* context,
                             ToChannel(options->channel), flags);
   }
 
-  if (!transport->EnqueuePacket(std::move(packet))) {
+  bool enqueued = false;
+  if (context->role == ContextRole::kP2P && context->p2p) {
+    enqueued = context->p2p->SendPacket(std::move(packet));
+  } else {
+    enqueued = transport->EnqueuePacket(std::move(packet));
+  }
+  if (!enqueued) {
     return ReturnError(context, ZNET_RESULT_IO_ERROR, "Failed to enqueue packet");
   }
   ClearLastError(context);
@@ -894,6 +1107,113 @@ ZNetResult ZNetSendFile(ZNetContext* context,
   if (!success) {
     return ReturnError(context, ZNET_RESULT_IO_ERROR, "Failed to send file");
   }
+  ClearLastError(context);
+  return ZNET_RESULT_OK;
+}
+
+ZNetResult ZNetReceiveFileChunk(ZNetContext* context,
+                                const ZNetPacketView* packet,
+                                const char* temp_directory,
+                                ZNetFileReceiveStatus* out_status) {
+  if (!context || !packet) {
+    return ZNET_RESULT_INVALID_ARGUMENT;
+  }
+  if (packet->packet_type != static_cast<u16>(PacketType::FileTransfer)) {
+    return ReturnError(context, ZNET_RESULT_INVALID_ARGUMENT,
+                       "Packet is not a file transfer chunk");
+  }
+  if (packet->payload_size > 0 && !packet->payload) {
+    return ReturnError(context, ZNET_RESULT_INVALID_ARGUMENT,
+                       "File transfer packet payload is null");
+  }
+
+  const ZNetResult transport_result = EnsureFileTransporter(context);
+  if (transport_result != ZNET_RESULT_OK) {
+    return transport_result;
+  }
+
+  const char* temp_dir =
+      (temp_directory && temp_directory[0] != '\0') ? temp_directory : ".";
+  const byte* payload_data =
+      reinterpret_cast<const byte*>(packet->payload);
+  tx::network::ZFileTransporter::TransferChunk chunk{};
+  if (!context->file_transporter->ParseTransferChunkPayload(
+          base::Span<byte>(payload_data, packet->payload_size), chunk)) {
+    return ReturnError(context, ZNET_RESULT_IO_ERROR,
+                       "Malformed file transfer chunk payload");
+  }
+
+  bool completed = false;
+  if (!context->file_transporter->StreamChunkToFile(
+          chunk, base::Path(base::String(temp_dir)), &completed)) {
+    return ReturnError(context, ZNET_RESULT_IO_ERROR,
+                       "Failed to ingest incoming file transfer chunk");
+  }
+
+  if (out_status) {
+    std::memset(out_status, 0, sizeof(*out_status));
+    tx::network::ZFileTransporter::StreamProgress progress{};
+    if (context->file_transporter->GetStreamProgress(chunk.transfer_id, progress)) {
+      out_status->transfer_id = progress.transfer_id;
+      out_status->file_size = progress.file_size;
+      out_status->received_chunks = progress.received_chunks;
+      out_status->total_chunks = progress.total_chunks;
+      out_status->completed = progress.completed ? 1 : 0;
+      out_status->has_file_name = progress.has_file_name ? 1 : 0;
+      if (progress.has_file_name) {
+        WriteCappedFileName(out_status->file_name, progress.file_name);
+      } else {
+        out_status->file_name[0] = '\0';
+      }
+    } else {
+      out_status->transfer_id = chunk.transfer_id;
+      out_status->file_size = chunk.file_size;
+      out_status->received_chunks = chunk.chunk_index + 1;
+      out_status->total_chunks = chunk.total_chunks;
+      out_status->completed = completed ? 1 : 0;
+      out_status->has_file_name = chunk.has_file_name ? 1 : 0;
+      if (chunk.has_file_name) {
+        WriteCappedFileName(out_status->file_name, chunk.file_name);
+      } else {
+        out_status->file_name[0] = '\0';
+      }
+    }
+  }
+
+  ClearLastError(context);
+  return ZNET_RESULT_OK;
+}
+
+ZNetResult ZNetFinalizeReceivedFile(ZNetContext* context,
+                                    u64 transfer_id,
+                                    const char* output_path) {
+  if (!context || transfer_id == 0 || !output_path || output_path[0] == '\0') {
+    return ReturnError(context, ZNET_RESULT_INVALID_ARGUMENT,
+                       "Invalid finalize file arguments");
+  }
+  const ZNetResult transport_result = EnsureFileTransporter(context);
+  if (transport_result != ZNET_RESULT_OK) {
+    return transport_result;
+  }
+  if (!context->file_transporter->FinalizeStreamedFile(
+          transfer_id, base::Path(base::String(output_path)))) {
+    return ReturnError(context, ZNET_RESULT_IO_ERROR,
+                       "Failed to finalize streamed file");
+  }
+  ClearLastError(context);
+  return ZNET_RESULT_OK;
+}
+
+ZNetResult ZNetAbortReceivedFile(ZNetContext* context, u64 transfer_id) {
+  if (!context || transfer_id == 0) {
+    return ReturnError(context, ZNET_RESULT_INVALID_ARGUMENT,
+                       "Invalid abort file arguments");
+  }
+  const ZNetResult transport_result = EnsureFileTransporter(context);
+  if (transport_result != ZNET_RESULT_OK) {
+    return transport_result;
+  }
+  context->file_transporter->AbortStreamedFile(transfer_id);
   ClearLastError(context);
   return ZNET_RESULT_OK;
 }

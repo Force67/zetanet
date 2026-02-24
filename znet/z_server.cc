@@ -4,8 +4,6 @@
 #include "z_server.h"
 #include "z_system_command.h"
 
-#include <cstdlib>
-
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -37,13 +35,10 @@ bool IsProtocolVersionSupported(u16 version) {
 }  // namespace
 
 bool ZServer::Begin(u16 port) {
-  const char* encryption_env = std::getenv("ZNET_ENABLE_ENCRYPTION");
-  const bool use_encryption = encryption_env && encryption_env[0] != '0';
-  const char* compression_env = std::getenv("ZNET_ENABLE_COMPRESSION");
-  const bool use_compression = compression_env && compression_env[0] != '0';
   const StartOptions options{
-      .use_encryption = use_encryption,
-      .use_compression = use_compression,
+      .use_encryption = false,
+      .pre_shared_key = {},
+      .use_compression = false,
       .allow_ipv6 = false,
       .start_threads = false};
   return Begin(port, options);
@@ -56,9 +51,11 @@ bool ZServer::Begin(u16 port, const StartOptions& options) {
       .local_bind_port = 0,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kServer,
       .use_encryption = options.use_encryption,
+      .pre_shared_key = options.pre_shared_key,
       .use_compression = options.use_compression,
       .allow_ipv6 = options.allow_ipv6,
-      .start_threads = options.start_threads};
+      .start_threads = options.start_threads,
+      .chaos = options.chaos};
   bool result = ZAsyncTransportLayer::Init(init_options);
   if (!result) {
     BASE_LOGE(kLogTag, "Failed to initialize ZAsyncTransportLayer");
@@ -337,11 +334,7 @@ void ZServer::SendServerHello(ZPeerId dest,
       }
       
       server_challenge = crypto_context_->GetChallenge();
-      
-      const char* psk_env = std::getenv("ZNET_PSK");
-      if (psk_env && psk_env[0] != '\0') {
-        server_proof = crypto_context_->GenerateServerProof();
-      }
+      server_proof = crypto_context_->GenerateServerProof();
     }
   }
 

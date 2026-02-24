@@ -778,6 +778,7 @@ bool ZFileTransporter::EnsureStreamSession(const TransferChunk& chunk,
   session.file_size = chunk.file_size;
   session.chunk_size = chunk.chunk_size;
   session.total_chunks = chunk.total_chunks;
+  session.file_name = chunk.file_name;
   session.temp_path = temp_path;
   session.last_activity = now;
   if (!file_write_factory_) {
@@ -917,6 +918,26 @@ void ZFileTransporter::AbortStreamedFile(u64 transfer_id) {
   if (!temp_path.empty()) {
     std::remove(temp_path.c_str());
   }
+}
+
+bool ZFileTransporter::GetStreamProgress(u64 transfer_id,
+                                         StreamProgress& out_progress) const {
+  std::lock_guard<base::Mutex> lock(stream_mutex_);
+  const auto it = active_streams_.find(transfer_id);
+  if (it == active_streams_.end()) {
+    return false;
+  }
+  const StreamReceiveSession& session = it->second;
+  out_progress.transfer_id = session.transfer_id;
+  out_progress.file_size = session.file_size;
+  out_progress.received_chunks = session.received_chunk_count;
+  out_progress.total_chunks = session.total_chunks;
+  out_progress.has_file_name = !session.file_name.empty();
+  out_progress.file_name = session.file_name;
+  out_progress.completed =
+      session.received_chunk_count == session.total_chunks &&
+      session.has_expected_file_checksum;
+  return true;
 }
 
 bool ZFileTransporter::ValidatePath(const base::Path& base_dir,

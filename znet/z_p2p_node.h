@@ -18,12 +18,28 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
  public:
   struct StartOptions {
     bool use_encryption{false};
+    base::StringRef pre_shared_key{};
     bool use_compression{false};
     bool allow_ipv6{false};
     bool start_threads{true};
+    ZSocket::ChaosOptions chaos{};
   };
 
   enum class Type { Host, Client };
+
+  enum class PeerEventType : u8 {
+    PeerJoined = 1,
+    PeerLeft = 2,
+    RelayFallback = 3,
+    Reconnected = 4,
+    ConnectionFailure = 5,
+  };
+
+  struct PeerEvent {
+    PeerEventType type{PeerEventType::PeerJoined};
+    u32 peer_id{0};
+    u32 detail{0};
+  };
 
   bool Begin(u16 port);
   bool Begin(u16 port, const StartOptions& options);
@@ -36,6 +52,8 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
   bool Update();
   bool Poll(PacketChannelType channel, IncomingPacket& packet);
   void SendMessage(ZPeerId id, const base::String& data);
+  bool SendPacket(OutgoingPacket&& packet);
+  bool PollPeerEvent(PeerEvent& event);
 
   void BecomeHost();
   Type type() const { return type_; }
@@ -51,14 +69,28 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
     PunchProbe = 5,
     PunchAck = 6,
     Welcome = 7,
+    RelayRequest = 8,
+    RelayDelivery = 9,
   };
 
   struct PunchPeerState {
     ZSocket::Address address{};
     u32 attempts_sent{0};
     bool acknowledged{false};
+    bool relay_mode{false};
     base::Clock::time_point next_probe_time{};
     base::Clock::time_point last_keepalive_time{};
+  };
+
+  struct RelayEnvelope {
+    PacketChannelType channel{PacketChannelType::Data};
+    PackageFlags flags{};
+    PacketType packet_type{PacketType::Message};
+    u32 source_peer_id{0};
+    u32 destination_peer_id{0};
+    u32 acknowledgement_number{0};
+    u32 sequence_number{0};
+    base::String payload{};
   };
 
   bool InitAsHost(u16 port);
@@ -76,6 +108,25 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
   void SendPunchProbe(const ZSocket::Address& endpoint);
   void SendPunchAck(const ZSocket::Address& endpoint);
   void SendKeepAlive(const ZSocket::Address& endpoint);
+  bool SendRelayRequest(const OutgoingPacket& packet);
+  bool ForwardRelayEnvelope(const RelayEnvelope& envelope);
+  void HandleRelayRequest(const IncomingPacket& packet,
+                          const byte* data,
+                          mem_size data_size,
+                          mem_size& cursor);
+  void HandleRelayDelivery(const byte* data,
+                           mem_size data_size,
+                           mem_size& cursor);
+  static bool SerializeRelayEnvelope(ControlKind kind,
+                                     const RelayEnvelope& envelope,
+                                     base::Vector<byte>& out_payload);
+  static bool DeserializeRelayEnvelope(const byte* data,
+                                       mem_size data_size,
+                                       mem_size& cursor,
+                                       RelayEnvelope& out_envelope);
+  bool IsHostPeerId(u32 peer_id);
+  bool ShouldUseRelayForPeer(u32 peer_id);
+  void EmitPeerEvent(PeerEventType type, u32 peer_id, u32 detail = 0);
   void TickNatPunchthrough();
   PunchPeerState* FindPunchPeerState(const ZSocket::Address& endpoint);
   PunchPeerState& GetOrCreatePunchPeerState(const ZSocket::Address& endpoint);
@@ -108,9 +159,14 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
   bool has_public_endpoint_{false};
   base::Clock::time_point last_host_keepalive_time_{};
   base::Vector<PunchPeerState> punch_peers_;
+  base::Map<u32, bool> relay_announcement_state_{};
+  base::Map<u32, base::Clock::time_point> recently_seen_peers_{};
+  base::Map<u32, bool> announced_peer_presence_{};
 
   base::Mutex incoming_mutex_;
   base::Queue<IncomingPacket> incoming_control_;
   base::Queue<IncomingPacket> incoming_data_;
+  base::Mutex event_mutex_;
+  base::Queue<PeerEvent> peer_events_;
 };
 }  // namespace tx::network

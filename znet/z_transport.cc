@@ -30,6 +30,7 @@ bool ZAsyncTransportLayer::Init(const InitOptions& options) {
   state_ = State::kConnecting;
   local_clock_epoch_ = base::Clock::now();
   ResetSynchronizedClock();
+  socket_.SetChaosOptions(options.chaos);
 
   bool result = false;
   if (options.setup_type == ConnectionType::kClient) {
@@ -46,6 +47,7 @@ bool ZAsyncTransportLayer::Init(const InitOptions& options) {
 
   if (options.use_encryption) {
     crypto_context_ = base::MakeUnique<ZCryptoContext>();
+    crypto_context_->SetPreSharedKey(options.pre_shared_key);
     if (!crypto_context_->InitializeKeyExchange()) {
       BASE_LOGE(kLogTag, "Failed to initialize crypto key exchange context");
       state_ = State::kDisconnected;

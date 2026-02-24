@@ -4,10 +4,6 @@
 #include "z_client.h"
 #include "z_system_command.h"
 
-#include <cerrno>
-#include <cstdlib>
-#include <limits>
-
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -21,13 +17,10 @@ static constexpr auto kClientHelloRetryInterval = std::chrono::milliseconds(500)
 static constexpr auto kHandshakeTimeout = std::chrono::seconds(8);
 
 bool ZClient::Connect(const base::StringRef address, u16 port) {
-  const char* encryption_env = std::getenv("ZNET_ENABLE_ENCRYPTION");
-  const bool use_encryption = encryption_env && encryption_env[0] != '0';
-  const char* compression_env = std::getenv("ZNET_ENABLE_COMPRESSION");
-  const bool use_compression = compression_env && compression_env[0] != '0';
   const ConnectionOptions options{
-      .use_encryption = use_encryption,
-      .use_compression = use_compression,
+      .use_encryption = false,
+      .pre_shared_key = {},
+      .use_compression = false,
       .allow_ipv6 = false,
       .start_threads = false};
   return Connect(address, port, options);
@@ -42,31 +35,13 @@ bool ZClient::Connect(const base::StringRef address,
       .local_bind_port = 0,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kClient,
       .use_encryption = options.use_encryption,
+      .pre_shared_key = options.pre_shared_key,
       .use_compression = options.use_compression,
       .allow_ipv6 = options.allow_ipv6,
-      .start_threads = options.start_threads};
+      .start_threads = options.start_threads,
+      .chaos = options.chaos};
   bool result = ZAsyncTransportLayer::Init(init_options);
   if (result) {
-    const char* asymmetry_env = std::getenv("ZNET_CLOCK_ASYMMETRY_COMP_MS");
-    if (asymmetry_env && asymmetry_env[0] != '\0') {
-      errno = 0;
-      char* end = nullptr;
-      const long parsed = std::strtol(asymmetry_env, &end, 10);
-      if (errno == 0 && end != asymmetry_env && *end == '\0') {
-        long clamped = parsed;
-        if (clamped < std::numeric_limits<i32>::min()) {
-          clamped = std::numeric_limits<i32>::min();
-        } else if (clamped > std::numeric_limits<i32>::max()) {
-          clamped = std::numeric_limits<i32>::max();
-        }
-        SetClockAsymmetryCompensationMs(static_cast<i32>(clamped));
-      } else {
-        BASE_LOGW(kLogTag,
-                  "Ignoring invalid ZNET_CLOCK_ASYMMETRY_COMP_MS='{}'",
-                  asymmetry_env);
-      }
-    }
-
     if (scaling_tier_count_ > 0 && !packet_queue_.outgoing_thread_running() &&
         !packet_queue_.StartOutgoingThread()) {
       BASE_LOGE(kLogTag, "Failed to start outgoing thread");

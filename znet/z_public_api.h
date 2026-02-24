@@ -15,6 +15,7 @@ typedef struct ZNetContext ZNetContext;
 
 #define ZNET_MAX_THREAD_SCALING_TIERS 4
 #define ZNET_MAX_PACKET_ALLOCATOR_CLASSES 11
+#define ZNET_MAX_FILE_NAME_LENGTH 255
 
 typedef void (*ZNetLogHandler)(void* user_pointer,
                                const char* channel_name,
@@ -79,13 +80,33 @@ typedef enum ZNetClientHandshakeFailureReason {
   ZNET_HANDSHAKE_FAILURE_AUTHENTICATION_FAILED = 6,
 } ZNetClientHandshakeFailureReason;
 
+typedef enum ZNetPeerEventType {
+  ZNET_PEER_EVENT_NONE = 0,
+  ZNET_PEER_EVENT_CONNECTION_ESTABLISHED = 1,
+  ZNET_PEER_EVENT_CONNECTION_LOST = 2,
+  ZNET_PEER_EVENT_RECONNECTING = 3,
+  ZNET_PEER_EVENT_RECONNECTED = 4,
+  ZNET_PEER_EVENT_PEER_JOINED = 5,
+  ZNET_PEER_EVENT_PEER_LEFT = 6,
+  ZNET_PEER_EVENT_RELAY_FALLBACK = 7,
+  ZNET_PEER_EVENT_FAILURE = 8,
+} ZNetPeerEventType;
+
 typedef struct ZNetThreadScalingTier {
   size_t peer_count;
   size_t dispatch_workers;
 } ZNetThreadScalingTier;
 
+typedef struct ZNetChaosConfig {
+  uint32_t drop_percent;
+  uint32_t reorder_percent;
+  uint32_t jitter_ms;
+  uint32_t seed;
+} ZNetChaosConfig;
+
 typedef struct ZNetTransportConfig {
   uint8_t use_encryption;
+  const char* pre_shared_key;
   uint8_t use_compression;
   uint8_t allow_ipv6;
   uint8_t start_threads;
@@ -98,6 +119,7 @@ typedef struct ZNetTransportConfig {
   ZNetThreadScalingTier thread_scaling_tiers[ZNET_MAX_THREAD_SCALING_TIERS];
 
   int32_t clock_asymmetry_compensation_ms;
+  ZNetChaosConfig chaos;
 } ZNetTransportConfig;
 
 typedef struct ZNetRateLimitConfig {
@@ -170,6 +192,25 @@ typedef struct ZNetFileTransferTuning {
   uint32_t backpressure_timeout_ms;
 } ZNetFileTransferTuning;
 
+typedef struct ZNetFileReceiveStatus {
+  uint64_t transfer_id;
+  uint64_t file_size;
+  uint32_t received_chunks;
+  uint32_t total_chunks;
+  uint8_t completed;
+  uint8_t has_file_name;
+  char file_name[ZNET_MAX_FILE_NAME_LENGTH + 1];
+} ZNetFileReceiveStatus;
+
+typedef struct ZNetPeerEvent {
+  uint8_t type;
+  uint32_t peer_id;
+  uint32_t detail;
+} ZNetPeerEvent;
+
+typedef void (*ZNetPeerEventHandler)(void* user_pointer,
+                                     const ZNetPeerEvent* event);
+
 typedef struct ZNetPacketAllocatorClassStats {
   size_t block_size;
   size_t request_count;
@@ -195,6 +236,11 @@ ZNET_API void ZNetClearLastError(ZNetContext* context);
 ZNET_API const char* ZNetGetLastError(const ZNetContext* context);
 
 ZNET_API void ZNetSetLogHandler(void* user_pointer, ZNetLogHandler callback);
+ZNET_API void ZNetSetPeerEventHandler(ZNetContext* context,
+                                      void* user_pointer,
+                                      ZNetPeerEventHandler callback);
+ZNET_API ZNetResult ZNetPollPeerEvent(ZNetContext* context,
+                                      ZNetPeerEvent* out_event);
 
 ZNET_API void ZNetGetDefaultTransportConfig(ZNetTransportConfig* out_config);
 ZNET_API void ZNetGetDefaultRateLimitConfig(ZNetRateLimitConfig* out_config);
@@ -260,6 +306,15 @@ ZNET_API ZNetResult ZNetSendFile(ZNetContext* context,
                                  const char* file_path,
                                  uint32_t destination_peer_id,
                                  const ZNetFileTransferTuning* tuning);
+ZNET_API ZNetResult ZNetReceiveFileChunk(ZNetContext* context,
+                                         const ZNetPacketView* packet,
+                                         const char* temp_directory,
+                                         ZNetFileReceiveStatus* out_status);
+ZNET_API ZNetResult ZNetFinalizeReceivedFile(ZNetContext* context,
+                                             uint64_t transfer_id,
+                                             const char* output_path);
+ZNET_API ZNetResult ZNetAbortReceivedFile(ZNetContext* context,
+                                          uint64_t transfer_id);
 
 ZNET_API void ZNetResetPacketAllocatorStats(void);
 ZNET_API int ZNetGetPacketAllocatorStats(ZNetPacketAllocatorStats* out_stats);

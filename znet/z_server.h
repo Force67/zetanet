@@ -23,9 +23,11 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
  public:
   struct StartOptions {
     bool use_encryption{false};
+    base::StringRef pre_shared_key{};
     bool use_compression{false};
     bool allow_ipv6{false};
     bool start_threads{false};
+    ZSocket::ChaosOptions chaos{};
   };
 
   bool Begin(u16 port);

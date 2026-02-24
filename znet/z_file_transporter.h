@@ -56,6 +56,16 @@ class ZFileTransporter {
     u32 backpressure_timeout_ms{120000};
   };
 
+  struct StreamProgress {
+    u64 transfer_id{0};
+    u64 file_size{0};
+    u32 received_chunks{0};
+    u32 total_chunks{0};
+    bool has_file_name{false};
+    base::String file_name;
+    bool completed{false};
+  };
+
   ZFileTransporter(ZAsyncTransportLayer&,
                    IFileWriteFactory* file_write_factory = nullptr);
   ~ZFileTransporter();
@@ -91,6 +101,7 @@ class ZFileTransporter {
                          bool* out_completed);
   bool FinalizeStreamedFile(u64 transfer_id, const base::Path& output_path);
   void AbortStreamedFile(u64 transfer_id);
+  bool GetStreamProgress(u64 transfer_id, StreamProgress& out_progress) const;
 
  private:
   struct StreamReceiveSession {
@@ -100,6 +111,7 @@ class ZFileTransporter {
     u32 total_chunks{0};
     u32 expected_file_checksum{0};
     bool has_expected_file_checksum{false};
+    base::String file_name;
     base::Path temp_path;
     base::UniquePointer<IFileWriteHandle> temp_file;
     base::Vector<u8> received_chunks;

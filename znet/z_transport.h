@@ -36,9 +36,11 @@ class ZAsyncTransportLayer {
     u16 local_bind_port;
     ConnectionType setup_type;
     bool use_encryption;
+    base::StringRef pre_shared_key{};
     bool use_compression;
     bool allow_ipv6;
     bool start_threads = true;  // false = synchronous mode (no background threads)
+    ZSocket::ChaosOptions chaos{};
   };
 
   struct OutboundPressure {

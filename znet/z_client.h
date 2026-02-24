@@ -22,9 +22,11 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
  public:
   struct ConnectionOptions {
     bool use_encryption{false};
+    base::StringRef pre_shared_key{};
     bool use_compression{false};
     bool allow_ipv6{false};
     bool start_threads{false};
+    ZSocket::ChaosOptions chaos{};
   };
 
   enum class HandshakePhase : u8 {

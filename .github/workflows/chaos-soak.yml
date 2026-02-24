@@ -1,0 +1,48 @@
+name: Chaos Soak
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  chaos-soak:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - name: mild
+            drop: 2
+            reorder: 2
+            jitter: 2
+            iterations: 3
+          - name: stressed
+            drop: 5
+            reorder: 5
+            jitter: 5
+            iterations: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build HandshakeIntegration
+        run: |
+          nix develop -c bash -lc 'premake5 --use-stl gmake2 && make config=debug HandshakeIntegration -j$(nproc)'
+
+      - name: Run Chaos Profile
+        run: |
+          echo "Running chaos profile: ${{ matrix.profile.name }}"
+          for i in $(seq 1 "${{ matrix.profile.iterations }}"); do
+            echo "Iteration $i/${{ matrix.profile.iterations }}"
+            nix develop -c bash -lc "./bin/HandshakeIntegration_64 --chaos-drop ${{ matrix.profile.drop }} --chaos-reorder ${{ matrix.profile.reorder }} --chaos-jitter ${{ matrix.profile.jitter }} --chaos-seed $i"
+          done

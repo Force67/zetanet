@@ -32,54 +32,60 @@ using tx::network::ZServer;
 using tx::network::ZSocket;
 namespace sys = tx::network::system_commands;
 
-class ScopedEnv {
- public:
-  ScopedEnv(const char* key, const char* value) : key_(key) {
-    const char* existing = std::getenv(key_);
-    if (existing) {
-      had_previous_ = true;
-      previous_value_ = existing;
-    }
-    Set(value);
-  }
-
-  ~ScopedEnv() {
-    if (had_previous_) {
-      Set(previous_value_.c_str());
-    } else {
-      Unset();
-    }
-  }
-
- private:
-  void Set(const char* value) {
-    if (!value) {
-      Unset();
-      return;
-    }
-#if defined(_WIN32)
-    _putenv_s(key_, value);
-#else
-    ::setenv(key_, value, 1);
-#endif
-  }
-
-  void Unset() {
-#if defined(_WIN32)
-    _putenv_s(key_, "");
-#else
-    ::unsetenv(key_);
-#endif
-  }
-
-  const char* key_;
-  bool had_previous_{false};
-  std::string previous_value_{};
-};
+constexpr char kTestPsk[] = "0123456789abcdef0123456789abcdef";
+const base::StringRef kTestPskRef{kTestPsk, sizeof(kTestPsk) - 1};
 
 u16 NextPort() {
   static std::atomic<u16> next_port{18050};
   return static_cast<u16>(next_port.fetch_add(1));
+}
+
+struct ChaosSettings {
+  u32 drop_percent{0};
+  u32 reorder_percent{0};
+  u32 jitter_ms{0};
+  u32 seed{1};
+
+  bool enabled() const {
+    return drop_percent > 0 || reorder_percent > 0 || jitter_ms > 0;
+  }
+};
+
+ChaosSettings g_chaos{};
+
+ZSocket::ChaosOptions ToSocketChaosOptions() {
+  return ZSocket::ChaosOptions{
+      .drop_percent = g_chaos.drop_percent,
+      .reorder_percent = g_chaos.reorder_percent,
+      .jitter_ms = g_chaos.jitter_ms,
+      .seed = g_chaos.seed == 0 ? 1 : g_chaos.seed,
+  };
+}
+
+ZServer::StartOptions MakeServerOptions(
+    bool encryption,
+    bool compression,
+    const base::StringRef pre_shared_key = base::StringRef()) {
+  return ZServer::StartOptions{
+      .use_encryption = encryption,
+      .pre_shared_key = pre_shared_key,
+      .use_compression = compression,
+      .allow_ipv6 = false,
+      .start_threads = false,
+      .chaos = ToSocketChaosOptions()};
+}
+
+ZClient::ConnectionOptions MakeClientOptions(
+    bool encryption,
+    bool compression,
+    const base::StringRef pre_shared_key = base::StringRef()) {
+  return ZClient::ConnectionOptions{
+      .use_encryption = encryption,
+      .pre_shared_key = pre_shared_key,
+      .use_compression = compression,
+      .allow_ipv6 = false,
+      .start_threads = false,
+      .chaos = ToSocketChaosOptions()};
 }
 
 template <typename Fn>
@@ -240,21 +246,17 @@ class SilentServer {
 };
 
 bool TestHandshakeSuccess() {
-  ScopedEnv env_encryption("ZNET_ENABLE_ENCRYPTION", "0");
-  ScopedEnv env_compression("ZNET_ENABLE_COMPRESSION", "0");
-  ScopedEnv env_psk("ZNET_PSK", nullptr);
-
   const u16 port = NextPort();
   ZServer server;
   server.DisableAdaptiveThreading();
-  if (!server.Begin(port)) {
+  if (!server.Begin(port, MakeServerOptions(false, false))) {
     std::cerr << "TestHandshakeSuccess: failed to start server\n";
     return false;
   }
 
   ZClient client;
   client.DisableAdaptiveThreading();
-  if (!client.Connect("127.0.0.1", port)) {
+  if (!client.Connect("127.0.0.1", port, MakeClientOptions(false, false))) {
     std::cerr << "TestHandshakeSuccess: failed to connect client\n";
     server.Deinit();
     return false;
@@ -276,14 +278,10 @@ bool TestHandshakeSuccess() {
 }
 
 bool TestProtocolVersionMismatchReject() {
-  ScopedEnv env_encryption("ZNET_ENABLE_ENCRYPTION", "0");
-  ScopedEnv env_compression("ZNET_ENABLE_COMPRESSION", "0");
-  ScopedEnv env_psk("ZNET_PSK", nullptr);
-
   const u16 port = NextPort();
   ZServer server;
   server.DisableAdaptiveThreading();
-  if (!server.Begin(port)) {
+  if (!server.Begin(port, MakeServerOptions(false, false))) {
     std::cerr << "TestProtocolVersionMismatchReject: failed to start server\n";
     return false;
   }
@@ -331,14 +329,10 @@ bool TestProtocolVersionMismatchReject() {
 }
 
 bool TestFeatureMismatchReject() {
-  ScopedEnv env_encryption("ZNET_ENABLE_ENCRYPTION", "1");
-  ScopedEnv env_compression("ZNET_ENABLE_COMPRESSION", "0");
-  ScopedEnv env_psk("ZNET_PSK", "0123456789abcdef0123456789abcdef");
-
   const u16 port = NextPort();
   ZServer server;
   server.DisableAdaptiveThreading();
-  if (!server.Begin(port)) {
+  if (!server.Begin(port, MakeServerOptions(true, false, kTestPskRef))) {
     std::cerr << "TestFeatureMismatchReject: failed to start server\n";
     return false;
   }
@@ -386,10 +380,6 @@ bool TestFeatureMismatchReject() {
 }
 
 bool TestClientHandshakeTimeout() {
-  ScopedEnv env_encryption("ZNET_ENABLE_ENCRYPTION", "0");
-  ScopedEnv env_compression("ZNET_ENABLE_COMPRESSION", "0");
-  ScopedEnv env_psk("ZNET_PSK", nullptr);
-
   const u16 port = NextPort();
   SilentServer silent_server;
   if (!silent_server.Start(port)) {
@@ -399,7 +389,7 @@ bool TestClientHandshakeTimeout() {
 
   ZClient client;
   client.DisableAdaptiveThreading();
-  if (!client.Connect("127.0.0.1", port)) {
+  if (!client.Connect("127.0.0.1", port, MakeClientOptions(false, false))) {
     std::cerr << "TestClientHandshakeTimeout: failed to connect client\n";
     silent_server.Stop();
     return false;
@@ -420,14 +410,10 @@ bool TestClientHandshakeTimeout() {
 }
 
 bool TestAuthenticationFailureReject() {
-  ScopedEnv env_encryption("ZNET_ENABLE_ENCRYPTION", "1");
-  ScopedEnv env_compression("ZNET_ENABLE_COMPRESSION", "0");
-  ScopedEnv env_psk("ZNET_PSK", "0123456789abcdef0123456789abcdef");
-
   const u16 port = NextPort();
   ZServer server;
   server.DisableAdaptiveThreading();
-  if (!server.Begin(port)) {
+  if (!server.Begin(port, MakeServerOptions(true, false, kTestPskRef))) {
     std::cerr << "TestAuthenticationFailureReject: failed to start server\n";
     return false;
   }
@@ -514,10 +500,6 @@ bool TestAuthenticationFailureReject() {
 }
 
 bool TestClientMapsServerGoodbyeReason() {
-  ScopedEnv env_encryption("ZNET_ENABLE_ENCRYPTION", "0");
-  ScopedEnv env_compression("ZNET_ENABLE_COMPRESSION", "0");
-  ScopedEnv env_psk("ZNET_PSK", nullptr);
-
   const u16 port = NextPort();
   RejectingServer rejector;
   if (!rejector.Start(port)) {
@@ -527,7 +509,7 @@ bool TestClientMapsServerGoodbyeReason() {
 
   ZClient client;
   client.DisableAdaptiveThreading();
-  if (!client.Connect("127.0.0.1", port)) {
+  if (!client.Connect("127.0.0.1", port, MakeClientOptions(false, false))) {
     std::cerr << "TestClientMapsServerGoodbyeReason: failed to connect client\n";
     rejector.Stop();
     return false;
@@ -548,13 +530,13 @@ bool TestClientMapsServerGoodbyeReason() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   struct TestCase {
     const char* name;
     bool (*fn)();
   };
 
-  const TestCase tests[] = {
+  const TestCase full_tests[] = {
       {"handshake_success", &TestHandshakeSuccess},
       {"protocol_version_mismatch_reject", &TestProtocolVersionMismatchReject},
       {"feature_mismatch_reject", &TestFeatureMismatchReject},
@@ -562,9 +544,58 @@ int main() {
       {"authentication_failure_reject", &TestAuthenticationFailureReject},
       {"client_maps_server_goodbye_reason", &TestClientMapsServerGoodbyeReason},
   };
+  const TestCase chaos_tests[] = {
+      {"handshake_success", &TestHandshakeSuccess},
+  };
+
+  for (int i = 1; i < argc; ++i) {
+    const char* arg = argv[i];
+    if (std::strcmp(arg, "--chaos-drop") == 0 && i + 1 < argc) {
+      g_chaos.drop_percent = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+      continue;
+    }
+    if (std::strcmp(arg, "--chaos-reorder") == 0 && i + 1 < argc) {
+      g_chaos.reorder_percent =
+          static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+      continue;
+    }
+    if (std::strcmp(arg, "--chaos-jitter") == 0 && i + 1 < argc) {
+      g_chaos.jitter_ms = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+      continue;
+    }
+    if (std::strcmp(arg, "--chaos-seed") == 0 && i + 1 < argc) {
+      g_chaos.seed = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+      continue;
+    }
+    if (std::strcmp(arg, "--help") == 0) {
+      std::cout << "HandshakeIntegration options:\n"
+                << "  --chaos-drop <0..100>\n"
+                << "  --chaos-reorder <0..100>\n"
+                << "  --chaos-jitter <ms>\n"
+                << "  --chaos-seed <value>\n";
+      return 0;
+    }
+    std::cerr << "Unknown argument: " << arg << std::endl;
+    return 2;
+  }
+  if (g_chaos.seed == 0) {
+    g_chaos.seed = 1;
+  }
+  if (g_chaos.drop_percent > 100) {
+    g_chaos.drop_percent = 100;
+  }
+  if (g_chaos.reorder_percent > 100) {
+    g_chaos.reorder_percent = 100;
+  }
+
+  const bool chaos_enabled = g_chaos.enabled();
+
+  const TestCase* tests = chaos_enabled ? chaos_tests : full_tests;
+  const size_t test_count = chaos_enabled ? _countof(chaos_tests) : _countof(full_tests);
 
   int failures = 0;
-  for (const auto& test : tests) {
+  for (size_t i = 0; i < test_count; ++i) {
+    const TestCase& test = tests[i];
     const bool ok = test.fn();
     std::cout << (ok ? "[PASS] " : "[FAIL] ") << test.name << std::endl;
     if (!ok) {

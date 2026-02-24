@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <thread>
 
 namespace tx::network {
@@ -16,6 +17,27 @@ constexpr auto kPunchProbeInterval = std::chrono::milliseconds(120);
 constexpr u32 kMaxPunchProbeAttempts = 12;
 constexpr auto kPeerKeepAliveInterval = std::chrono::seconds(10);
 constexpr auto kHostKeepAliveInterval = std::chrono::seconds(2);
+constexpr auto kPeerLivenessTimeout = std::chrono::seconds(25);
+
+u8 PackRelayFlags(const PackageFlags& flags) {
+  return static_cast<u8>((flags.reliable ? 1u : 0u) |
+                         ((flags.encrypted ? 1u : 0u) << 1u) |
+                         ((flags.compressed ? 1u : 0u) << 2u) |
+                         ((flags.priority & 0x3u) << 3u) |
+                         ((flags.acknowledged ? 1u : 0u) << 5u) |
+                         ((flags.awaiting_ack ? 1u : 0u) << 6u));
+}
+
+PackageFlags UnpackRelayFlags(u8 packed) {
+  return PackageFlags{
+      .reliable = static_cast<u8>(packed & 0x1u),
+      .encrypted = static_cast<u8>((packed >> 1u) & 0x1u),
+      .compressed = static_cast<u8>((packed >> 2u) & 0x1u),
+      .priority = static_cast<u8>((packed >> 3u) & 0x3u),
+      .acknowledged = static_cast<u8>((packed >> 5u) & 0x1u),
+      .awaiting_ack = static_cast<u8>((packed >> 6u) & 0x1u),
+      .reserved = 0};
+}
 
 bool AddressFromString(const base::StringRef ip,
                        u16 port,
@@ -105,7 +127,44 @@ void ZP2PNode::SendMessage(ZPeerId id, const base::String& data) {
   OutgoingPacket out(
       id.id, PacketType::Message, PacketChannelType::Data, flags,
       base::Span<byte>(reinterpret_cast<const byte*>(data.data()), data.size()));
-  packet_queue_.Push(std::move(out));
+  SendPacket(std::move(out));
+}
+
+bool ZP2PNode::SendPacket(OutgoingPacket&& packet) {
+  if (state_ != State::kConnected) {
+    return false;
+  }
+
+  if (type_ == Type::Client &&
+      packet.destination_peer_id != ZPeerId::to_server &&
+      packet.destination_peer_id != ZPeerId::invalid_id) {
+    const bool should_relay =
+        packet.destination_peer_id == ZPeerId::to_all ||
+        ShouldUseRelayForPeer(packet.destination_peer_id);
+    if (should_relay && SendRelayRequest(packet)) {
+      if (packet.destination_peer_id != ZPeerId::to_all) {
+        const auto it = relay_announcement_state_.find(packet.destination_peer_id);
+        if (it == relay_announcement_state_.end() || !it->second) {
+          relay_announcement_state_[packet.destination_peer_id] = true;
+          EmitPeerEvent(PeerEventType::RelayFallback, packet.destination_peer_id);
+        }
+      }
+      return true;
+    }
+  }
+
+  packet_queue_.Push(std::move(packet));
+  return true;
+}
+
+bool ZP2PNode::PollPeerEvent(PeerEvent& event) {
+  std::lock_guard<base::Mutex> lock(event_mutex_);
+  if (peer_events_.empty()) {
+    return false;
+  }
+  event = peer_events_.front();
+  peer_events_.pop();
+  return true;
 }
 
 void ZP2PNode::BecomeHost() {
@@ -117,6 +176,9 @@ void ZP2PNode::BecomeHost() {
 bool ZP2PNode::InitAsHost(u16 port) {
   Deinit();
   punch_peers_.clear();
+  relay_announcement_state_.clear();
+  recently_seen_peers_.clear();
+  announced_peer_presence_.clear();
   {
     std::lock_guard<base::Mutex> lock(incoming_mutex_);
     while (!incoming_control_.empty()) {
@@ -126,15 +188,23 @@ bool ZP2PNode::InitAsHost(u16 port) {
       incoming_data_.pop();
     }
   }
+  {
+    std::lock_guard<base::Mutex> lock(event_mutex_);
+    while (!peer_events_.empty()) {
+      peer_events_.pop();
+    }
+  }
   const ZAsyncTransportLayer::InitOptions options{
       .ip = base::StringRef(advertised_ip_.data(), advertised_ip_.size()),
       .port = port,
       .local_bind_port = 0,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kServer,
       .use_encryption = start_options_.use_encryption,
+      .pre_shared_key = start_options_.pre_shared_key,
       .use_compression = start_options_.use_compression,
       .allow_ipv6 = start_options_.allow_ipv6,
-      .start_threads = start_options_.start_threads};
+      .start_threads = start_options_.start_threads,
+      .chaos = start_options_.chaos};
   if (!ZAsyncTransportLayer::Init(options)) {
     return false;
   }
@@ -162,6 +232,9 @@ bool ZP2PNode::InitAsClient(const base::StringRef host_ip,
                             u16 local_port) {
   Deinit();
   punch_peers_.clear();
+  relay_announcement_state_.clear();
+  recently_seen_peers_.clear();
+  announced_peer_presence_.clear();
   has_public_endpoint_ = false;
   std::memset(&public_endpoint_, 0, sizeof(public_endpoint_));
   {
@@ -173,15 +246,23 @@ bool ZP2PNode::InitAsClient(const base::StringRef host_ip,
       incoming_data_.pop();
     }
   }
+  {
+    std::lock_guard<base::Mutex> lock(event_mutex_);
+    while (!peer_events_.empty()) {
+      peer_events_.pop();
+    }
+  }
   const ZAsyncTransportLayer::InitOptions options{
       .ip = host_ip,
       .port = host_port,
       .local_bind_port = local_port,
       .setup_type = ZAsyncTransportLayer::ConnectionType::kClient,
       .use_encryption = start_options_.use_encryption,
+      .pre_shared_key = start_options_.pre_shared_key,
       .use_compression = start_options_.use_compression,
       .allow_ipv6 = start_options_.allow_ipv6,
-      .start_threads = start_options_.start_threads};
+      .start_threads = start_options_.start_threads,
+      .chaos = start_options_.chaos};
   if (!ZAsyncTransportLayer::Init(options)) {
     return false;
   }
@@ -272,6 +353,11 @@ bool ZP2PNode::ReconnectToHost(const ZSocket::Address& endpoint) {
 }
 
 void ZP2PNode::ProcessIncomingPacket(const IncomingPacket& packet) {
+  recently_seen_peers_[packet.source_peer_id] = base::Clock::now();
+  if (ZPeer* source_peer = peer_mapping_.GetPeer(ZPeerId(packet.source_peer_id))) {
+    auto& state = GetOrCreatePunchPeerState(source_peer->address);
+    state.last_keepalive_time = base::Clock::now();
+  }
   if (packet.channel == PacketChannelType::Control &&
       packet.type == PacketType::NetworkControl) {
     ProcessControlPacket(packet);
@@ -315,9 +401,17 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
       }
       (void)announced_local_port;
 
-      peer_mapping_.GetOrCreatePeer(source_peer->address);
+      ZPeer* peer = peer_mapping_.GetOrCreatePeer(source_peer->address);
+      if (!peer) {
+        return;
+      }
       SendWelcome(*source_peer);
       BroadcastPeerRoster();
+      if (announced_peer_presence_.find(peer->identifier.id) ==
+          announced_peer_presence_.end()) {
+        announced_peer_presence_[peer->identifier.id] = true;
+        EmitPeerEvent(PeerEventType::PeerJoined, peer->identifier.id);
+      }
       break;
     }
     case ControlKind::Welcome: {
@@ -355,7 +449,16 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
         if (IsSelfAddress(peer_address)) {
           continue;
         }
-        peer_mapping_.GetOrCreatePeer(peer_address);
+        ZPeer* peer = peer_mapping_.GetOrCreatePeer(peer_address);
+        if (!peer) {
+          continue;
+        }
+        recently_seen_peers_[peer->identifier.id] = base::Clock::now();
+        if (announced_peer_presence_.find(peer->identifier.id) ==
+            announced_peer_presence_.end()) {
+          announced_peer_presence_[peer->identifier.id] = true;
+          EmitPeerEvent(PeerEventType::PeerJoined, peer->identifier.id);
+        }
         if (type_ == Type::Client && !(peer_address == host_endpoint_)) {
           ArmPunchProbe(peer_address);
         }
@@ -379,6 +482,9 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
       if (!ReconnectToHost(next_host)) {
         BASE_LOGE(kLogTag, "Failed to reconnect to transitioned host {}:{}",
                   next_host.ip, next_host.port);
+        EmitPeerEvent(PeerEventType::ConnectionFailure, 0);
+      } else {
+        EmitPeerEvent(PeerEventType::Reconnected, 0);
       }
       break;
     }
@@ -411,8 +517,18 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
       if (!IsSelfAddress(source_peer->address)) {
         auto& state = GetOrCreatePunchPeerState(source_peer->address);
         state.acknowledged = true;
+        state.relay_mode = false;
         state.last_keepalive_time = base::Clock::now();
+        relay_announcement_state_[source_peer->identifier.id] = false;
       }
+      break;
+    }
+    case ControlKind::RelayRequest: {
+      HandleRelayRequest(packet, data, size, cursor);
+      break;
+    }
+    case ControlKind::RelayDelivery: {
+      HandleRelayDelivery(data, size, cursor);
       break;
     }
     default:
@@ -516,6 +632,233 @@ void ZP2PNode::SendKeepAlive(const ZSocket::Address& endpoint) {
   PushControlPacketToAddress(endpoint, payload);
 }
 
+bool ZP2PNode::SendRelayRequest(const OutgoingPacket& packet) {
+  if (type_ != Type::Client) {
+    return false;
+  }
+  if (packet.destination_peer_id == ZPeerId::to_server ||
+      packet.destination_peer_id == ZPeerId::invalid_id) {
+    return false;
+  }
+
+  RelayEnvelope envelope{};
+  envelope.channel = packet.channel;
+  envelope.flags = packet.flags;
+  envelope.packet_type = packet.type;
+  envelope.source_peer_id = 0;
+  envelope.destination_peer_id = packet.destination_peer_id;
+  envelope.acknowledgement_number = 0;
+  envelope.sequence_number = 0;
+  if (packet.heap_data_size > 0 && packet.payload.data) {
+    envelope.payload.assign(reinterpret_cast<const char*>(packet.payload.data),
+                            packet.heap_data_size);
+  }
+
+  base::Vector<byte> payload;
+  if (!SerializeRelayEnvelope(ControlKind::RelayRequest, envelope, payload)) {
+    return false;
+  }
+  PushControlPacket(ZPeerId::to_server, payload);
+  return true;
+}
+
+bool ZP2PNode::ForwardRelayEnvelope(const RelayEnvelope& envelope) {
+  if (type_ != Type::Host) {
+    return false;
+  }
+
+  bool forwarded = false;
+  if (envelope.destination_peer_id == ZPeerId::to_all) {
+    for (const auto& peer : peer_mapping_.GetPeerList()) {
+      if (peer.identifier.id == envelope.source_peer_id) {
+        continue;
+      }
+      RelayEnvelope out = envelope;
+      out.destination_peer_id = peer.identifier.id;
+      base::Vector<byte> payload;
+      if (!SerializeRelayEnvelope(ControlKind::RelayDelivery, out, payload)) {
+        continue;
+      }
+      PushControlPacket(peer.identifier.id, payload);
+      forwarded = true;
+    }
+    return forwarded;
+  }
+
+  if (envelope.destination_peer_id == envelope.source_peer_id) {
+    return false;
+  }
+  ZPeer* destination = peer_mapping_.GetPeer(ZPeerId(envelope.destination_peer_id));
+  if (!destination) {
+    return false;
+  }
+  RelayEnvelope out = envelope;
+  base::Vector<byte> payload;
+  if (!SerializeRelayEnvelope(ControlKind::RelayDelivery, out, payload)) {
+    return false;
+  }
+  PushControlPacket(destination->identifier.id, payload);
+  return true;
+}
+
+void ZP2PNode::HandleRelayRequest(const IncomingPacket& packet,
+                                  const byte* data,
+                                  mem_size data_size,
+                                  mem_size& cursor) {
+  if (type_ != Type::Host) {
+    return;
+  }
+
+  RelayEnvelope envelope{};
+  if (!DeserializeRelayEnvelope(data, data_size, cursor, envelope)) {
+    return;
+  }
+  envelope.source_peer_id = packet.source_peer_id;
+  if (!ForwardRelayEnvelope(envelope)) {
+    BASE_LOGW(kLogTag, "Failed to forward relay payload source={} dest={}",
+              packet.source_peer_id, envelope.destination_peer_id);
+  }
+}
+
+void ZP2PNode::HandleRelayDelivery(const byte* data,
+                                   mem_size data_size,
+                                   mem_size& cursor) {
+  RelayEnvelope envelope{};
+  if (!DeserializeRelayEnvelope(data, data_size, cursor, envelope)) {
+    return;
+  }
+
+  if (envelope.source_peer_id == 0) {
+    return;
+  }
+
+  IncomingPacket relayed{};
+  relayed.channel = envelope.channel;
+  relayed.flags = envelope.flags;
+  relayed.type = envelope.packet_type;
+  relayed.source_peer_id = envelope.source_peer_id;
+  relayed.acknowledgement_number = envelope.acknowledgement_number;
+  relayed.sequence_number = envelope.sequence_number;
+  relayed.data = envelope.payload;
+  QueueIncoming(relayed);
+}
+
+bool ZP2PNode::SerializeRelayEnvelope(ControlKind kind,
+                                      const RelayEnvelope& envelope,
+                                      base::Vector<byte>& out_payload) {
+  if (kind != ControlKind::RelayRequest && kind != ControlKind::RelayDelivery) {
+    return false;
+  }
+  if (envelope.payload.size() > std::numeric_limits<u32>::max()) {
+    return false;
+  }
+
+  out_payload.clear();
+  out_payload.reserve(32 + envelope.payload.size());
+  wire_le::AppendU32(out_payload, kControlMagic);
+  out_payload.push_back(kControlVersion);
+  out_payload.push_back(static_cast<byte>(kind));
+  out_payload.push_back(static_cast<byte>(envelope.channel));
+  out_payload.push_back(PackRelayFlags(envelope.flags));
+  wire_le::AppendU16(out_payload, static_cast<u16>(envelope.packet_type));
+  wire_le::AppendU32(out_payload, envelope.source_peer_id);
+  wire_le::AppendU32(out_payload, envelope.destination_peer_id);
+  wire_le::AppendU32(out_payload, envelope.acknowledgement_number);
+  wire_le::AppendU32(out_payload, envelope.sequence_number);
+  wire_le::AppendU32(out_payload, static_cast<u32>(envelope.payload.size()));
+  if (!envelope.payload.empty()) {
+    const byte* payload_data =
+        reinterpret_cast<const byte*>(envelope.payload.data());
+    out_payload.insert(out_payload.end(), payload_data,
+                       payload_data + envelope.payload.size());
+  }
+  return true;
+}
+
+bool ZP2PNode::DeserializeRelayEnvelope(const byte* data,
+                                        mem_size data_size,
+                                        mem_size& cursor,
+                                        RelayEnvelope& out_envelope) {
+  if (!data || cursor >= data_size) {
+    return false;
+  }
+  if (cursor + 2 > data_size) {
+    return false;
+  }
+
+  const u8 channel_raw = data[cursor++];
+  const u8 flags_raw = data[cursor++];
+  out_envelope.channel = channel_raw == static_cast<u8>(PacketChannelType::Control)
+                             ? PacketChannelType::Control
+                             : PacketChannelType::Data;
+  out_envelope.flags = UnpackRelayFlags(flags_raw);
+
+  u16 packet_type = 0;
+  u32 payload_size = 0;
+  if (!wire_le::ReadU16(data, data_size, cursor, packet_type) ||
+      !wire_le::ReadU32(data, data_size, cursor, out_envelope.source_peer_id) ||
+      !wire_le::ReadU32(data, data_size, cursor, out_envelope.destination_peer_id) ||
+      !wire_le::ReadU32(data, data_size, cursor,
+                        out_envelope.acknowledgement_number) ||
+      !wire_le::ReadU32(data, data_size, cursor, out_envelope.sequence_number) ||
+      !wire_le::ReadU32(data, data_size, cursor, payload_size)) {
+    return false;
+  }
+  if (cursor + payload_size > data_size) {
+    return false;
+  }
+
+  out_envelope.packet_type = static_cast<PacketType>(packet_type);
+  out_envelope.payload.assign(reinterpret_cast<const char*>(data + cursor),
+                              payload_size);
+  cursor += payload_size;
+  return true;
+}
+
+bool ZP2PNode::IsHostPeerId(u32 peer_id) {
+  if (peer_id == ZPeerId::to_server) {
+    return true;
+  }
+  ZPeer* host_peer = peer_mapping_.GetPeerByAddress(host_endpoint_);
+  if (!host_peer) {
+    return false;
+  }
+  return host_peer->identifier.id == peer_id;
+}
+
+bool ZP2PNode::ShouldUseRelayForPeer(u32 peer_id) {
+  if (type_ != Type::Client) {
+    return false;
+  }
+  if (peer_id == ZPeerId::to_all) {
+    return true;
+  }
+  if (IsHostPeerId(peer_id)) {
+    return false;
+  }
+
+  ZPeer* peer = peer_mapping_.GetPeer(ZPeerId(peer_id));
+  if (!peer) {
+    return true;
+  }
+  PunchPeerState* state = FindPunchPeerState(peer->address);
+  if (!state) {
+    return true;
+  }
+  if (state->acknowledged) {
+    return false;
+  }
+  if (state->relay_mode) {
+    return true;
+  }
+  return state->attempts_sent >= kMaxPunchProbeAttempts;
+}
+
+void ZP2PNode::EmitPeerEvent(PeerEventType type, u32 peer_id, u32 detail) {
+  std::lock_guard<base::Mutex> lock(event_mutex_);
+  peer_events_.push(PeerEvent{type, peer_id, detail});
+}
+
 void ZP2PNode::TickNatPunchthrough() {
   if (state_ != State::kConnected) {
     return;
@@ -531,11 +874,29 @@ void ZP2PNode::TickNatPunchthrough() {
     }
   }
 
-  for (auto& punch_peer : punch_peers_) {
+  for (mem_size i = 0; i < punch_peers_.size();) {
+    auto& punch_peer = punch_peers_[i];
     if (IsSelfAddress(punch_peer.address)) {
+      ++i;
       continue;
     }
     if (type_ == Type::Client && (punch_peer.address == host_endpoint_)) {
+      ++i;
+      continue;
+    }
+
+    if (punch_peer.last_keepalive_time.time_since_epoch().count() != 0 &&
+        now - punch_peer.last_keepalive_time >= kPeerLivenessTimeout) {
+      ZPeer* stale_peer = peer_mapping_.GetPeerByAddress(punch_peer.address);
+      if (stale_peer) {
+        const u32 stale_peer_id = stale_peer->identifier.id;
+        peer_mapping_.DestroyPeer(stale_peer->identifier);
+        recently_seen_peers_.erase(stale_peer_id);
+        relay_announcement_state_.erase(stale_peer_id);
+        announced_peer_presence_.erase(stale_peer_id);
+        EmitPeerEvent(PeerEventType::PeerLeft, stale_peer_id);
+      }
+      punch_peers_.erase(i);
       continue;
     }
 
@@ -546,7 +907,18 @@ void ZP2PNode::TickNatPunchthrough() {
         ++punch_peer.attempts_sent;
         punch_peer.next_probe_time = now + kPunchProbeInterval;
         punch_peer.last_keepalive_time = now;
+      } else if (punch_peer.attempts_sent >= kMaxPunchProbeAttempts &&
+                 !punch_peer.relay_mode) {
+        punch_peer.relay_mode = true;
+        if (ZPeer* peer = peer_mapping_.GetPeerByAddress(punch_peer.address)) {
+          const auto it = relay_announcement_state_.find(peer->identifier.id);
+          if (it == relay_announcement_state_.end() || !it->second) {
+            relay_announcement_state_[peer->identifier.id] = true;
+            EmitPeerEvent(PeerEventType::RelayFallback, peer->identifier.id);
+          }
+        }
       }
+      ++i;
       continue;
     }
 
@@ -555,6 +927,7 @@ void ZP2PNode::TickNatPunchthrough() {
       SendKeepAlive(punch_peer.address);
       punch_peer.last_keepalive_time = now;
     }
+    ++i;
   }
 }
 
@@ -598,6 +971,7 @@ void ZP2PNode::ArmPunchProbe(const ZSocket::Address& endpoint) {
   if (state.attempts_sent >= kMaxPunchProbeAttempts) {
     state.attempts_sent = 0;
   }
+  state.relay_mode = false;
   state.next_probe_time = base::Clock::now();
 }
 
