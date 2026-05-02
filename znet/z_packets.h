@@ -191,6 +191,64 @@ class OutgoingPacket {
         destination_peer_id(peer_id) {
     payload.scalar = 0;
   }
+
+  // Tag for the reserve-capacity ctor below.
+  struct ReserveBufferTag {};
+
+  // Allocate a pooled payload buffer of `reserve_bytes` and leave
+  // heap_data_size pointing at the reserved size. For in-place writers
+  // (e.g. BitWriter) that don't know the final byte count up front: call
+  // SetHeapDataSize() once it's known. The destructor releases the buffer
+  // even if SetHeapDataSize() shrinks heap_data_size, since Release() uses
+  // the pool's BlockHeader to find the right free-list.
+  STRONG_INLINE OutgoingPacket(ReserveBufferTag,
+                               const u32 peer_id,
+                               const PacketType type,
+                               const PacketChannelType channel,
+                               const PackageFlags flags,
+                               const mem_size reserve_bytes)
+      : channel(channel),
+        flags(flags),
+        type(type),
+        heap_data_size(0),
+        last_send_time(0),
+        destination_peer_id(peer_id) {
+    payload.data = nullptr;
+    if (reserve_bytes > 0) {
+      payload.data = reinterpret_cast<byte*>(
+          PacketBufferPool::Instance().Allocate(reserve_bytes));
+      if (payload.data) {
+        heap_data_size = static_cast<u32>(reserve_bytes);
+      } else {
+        payload.scalar = 0;
+      }
+    } else {
+      payload.scalar = 0;
+    }
+  }
+
+  STRONG_INLINE void SetHeapDataSize(u32 size) { heap_data_size = size; }
+  STRONG_INLINE byte* HeapDataPtr() const { return payload.data; }
+  STRONG_INLINE mem_size HeapDataCapacity() const {
+    if (!payload.data) return 0;
+    return PacketBufferPool::Instance().GetCapacity(
+        reinterpret_cast<const unsigned char*>(payload.data));
+  }
+  // Detach the pooled buffer from the packet without releasing it. Caller
+  // becomes responsible for the buffer (via the pool's Release()). Used when
+  // a writer wants to swap the underlying buffer (e.g. on grow).
+  STRONG_INLINE byte* DetachHeapBuffer() {
+    byte* old = payload.data;
+    payload.data = nullptr;
+    heap_data_size = 0;
+    return old;
+  }
+  // Adopt a pre-allocated pooled buffer. Caller has already paid the
+  // PacketBufferPool::Allocate(); the packet now owns the release.
+  STRONG_INLINE void AttachHeapBuffer(byte* buffer, u32 reserved_size) {
+    payload.data = buffer;
+    heap_data_size = reserved_size;
+  }
   STRONG_INLINE ~OutgoingPacket() { ReleasePayload(); }
   // copy operator
   STRONG_INLINE OutgoingPacket& operator=(const OutgoingPacket& other) {
