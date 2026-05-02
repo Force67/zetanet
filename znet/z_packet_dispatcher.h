@@ -75,16 +75,23 @@ class PacketDispatcher {
     tx::network::PacketBuilder builder(crypto);
 
     if (packet.destination_peer_id == ZPeerId::to_server) {
-      DispatchToServer(packet, builder, receipt_queue);
+      const u32 sequence_number =
+          next_outgoing_sequence_number_.fetch_add(1, std::memory_order_relaxed);
+      DispatchToServer(packet, builder, receipt_queue, sequence_number);
     } else if (packet.destination_peer_id == ZPeerId::to_all) {
       for (auto& peer : peer_list_.GetPeerList()) {
         OutgoingPacket fanout_packet = packet;
-        DispatchToOne(peer, fanout_packet, builder, receipt_queue);
+        const u32 sequence_number = next_outgoing_sequence_number_.fetch_add(
+            1, std::memory_order_relaxed);
+        DispatchToOne(peer, fanout_packet, builder, receipt_queue,
+                      sequence_number);
       }
     } else {
       ZPeer* peer = peer_list_.GetPeer(packet.destination_peer_id);
       if (peer) {
-        DispatchToOne(*peer, packet, builder, receipt_queue);
+        const u32 sequence_number = next_outgoing_sequence_number_.fetch_add(
+            1, std::memory_order_relaxed);
+        DispatchToOne(*peer, packet, builder, receipt_queue, sequence_number);
       } else {
         BASE_LOGE(kLogTag,
                   "PacketDispatcher::DispatchPacket(): Failed to find peer {}",
@@ -98,8 +105,9 @@ class PacketDispatcher {
       ZPeer& peer,
       OutgoingPacket& packet,
       PacketBuilder& builder,
-      base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
-    auto bytes = builder.BuildPacket(packet, next_outgoing_sequence_number_);
+      base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue,
+      u32 sequence_number) {
+    auto bytes = builder.BuildPacket(packet, sequence_number);
     if (bytes.empty()) {
       BASE_LOGE(kLogTag, "Failed to build outgoing packet");
       return;
@@ -108,15 +116,15 @@ class PacketDispatcher {
       BASE_LOGE(kLogTag, "Failed to send packet to peer {}", peer.identifier.id);
       return;
     }
-    AddReceiptIfNeeded(packet, receipt_queue);
-    next_outgoing_sequence_number_++;
+    AddReceiptIfNeeded(packet, receipt_queue, sequence_number);
   }
 
   void DispatchToServer(
       OutgoingPacket& packet,
       PacketBuilder& builder,
-      base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
-    auto bytes = builder.BuildPacket(packet, next_outgoing_sequence_number_);
+      base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue,
+      u32 sequence_number) {
+    auto bytes = builder.BuildPacket(packet, sequence_number);
     if (bytes.empty()) {
       BASE_LOGE(kLogTag, "Failed to build outgoing packet");
       return;
@@ -125,13 +133,13 @@ class PacketDispatcher {
       BASE_LOGE(kLogTag, "Failed to send packet to server");
       return;
     }
-    AddReceiptIfNeeded(packet, receipt_queue);
-    next_outgoing_sequence_number_++;
+    AddReceiptIfNeeded(packet, receipt_queue, sequence_number);
   }
 
   void AddReceiptIfNeeded(
       OutgoingPacket& packet,
-      base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue) {
+      base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue,
+      u32 sequence_number) {
     if (packet.flags.reliable && packet.type != PacketType::Acknowledgement &&
         packet.last_send_time == 0) {
       const mem_size payload_bytes = packet.heap_data_size;
@@ -148,7 +156,7 @@ class PacketDispatcher {
         }
         packet.last_send_time = tl_cached_ts;
       }
-      if (receipt_queue.insert(next_outgoing_sequence_number_, std::move(packet))) {
+      if (receipt_queue.insert(sequence_number, std::move(packet))) {
         if (awaiting_ack_packet_count_) {
           awaiting_ack_packet_count_->fetch_add(1, std::memory_order_relaxed);
         }
