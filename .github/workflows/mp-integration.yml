@@ -1,0 +1,46 @@
+name: MP Integration
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  mp-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build MPIntegration
+        run: |
+          nix develop -c bash -lc 'premake5 --use-stl gmake2 && make config=debug MPIntegration -j$(nproc)'
+
+      # Iterate. The sequence-number race only showed up under concurrent
+      # dispatcher worker scheduling, so a single run is not enough.
+      - name: Run MPIntegration (debug)
+        run: |
+          for i in 1 2 3 4 5; do
+            echo "Iteration $i"
+            nix develop -c bash -lc './bin/MPIntegration_64'
+          done
+
+      - name: Build MPIntegration (release)
+        run: |
+          nix develop -c bash -lc 'make config=release MPIntegration -j$(nproc)'
+
+      - name: Run MPIntegration (release)
+        run: |
+          for i in 1 2 3 4 5; do
+            echo "Iteration $i"
+            nix develop -c bash -lc './bin/MPIntegration_64'
+          done

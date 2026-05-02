@@ -6,6 +6,7 @@ local sample_projects = {
   "p2p_demo",
   "file_transfer_demo",
   "handshake_integration",
+  "mp_integration",
 }
 
 for _, sample in ipairs(sample_projects) do
