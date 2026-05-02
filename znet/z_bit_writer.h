@@ -22,6 +22,7 @@
 // must outlive the writer.
 
 #include <cstring>
+#include <limits>
 #include <utility>
 
 #include <znet/z_network_allocator.h>
@@ -290,8 +291,16 @@ class BitWriter {
       ok_ = false;
       return false;
     }
-    mem_size new_capacity = capacity_ ? capacity_ * 2 : kDefaultReserveBytes;
+    if (needed > std::numeric_limits<u32>::max()) {
+      ok_ = false;
+      return false;
+    }
+    mem_size new_capacity = capacity_ ? capacity_ : kDefaultReserveBytes;
     while (new_capacity < needed) {
+      if (new_capacity > std::numeric_limits<mem_size>::max() / 2) {
+        new_capacity = needed;
+        break;
+      }
       new_capacity *= 2;
     }
     unsigned char* new_buf =

@@ -67,7 +67,30 @@ bool IsHandshakePacketType(const PacketType type) {
   switch (type) {
     case PacketType::ClientHello:
     case PacketType::ServerHello:
+    case PacketType::ServerGoodbye:
     case PacketType::ClientAuthProof:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool IsKnownSystemPacketType(const PacketType type) {
+  switch (type) {
+    case PacketType::Acknowledgement:
+    case PacketType::ClientHello:
+    case PacketType::ServerHello:
+    case PacketType::ServerGoodbye:
+    case PacketType::Heartbeat:
+    case PacketType::Notification:
+    case PacketType::ConfigurationUpdate:
+    case PacketType::RoutingInfo:
+    case PacketType::NetworkControl:
+    case PacketType::ClientAuthProof:
+    case PacketType::FileTransfer:
+    case PacketType::StreamingData:
+    case PacketType::ClockSyncRequest:
+    case PacketType::ClockSyncResponse:
       return true;
     default:
       return false;
@@ -141,11 +164,22 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
   // Encryption
   base::Vector<byte> encrypted_payload;
   if (packet_info.flags.encrypted) {
+    if (payload_size >
+        std::numeric_limits<u32>::max() - ZCryptoContext::kNonceSize -
+            ZCryptoContext::kGcmTagSize) {
+      BASE_LOGE(kLogTag, "Encrypted payload size overflow");
+      return {};
+    }
+    const u32 encrypted_wire_payload_size =
+        payload_size + static_cast<u32>(ZCryptoContext::kNonceSize +
+                                        ZCryptoContext::kGcmTagSize);
     encrypted_payload.resize(payload_size);
     if (payload_size > 0) {
       std::memcpy(encrypted_payload.data(), payload_source, payload_size);
     }
     if (!EncryptPayloadIfNeeded(packet_info, next_sequence_number,
+                                encrypted_wire_payload_size,
+                                original_payload_size,
                                 encrypted_payload)) {
       BASE_LOGE(kLogTag, "Failed to encrypt outgoing payload");
       return {};
@@ -311,6 +345,10 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
     BASE_LOGE(kLogTag, "Data packet on non-data channel");
     return false;
   }
+  if (IsSystemMessage(packet_type) && !IsKnownSystemPacketType(packet_type)) {
+    BASE_LOGE(kLogTag, "Unknown reserved system packet type");
+    return false;
+  }
   if (crypto_context_) {
     if (!header.flags.is_encrypted && !is_handshake_packet) {
       BASE_LOGE(kLogTag, "Rejected plaintext packet while encryption is enabled");
@@ -377,6 +415,12 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
     BASE_LOGE(kLogTag, "Compressed payload size mismatch");
     return false;
   }
+  if (header.flags.is_compressed &&
+      (original_size == 0 ||
+       original_size > ZCompressionContext::kMaxDecompressedSize)) {
+    BASE_LOGE(kLogTag, "Invalid compressed payload original size");
+    return false;
+  }
   const u32 payload_checksum = ComputeChecksum32(in_buffer + offset, payload_size);
   if (payload_checksum != expected_payload_checksum) {
     BASE_LOGE(kLogTag, "Payload checksum mismatch");
@@ -410,8 +454,20 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
     }
 
     if (header.flags.is_encrypted) {
+      u32 aad_original_payload_size = original_size;
+      if (!header.flags.is_compressed) {
+        if (payload_data.size() <
+            ZCryptoContext::kNonceSize + ZCryptoContext::kGcmTagSize) {
+          BASE_LOGE(kLogTag, "Encrypted payload too short");
+          return false;
+        }
+        aad_original_payload_size = static_cast<u32>(
+            payload_data.size() - ZCryptoContext::kNonceSize -
+            ZCryptoContext::kGcmTagSize);
+      }
       if (!DecryptPayloadIfNeeded(payload_data, out.sequence_number,
-                                  out.acknowledgement_number, header)) {
+                                  out.acknowledgement_number, header,
+                                  aad_original_payload_size)) {
         BASE_LOGE(kLogTag, "Encrypted payload authentication/decryption failed");
         return false;
       }

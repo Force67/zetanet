@@ -88,6 +88,18 @@ bool HmacSha256(const byte* key, mem_size key_size,
 #endif
 }
 
+bool ConstantTimeEquals(const base::String& lhs, const base::String& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  unsigned char diff = 0;
+  for (mem_size i = 0; i < lhs.size(); ++i) {
+    diff |= static_cast<unsigned char>(lhs[i]) ^
+            static_cast<unsigned char>(rhs[i]);
+  }
+  return diff == 0;
+}
+
 bool RandomBytes(byte* out, mem_size size) {
 #if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   mbedtls_entropy_context entropy;
@@ -195,7 +207,7 @@ bool ZCryptoContext::VerifyServerResponse(const base::String& server_proof) {
   }
   
   base::String expected_proof_hex = BytesToHex(expected_proof.data(), expected_proof.size());
-  if (expected_proof_hex != server_proof) {
+  if (!ConstantTimeEquals(expected_proof_hex, server_proof)) {
     BASE_LOGE(kLogTag, "Server proof verification failed");
     return false;
   }
@@ -238,7 +250,7 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
   std::memcpy(nonce, &nonce_prefix, sizeof(nonce_prefix));
   std::memcpy(nonce + sizeof(nonce_prefix), &counter, sizeof(counter));
 
-  const mem_size tag_size = 16;
+  const mem_size tag_size = kGcmTagSize;
   const mem_size ciphertext_size = plaintext.size();
 
   encrypted.resize(sizeof(nonce) + ciphertext_size + tag_size);
@@ -337,7 +349,7 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
   }
 
   const mem_size nonce_size = 12;
-  const mem_size tag_size = 16;
+  const mem_size tag_size = kGcmTagSize;
   
   if (encrypted_data.size() < nonce_size + tag_size) {
     BASE_LOGE(kLogTag, "Encrypted payload too short");
@@ -477,7 +489,7 @@ bool ZCryptoContext::VerifyClientProof(const base::String& client_proof) {
   }
 
   base::String expected_proof_hex = BytesToHex(expected_proof.data(), expected_proof.size());
-  if (expected_proof_hex != client_proof) {
+  if (!ConstantTimeEquals(expected_proof_hex, client_proof)) {
     BASE_LOGE(kLogTag, "Client proof verification failed");
     return false;
   }

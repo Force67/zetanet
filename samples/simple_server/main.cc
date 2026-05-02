@@ -139,6 +139,10 @@ int main(int argc, char** argv) {
 
   tx::network::IncomingPacket packet;
   while (true) {
+    while (server.Poll(tx::network::PacketChannelType::Control, packet)) {
+      ++total_system_packets;
+    }
+
     while (server.Poll(tx::network::PacketChannelType::Data, packet)) {
       if (tx::network::IsSystemMessage(packet.type)) {
         ++total_system_packets;

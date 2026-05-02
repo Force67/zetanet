@@ -3,6 +3,7 @@
 #pragma once
 
 #include <limits>
+#include <new>
 #include <type_traits>
 
 #include "z_wire_le.h"
@@ -34,26 +35,40 @@ class PacketWriter {
 
   ~PacketWriter() { delete[] buffer_; }
 
-  void EnsureCapacity(mem_size required) {
+  bool EnsureCapacity(mem_size required) {
     if (required <= capacity_) {
-      return;
+      return true;
     }
-    mem_size new_capacity = capacity_;
+    mem_size new_capacity = capacity_ == 0 ? 1 : capacity_;
     while (new_capacity < required) {
+      if (new_capacity > std::numeric_limits<mem_size>::max() / 2) {
+        new_capacity = required;
+        break;
+      }
       new_capacity *= 2;
     }
-    byte* new_buffer = new byte[new_capacity];
+    if (new_capacity < required) {
+      return false;
+    }
+    byte* new_buffer = new (std::nothrow) byte[new_capacity];
+    if (!new_buffer) {
+      return false;
+    }
     std::memcpy(new_buffer, buffer_, offset_);
     delete[] buffer_;
     buffer_ = new_buffer;
     capacity_ = new_capacity;
+    return true;
   }
 
   // Put method for scalar types
   template <typename T>
   typename std::enable_if<std::is_scalar<T>::value, bool>::type Put(
       const T value) {
-    EnsureCapacity(offset_ + sizeof(T));
+    if (sizeof(T) > std::numeric_limits<mem_size>::max() - offset_ ||
+        !EnsureCapacity(offset_ + sizeof(T))) {
+      return false;
+    }
     if constexpr (std::is_integral<T>::value || std::is_enum<T>::value) {
       using RawT = typename detail::WireRawType<T>::type;
       using UnsignedRawT = typename std::make_unsigned<RawT>::type;
@@ -84,14 +99,20 @@ class PacketWriter {
                               std::is_trivially_copyable<T>::value,
                           bool>::type
   Put(const T& type) {
-    EnsureCapacity(offset_ + sizeof(T));
+    if (sizeof(T) > std::numeric_limits<mem_size>::max() - offset_ ||
+        !EnsureCapacity(offset_ + sizeof(T))) {
+      return false;
+    }
     std::memcpy(buffer_ + offset_, &type, sizeof(T));
     offset_ += sizeof(T);
     return true;
   }
 
   bool PutS(const base::Span<byte>& data) {
-    EnsureCapacity(offset_ + data.size());
+    if (data.size() > std::numeric_limits<mem_size>::max() - offset_ ||
+        !EnsureCapacity(offset_ + data.size())) {
+      return false;
+    }
     std::memcpy(buffer_ + offset_, data.data(), data.size());
     offset_ += data.size();
     return true;
@@ -101,7 +122,11 @@ class PacketWriter {
     if (data.size() > std::numeric_limits<u16>::max()) {
       return false;
     }
-    EnsureCapacity(offset_ + sizeof(u16) + data.size());
+    if (sizeof(u16) > std::numeric_limits<mem_size>::max() - offset_ ||
+        data.size() > std::numeric_limits<mem_size>::max() - offset_ - sizeof(u16) ||
+        !EnsureCapacity(offset_ + sizeof(u16) + data.size())) {
+      return false;
+    }
     wire_le::StoreU16(buffer_ + offset_, static_cast<u16>(data.size()));
     offset_ += sizeof(u16);
     return PutS(data);
@@ -130,7 +155,7 @@ class PacketReader {
   // Read method for scalar types
   template <typename T>
   typename std::enable_if<std::is_scalar<T>::value, bool>::type Read(T& value) {
-    if (offset_ + sizeof(T) > capacity_) {
+    if (sizeof(T) > capacity_ - offset_) {
       return false;
     }
     if constexpr (std::is_integral<T>::value || std::is_enum<T>::value) {
@@ -166,7 +191,7 @@ class PacketReader {
                               std::is_trivially_copyable<T>::value,
                           bool>::type
   Read(T& type) {
-    if (offset_ + sizeof(T) > capacity_) {
+    if (sizeof(T) > capacity_ - offset_) {
       return false;
     }
 
@@ -176,7 +201,7 @@ class PacketReader {
   }
 
   bool ReadS(base::Vector<byte>& data) {
-    if (offset_ + data.size() > capacity_) {
+    if (data.size() > capacity_ - offset_) {
       return false;
     }
 
@@ -186,12 +211,12 @@ class PacketReader {
   }
 
   bool ReadList(base::Vector<byte>& data) {
-    if (offset_ + sizeof(u16) > capacity_) {
+    if (sizeof(u16) > capacity_ - offset_) {
       return false;
     }
     const u16 size = wire_le::LoadU16(buffer_ + offset_);
     offset_ += sizeof(u16);
-    if (offset_ + size > capacity_) {
+    if (size > capacity_ - offset_) {
       return false;
     }
     data.resize(size);
@@ -200,6 +225,7 @@ class PacketReader {
 
   // Return the current position in the buffer
   mem_size position() const { return offset_; }
+  mem_size remaining() const { return capacity_ - offset_; }
 
  private:
   const byte* buffer_;

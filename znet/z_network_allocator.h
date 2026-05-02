@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 #include <bit>
+#include <limits>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -42,6 +43,9 @@ class PacketBufferPool {
 
   unsigned char* Allocate(mem_size requested_size) {
     if (requested_size == 0) {
+      return nullptr;
+    }
+    if (requested_size > std::numeric_limits<std::uint32_t>::max()) {
       return nullptr;
     }
 
@@ -258,6 +262,9 @@ class PacketBufferPool {
     const mem_size capacity =
         (class_index == kInvalidClassIndex) ? requested_size
                                             : classes_[class_index].block_size;
+    if (capacity > std::numeric_limits<mem_size>::max() - sizeof(BlockHeader)) {
+      return nullptr;
+    }
     BlockHeader* header = reinterpret_cast<BlockHeader*>(
         ::operator new(sizeof(BlockHeader) + capacity));
     header->ref_count.store(1, std::memory_order_relaxed);

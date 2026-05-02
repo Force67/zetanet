@@ -427,15 +427,22 @@ bool TestAuthenticationFailureReject() {
 
   {
     tx::network::PacketWriter writer;
+    const std::string client_key = "dummy-client-nonce";
+    const std::string client_challenge = "dummy-client-challenge";
     sys::ClientHello hello{
         .protocol_version = sys::kProtocolVersionCurrent,
         .feature_flags = static_cast<u32>(sys::kFeatureClockSync |
                                           sys::kFeatureEncryption),
         .encryption_algo_list_len = 0,
         .compression_algo_list_len = 0,
-        .pub_key_list_len = 0,
-        .challenge_len = 0};
+        .pub_key_list_len = 1,
+        .challenge_len = static_cast<u8>(client_challenge.size())};
     sys::ClientHello::Build(writer, hello);
+    writer.PutList(base::Span<byte>(
+        reinterpret_cast<const byte*>(client_key.data()), client_key.size()));
+    writer.PutList(base::Span<byte>(
+        reinterpret_cast<const byte*>(client_challenge.data()),
+        client_challenge.size()));
 
     const PackageFlags flags{.reliable = 1,
                              .encrypted = 0,

@@ -38,9 +38,14 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
 
   // Fetches the next packet from the queue
   bool Poll(PacketChannelType t, IncomingPacket& p) {
-    if (packet_queue_.Pop(t, p)) {
+    while (packet_queue_.Pop(t, p)) {
       if (IsSystemMessage(p.type)) {
         ProcessSystemMessage(p);
+        return true;
+      }
+      if (t == PacketChannelType::Data &&
+          !IsPeerAuthorizedForData(p.source_peer_id)) {
+        continue;
       }
       return true;
     }
@@ -63,6 +68,8 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
                              u64 server_receive_tick_ms);
 
  private:
+  bool IsPeerAuthorizedForData(u32 peer_id) const;
+
   struct PeerHandshakeInfo {
     u16 protocol_version{0};
     u32 negotiated_features{0};
@@ -70,6 +77,7 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
   };
 
   std::unordered_set<u32> handshaked_peers_;
+  std::unordered_set<u32> authenticated_peers_;
   std::unordered_map<u32, PeerHandshakeInfo> peer_handshake_info_;
 };
 }  // namespace tx::network

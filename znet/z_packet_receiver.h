@@ -58,9 +58,13 @@ class PacketReceiver {
       return ReceiveResult::Error;
     }
 
-    PacketHeader header{};
-    std::memcpy(&header, incoming_buffer_.data(), sizeof(PacketHeader));
-    const u32 packet_size = header.total_packet_data_size;
+    const u16 magic = wire_le::LoadU16(incoming_buffer_.data());
+    if (magic != PacketHeader::kMagic) {
+      BASE_LOGE(kLogTag, "Invalid packet magic");
+      return ReceiveResult::Error;
+    }
+    const u32 packet_size =
+        wire_le::LoadU32(incoming_buffer_.data() + 4);
     if (packet_size > MaxBufferSize || packet_size < sizeof(PacketHeader)) {
       BASE_LOGE(kLogTag, "Invalid packet size");
       return ReceiveResult::Error;

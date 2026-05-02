@@ -21,6 +21,7 @@ namespace tx::network {
 class ZCryptoContext {
  public:
   static constexpr mem_size kNonceSize = 12;
+  static constexpr mem_size kGcmTagSize = 16;
 
   ZCryptoContext();
   ~ZCryptoContext();

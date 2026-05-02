@@ -66,6 +66,7 @@ bool ZServer::Begin(u16 port, const StartOptions& options) {
     packet_queue_.StartIncomingThread();  // Warm the receiving thread at boot
   }
   handshaked_peers_.clear();
+  authenticated_peers_.clear();
   peer_handshake_info_.clear();
   state_ = ZAsyncTransportLayer::State::kConnected;
   return true;
@@ -154,6 +155,12 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
                           system_commands::HandshakeRejectReason::MalformedPacket);
         return;
       }
+      if (request.pub_key_list_len > 1) {
+        BASE_LOGE(kLogTag, "Malformed ClientHello: unsupported public key count");
+        SendServerGoodbye(p.source_peer_id,
+                          system_commands::HandshakeRejectReason::MalformedPacket);
+        return;
+      }
       if (!IsProtocolVersionSupported(request.protocol_version)) {
         BASE_LOGE(kLogTag,
                   "Rejected ClientHello from peer {}: unsupported protocol version {}",
@@ -209,8 +216,9 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
       base::String client_challenge;
       if (request.challenge_len > 0) {
         base::Vector<byte> temp_challenge;
-        if (!reader.ReadList(temp_challenge)) {
-          BASE_LOGE(kLogTag, "Malformed ClientHello: missing client challenge");
+        if (!reader.ReadList(temp_challenge) ||
+            temp_challenge.size() != request.challenge_len) {
+          BASE_LOGE(kLogTag, "Malformed ClientHello: invalid client challenge");
           SendServerGoodbye(p.source_peer_id,
                             system_commands::HandshakeRejectReason::MalformedPacket);
           return;
@@ -220,15 +228,31 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
       }
 
       if (crypto_context_) {
+        if (request.pub_key_list_len != 1 || client_key.empty() ||
+            client_challenge.empty()) {
+          BASE_LOGE(kLogTag, "Malformed ClientHello: missing crypto key material");
+          SendServerGoodbye(p.source_peer_id,
+                            system_commands::HandshakeRejectReason::MalformedPacket);
+          return;
+        }
         // Process client's key material
         base::String client_nonce(reinterpret_cast<const char*>(client_key.data()),
                                  client_key.size());
         crypto_context_->ProcessServerKey(client_nonce, client_challenge);
       }
+      if (reader.remaining() != 0) {
+        BASE_LOGE(kLogTag, "Malformed ClientHello: trailing bytes");
+        SendServerGoodbye(p.source_peer_id,
+                          system_commands::HandshakeRejectReason::MalformedPacket);
+        return;
+      }
 
       peer_handshake_info_[p.source_peer_id] = {
           request.protocol_version, negotiated_features, base::Clock::now()};
       handshaked_peers_.insert(p.source_peer_id);
+      if (!crypto_context_) {
+        authenticated_peers_.insert(p.source_peer_id);
+      }
       SendServerHello(p.source_peer_id, request.protocol_version,
                       negotiated_features);
 
@@ -254,13 +278,14 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
         break;
       }
       PacketReader reader((byte*)p.data.data(), p.data.size());
-      system_commands::ClientAuthProof request;
-      if (!reader.Read(request)) {
+      system_commands::ClientAuthProof request{};
+      if (!reader.Read(request.proof_len)) {
         BASE_LOGE(kLogTag, "Malformed ClientAuthProof: missing header");
         return;
       }
       base::Vector<byte> proof_data;
-      if (!reader.ReadList(proof_data)) {
+      if (request.proof_len == 0 || !reader.ReadList(proof_data) ||
+          proof_data.size() != request.proof_len || reader.remaining() != 0) {
         BASE_LOGE(kLogTag, "Malformed ClientAuthProof: missing proof");
         return;
       }
@@ -269,17 +294,22 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
       if (!crypto_context_->VerifyClientProof(proof)) {
         BASE_LOGE(kLogTag, "Client authentication failed!");
         handshaked_peers_.erase(p.source_peer_id);
+        authenticated_peers_.erase(p.source_peer_id);
         peer_handshake_info_.erase(p.source_peer_id);
         SendServerGoodbye(
             p.source_peer_id,
             system_commands::HandshakeRejectReason::AuthenticationFailed);
         return;
       }
+      authenticated_peers_.insert(p.source_peer_id);
       BASE_LOGI(kLogTag, "Client authenticated successfully");
       break;
     }
     case PacketType::ClockSyncRequest: {
       if (!handshaked_peers_.count(p.source_peer_id)) {
+        break;
+      }
+      if (crypto_context_ && !authenticated_peers_.count(p.source_peer_id)) {
         break;
       }
       auto info_it = peer_handshake_info_.find(p.source_peer_id);
@@ -291,7 +321,7 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
       const u64 server_receive_tick_ms = GetLocalClockTickMs();
       PacketReader reader((byte*)p.data.data(), p.data.size());
       u64 client_tick_ms = 0;
-      if (!reader.Read(client_tick_ms)) {
+      if (!reader.Read(client_tick_ms) || reader.remaining() != 0) {
         BASE_LOGE(kLogTag, "Malformed ClockSyncRequest payload");
         return;
       }
@@ -302,6 +332,13 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
     default:
       break;
   }
+}
+
+bool ZServer::IsPeerAuthorizedForData(u32 peer_id) const {
+  if (crypto_context_) {
+    return authenticated_peers_.count(peer_id) != 0;
+  }
+  return handshaked_peers_.count(peer_id) != 0;
 }
 
 void ZServer::SendServerHello(ZPeerId dest,

@@ -2,6 +2,8 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#include <limits>
+
 #include <lz4.h>
 
 #ifdef ZNET_USE_STL
@@ -17,6 +19,8 @@ namespace tx::network {
 class ZCompressionContext {
  public:
   static constexpr mem_size kMaxDecompressedSize = 64 * 1024 * 1024;  // 64 MB limit
+  static constexpr mem_size kMaxExpansionRatio = 256;
+  static constexpr mem_size kExpansionSlackBytes = 1024;
 
   static bool Compress(const byte* input_data, mem_size input_size,
                        base::Vector<byte>& compressed) {
@@ -24,7 +28,15 @@ class ZCompressionContext {
       compressed.clear();
       return true;
     }
+    if (!input_data || input_size > static_cast<mem_size>(std::numeric_limits<int>::max())) {
+      compressed.clear();
+      return false;
+    }
     int max_compressed_size = LZ4_compressBound(static_cast<int>(input_size));
+    if (max_compressed_size <= 0) {
+      compressed.clear();
+      return false;
+    }
     compressed.resize(static_cast<mem_size>(max_compressed_size));
 
     int compressed_size =
@@ -44,13 +56,28 @@ class ZCompressionContext {
   static bool Decompress(const byte* data, mem_size data_size,
                           mem_size original_size,
                           base::Vector<byte>& decompressed) {
-    if (original_size > kMaxDecompressedSize) {
+    if (original_size > kMaxDecompressedSize ||
+        data_size > static_cast<mem_size>(std::numeric_limits<int>::max()) ||
+        original_size > static_cast<mem_size>(std::numeric_limits<int>::max())) {
       decompressed.clear();
       return false;
     }
     if (data_size == 0 && original_size == 0) {
       decompressed.clear();
       return true;
+    }
+    if (!data || data_size == 0 || original_size == 0) {
+      decompressed.clear();
+      return false;
+    }
+    const mem_size max_reasonable_output =
+        (data_size > (std::numeric_limits<mem_size>::max() - kExpansionSlackBytes) /
+                         kMaxExpansionRatio)
+            ? std::numeric_limits<mem_size>::max()
+            : data_size * kMaxExpansionRatio + kExpansionSlackBytes;
+    if (original_size > max_reasonable_output) {
+      decompressed.clear();
+      return false;
     }
     decompressed.resize(original_size);
 

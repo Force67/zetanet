@@ -36,6 +36,8 @@ class PacketBuilder {
 
   bool EncryptPayloadIfNeeded(const OutgoingPacket& packet_info,
                               u32 next_sequence_number,
+                              u32 wire_payload_size,
+                              u32 original_payload_size,
                               base::Vector<byte>& payload) {
     if (!packet_info.flags.encrypted) {
       return true;
@@ -44,7 +46,7 @@ class PacketBuilder {
       return false;
     }
     // Stack-allocated AAD avoids per-packet heap allocation.
-    byte aad[12];
+    byte aad[20];
     const u8 flags =
         (packet_info.flags.reliable ? 1 : 0) |
         (packet_info.flags.encrypted ? (1 << 1) : 0) |
@@ -60,6 +62,8 @@ class PacketBuilder {
     aad[3] = flags;
     wire_le::StoreU32(aad + 4, sequence);
     wire_le::StoreU32(aad + 8, acknowledgement);
+    wire_le::StoreU32(aad + 12, wire_payload_size);
+    wire_le::StoreU32(aad + 16, original_payload_size);
 
     base::Vector<byte> encrypted_payload;
     if (!crypto_context_->EncryptPayload(
@@ -111,7 +115,8 @@ class PacketUnpacker {
   bool DecryptPayloadIfNeeded(base::Vector<byte>& payload,
                               u32 sequence_number,
                               u32 acknowledgement_number,
-                              const PacketHeader& header) {
+                              const PacketHeader& header,
+                              u32 original_payload_size) {
     if (!header.flags.is_encrypted) {
       return true;
     }
@@ -119,7 +124,7 @@ class PacketUnpacker {
       return false;
     }
     // Stack-allocated AAD avoids per-packet heap allocation.
-    byte aad[12];
+    byte aad[20];
     const u8 flags =
         (header.flags.is_reliable ? 1 : 0) |
         (header.flags.is_encrypted ? (1 << 1) : 0) |
@@ -130,6 +135,8 @@ class PacketUnpacker {
     aad[3] = flags;
     wire_le::StoreU32(aad + 4, sequence_number);
     wire_le::StoreU32(aad + 8, acknowledgement_number);
+    wire_le::StoreU32(aad + 12, static_cast<u32>(payload.size()));
+    wire_le::StoreU32(aad + 16, original_payload_size);
 
     base::Vector<byte> plaintext;
     if (!crypto_context_->DecryptPayload(

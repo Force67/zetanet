@@ -2,6 +2,8 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#include <limits>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
@@ -168,13 +170,23 @@ class OutgoingPacket {
       : channel(channel),
         flags(flags),
         type(type),
-        heap_data_size(static_cast<u32>(data.size())),
+        heap_data_size(0),
         last_send_time(0),
         destination_peer_id(peer_id) {
     payload.data = nullptr;
+    if (data.size() > std::numeric_limits<u32>::max()) {
+      payload.scalar = 0;
+      return;
+    }
+    heap_data_size = static_cast<u32>(data.size());
     if (heap_data_size > 0) {
       payload.data = reinterpret_cast<byte*>(
           PacketBufferPool::Instance().Allocate(data.size()));
+      if (!payload.data) {
+        heap_data_size = 0;
+        payload.scalar = 0;
+        return;
+      }
       memcpy(payload.data, data.data(), data.size());
     }
   }
@@ -214,7 +226,9 @@ class OutgoingPacket {
         last_send_time(0),
         destination_peer_id(peer_id) {
     payload.data = nullptr;
-    if (reserve_bytes > 0) {
+    if (reserve_bytes > std::numeric_limits<u32>::max()) {
+      payload.scalar = 0;
+    } else if (reserve_bytes > 0) {
       payload.data = reinterpret_cast<byte*>(
           PacketBufferPool::Instance().Allocate(reserve_bytes));
       if (payload.data) {

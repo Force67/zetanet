@@ -16,6 +16,14 @@ static constexpr auto kClockSyncInterval = std::chrono::milliseconds(1000);
 static constexpr auto kClientHelloRetryInterval = std::chrono::milliseconds(500);
 static constexpr auto kHandshakeTimeout = std::chrono::seconds(8);
 
+namespace {
+bool ReadListWithExpectedSize(PacketReader& reader,
+                              u8 expected_size,
+                              base::Vector<byte>& out) {
+  return reader.ReadList(out) && out.size() == expected_size;
+}
+}  // namespace
+
 bool ZClient::Connect(const base::StringRef address, u16 port) {
   const ConnectionOptions options{
       .use_encryption = false,
@@ -234,13 +242,20 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
           Disconnect();
           return;
         }
+        if (response.pub_key_list_len > 1) {
+          MarkHandshakeFailure(HandshakeFailureReason::kMalformedServerHello,
+                               "Malformed ServerHello: unsupported public key count");
+          Disconnect();
+          return;
+        }
         
         base::String server_challenge;
         if (response.challenge_len > 0) {
           base::Vector<byte> temp_challenge;
-          if (!reader.ReadList(temp_challenge)) {
+          if (!ReadListWithExpectedSize(reader, response.challenge_len,
+                                        temp_challenge)) {
             MarkHandshakeFailure(HandshakeFailureReason::kMalformedServerHello,
-                                 "Malformed ServerHello: missing server challenge");
+                                 "Malformed ServerHello: invalid server challenge");
             Disconnect();
             return;
           }
@@ -251,9 +266,10 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
         base::String server_proof;
         if (response.proof_len > 0) {
           base::Vector<byte> temp_proof;
-          if (!reader.ReadList(temp_proof)) {
+          if (!ReadListWithExpectedSize(reader, response.proof_len,
+                                        temp_proof)) {
             MarkHandshakeFailure(HandshakeFailureReason::kMalformedServerHello,
-                                 "Malformed ServerHello: missing server proof");
+                                 "Malformed ServerHello: invalid server proof");
             Disconnect();
             return;
           }
@@ -262,6 +278,19 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
         }
 
         if (crypto_context_) {
+          if (response.pub_key_list_len != 1 || key.empty() ||
+              server_challenge.empty() || server_proof.empty()) {
+            MarkHandshakeFailure(HandshakeFailureReason::kMalformedServerHello,
+                                 "Malformed ServerHello: missing crypto proof material");
+            Disconnect();
+            return;
+          }
+          if (reader.remaining() != 0) {
+            MarkHandshakeFailure(HandshakeFailureReason::kMalformedServerHello,
+                                 "Malformed ServerHello: trailing bytes");
+            Disconnect();
+            return;
+          }
           crypto_context_->ProcessServerKey(
               base::String((const char*)key.data(), key.size()),
               server_challenge);
@@ -280,6 +309,11 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
           if (!client_proof.empty()) {
             SendClientAuthProof(client_proof);
           }
+        } else if (reader.remaining() != 0) {
+          MarkHandshakeFailure(HandshakeFailureReason::kMalformedServerHello,
+                               "Malformed ServerHello: trailing bytes");
+          Disconnect();
+          return;
         }
 
         if (scaling_tier_count_ > 0 &&
@@ -302,6 +336,9 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
       system_commands::ServerGoodbye goodbye{.reason =
                                                  system_commands::HandshakeRejectReason::None};
       if (!reader.Read(goodbye.reason)) {
+        MarkHandshakeFailure(HandshakeFailureReason::kServerRejected,
+                             "Received malformed ServerGoodbye");
+      } else if (reader.remaining() != 0) {
         MarkHandshakeFailure(HandshakeFailureReason::kServerRejected,
                              "Received malformed ServerGoodbye");
       } else {
@@ -339,7 +376,7 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
       u64 server_receive_tick_ms = 0;
       u64 server_send_tick_ms = 0;
       if (!reader.Read(client_send_tick_ms) || !reader.Read(server_receive_tick_ms) ||
-          !reader.Read(server_send_tick_ms)) {
+          !reader.Read(server_send_tick_ms) || reader.remaining() != 0) {
         BASE_LOGE(kLogTag, "Malformed ClockSyncResponse payload");
         return;
       }
@@ -464,6 +501,9 @@ void ZClient::SendClientHelloDirect() {
 }
 
 void ZClient::SendClientAuthProof(const base::String& proof) {
+  if (proof.size() > std::numeric_limits<u8>::max()) {
+    return;
+  }
   system_commands::ClientAuthProof request{
       .proof_len = static_cast<u8>(proof.size())};
   PacketWriter writer;

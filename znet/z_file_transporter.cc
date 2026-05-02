@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <limits>
@@ -90,6 +91,22 @@ bool ContainsPathTraversal(const base::String& path) {
     }
   }
   return false;
+}
+
+bool IsSafeTransferFileName(const base::String& file_name) {
+  if (file_name.empty() || file_name == "." || file_name == "..") {
+    return false;
+  }
+  if (ContainsPathTraversal(file_name)) {
+    return false;
+  }
+  for (const char ch : file_name) {
+    const unsigned char c = static_cast<unsigned char>(ch);
+    if (c < 32 || ch == '\0' || ch == '/' || ch == '\\' || ch == ':') {
+      return false;
+    }
+  }
+  return true;
 }
 
 u32 UpdateChecksum(const byte* data, mem_size size, u32 seed) {
@@ -201,7 +218,8 @@ bool ZFileTransporter::SendFile(const base::Path& path,
   }
 
   const base::String file_name = path.BaseName().ToAsciiString();
-  if (file_name.empty() || file_name.size() > std::numeric_limits<u16>::max()) {
+  if (!IsSafeTransferFileName(file_name) ||
+      file_name.size() > std::numeric_limits<u16>::max()) {
     BASE_LOGE(kLogTag, "Unsupported file name for transfer");
     return false;
   }
@@ -406,7 +424,7 @@ bool ZFileTransporter::BuildTransferChunkPayload(
   if (chunk.has_file_name != (chunk.chunk_index == 0)) {
     return false;
   }
-  if (chunk.has_file_name && chunk.file_name.empty()) {
+  if (chunk.has_file_name && !IsSafeTransferFileName(chunk.file_name)) {
     return false;
   }
   if (chunk.file_name.size() > std::numeric_limits<u16>::max()) {
@@ -558,8 +576,8 @@ bool ZFileTransporter::ParseTransferChunkPayload(const base::Span<byte>& payload
       reinterpret_cast<const char*>(payload.data() + cursor), file_name_size);
   cursor += file_name_size;
   
-  if (chunk.has_file_name && IsPathTraversal(chunk.file_name)) {
-    BASE_LOGE(kLogTag, "Path traversal attempt detected in filename");
+  if (chunk.has_file_name && !IsSafeTransferFileName(chunk.file_name)) {
+    BASE_LOGE(kLogTag, "Unsafe file transfer filename rejected");
     return false;
   }
 
@@ -752,6 +770,9 @@ bool ZFileTransporter::EnsureStreamSession(const TransferChunk& chunk,
   if (chunk.has_file_name == false) {
     return false;
   }
+  if (!IsSafeTransferFileName(chunk.file_name)) {
+    return false;
+  }
   if (active_streams_.size() >= kMaxActiveIncomingTransfers) {
     BASE_LOGE(kLogTag, "Rejected transfer {}: too many active transfers ({})",
               chunk.transfer_id, active_streams_.size());
@@ -856,6 +877,12 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
 
 bool ZFileTransporter::FinalizeStreamedFile(u64 transfer_id,
                                             const base::Path& output_path) {
+  const base::String out_path = output_path.ToAsciiString();
+  if (IsPathTraversal(out_path)) {
+    BASE_LOGE(kLogTag, "Path traversal attempt detected in output path");
+    return false;
+  }
+
   base::Path temp_path;
   u32 expected_checksum = 0;
   {
@@ -888,7 +915,6 @@ bool ZFileTransporter::FinalizeStreamedFile(u64 transfer_id,
     return false;
   }
 
-  const base::String out_path = output_path.ToAsciiString();
   const base::String tmp_path = temp_path.ToAsciiString();
   std::remove(out_path.c_str());
   if (std::rename(tmp_path.c_str(), out_path.c_str()) != 0) {
