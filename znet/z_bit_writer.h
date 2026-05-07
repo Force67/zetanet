@@ -115,8 +115,21 @@ class BitWriter {
     if (bits < 64) {
       value &= (u64{1} << bits) - 1;
     }
-    scratch_ |= value << scratch_bits_;
-    scratch_bits_ += bits;
+    const u32 room = 64 - scratch_bits_;
+    if (bits <= room) {
+      scratch_ |= value << scratch_bits_;
+      scratch_bits_ += bits;
+    } else {
+      // The value would overflow the 64-bit accumulator. Pack the low `room`
+      // bits, drain the full accumulator, then stash the remaining high bits.
+      if (room > 0) {
+        scratch_ |= value << scratch_bits_;
+      }
+      scratch_bits_ = 64;
+      FlushScratchBytes();
+      scratch_ = value >> room;
+      scratch_bits_ = bits - room;
+    }
     if (scratch_bits_ >= kFlushThresholdBits) {
       FlushScratchBytes();
     }
