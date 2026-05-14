@@ -129,7 +129,11 @@ class ZPacketQueue {
     if (!incoming_thread_running()) {
       ReceiveOne();
     }
-    auto& queue = channel_incoming_queues_[channel_type];
+    auto it = channel_incoming_queues_.find(channel_type);
+    if (it == channel_incoming_queues_.end()) {
+      return false;
+    }
+    auto& queue = it->second;
     if (!queue.empty()) {
       queue.dequeue(p);
       return true;

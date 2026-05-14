@@ -9,7 +9,6 @@
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
-#include <unordered_set>
 #include <unordered_map>
 #else
 #include <base/time/time.h>
@@ -35,6 +34,61 @@ void SaturatingSub(base::Atomic<mem_size>& value, mem_size delta) {
     }
   }
 }
+
+// Bounded per-peer replay/duplicate filter. Reliable sequence numbers rise
+// monotonically per sender, so a sliding bitmap window relative to the
+// highest seen value is sufficient to drop duplicates (retransmits) and
+// replays without the unbounded growth of a per-peer "seen everything" set.
+class ReplayWindow {
+ public:
+  // returns true if `seq` is new (should be delivered), false for a duplicate
+  // or a replay that has already scrolled out of the window.
+  bool Observe(u32 seq) {
+    if (!initialized_) {
+      initialized_ = true;
+      highest_ = seq;
+      bits_.fill(0);
+      Set(seq);
+      return true;
+    }
+    if (seq == highest_) {
+      return false;
+    }
+    if (static_cast<i32>(seq - highest_) > 0) {
+      const u32 advance = seq - highest_;
+      if (advance >= kWindow) {
+        bits_.fill(0);
+      } else {
+        for (u32 i = 1; i <= advance; ++i) {
+          Clear(highest_ + i);
+        }
+      }
+      highest_ = seq;
+      Set(seq);
+      return true;
+    }
+    const u32 behind = highest_ - seq;
+    if (behind >= kWindow) {
+      return false;  // too old; treat as a replay and drop.
+    }
+    if (Test(seq)) {
+      return false;
+    }
+    Set(seq);
+    return true;
+  }
+
+ private:
+  static constexpr u32 kWindow = 8192;  // bits; ~1 KiB of state per peer.
+  void Set(u32 seq) { bits_[(seq % kWindow) / 64] |= (u64{1} << (seq % 64)); }
+  void Clear(u32 seq) { bits_[(seq % kWindow) / 64] &= ~(u64{1} << (seq % 64)); }
+  bool Test(u32 seq) const {
+    return (bits_[(seq % kWindow) / 64] >> (seq % 64)) & 1u;
+  }
+  std::array<u64, kWindow / 64> bits_{};
+  u32 highest_{0};
+  bool initialized_{false};
+};
 
 mem_size ScaleLimitByPerMille(mem_size base_limit, mem_size per_mille) {
   if (base_limit == 0) {
@@ -63,9 +117,14 @@ ZPacketQueue::ZPacketQueue(ZSocket& socket,
       congestion_control_config_({}),
       next_congestion_recovery_time_(base::Clock::now() + kCongestionRecoveryInterval),
       rate_limit_window_start_(base::Clock::now()) {
-    // Default-construct queues via operator[] (PriorityMPSCQueue is not moveable due to mutex)
+    // Default-construct queues via operator[] (PriorityMPSCQueue is not moveable due to mutex).
+    // Both incoming and outgoing maps must be fully populated here: after
+    // construction the receiver thread and the consumer thread access them
+    // concurrently, and a structural std::map insert racing a lookup is UB.
     channel_outgoing_queues_[PacketChannelType::Control];
     channel_outgoing_queues_[PacketChannelType::Data];
+    channel_incoming_queues_[PacketChannelType::Control];
+    channel_incoming_queues_[PacketChannelType::Data];
     channel_outgoing_bytes_[0].store(0, std::memory_order_relaxed);
     channel_outgoing_bytes_[1].store(0, std::memory_order_relaxed);
     awaiting_ack_packet_count_.store(0, std::memory_order_relaxed);
@@ -432,7 +491,10 @@ bool ZPacketQueue::ReceiveOne() {
                            pack.acknowledgement_number);
     }
     auto prio = (PacketPriority)pack.flags.priority;
-    channel_incoming_queues_[pack.channel].enqueue(std::move(pack), prio);
+    if (auto it = channel_incoming_queues_.find(pack.channel);
+        it != channel_incoming_queues_.end()) {
+      it->second.enqueue(std::move(pack), prio);
+    }
     return true;
   } else if (result == PacketReceiver::ReceiveResult::Acknowledgement) {
     if (pack.data.size() >= 4) {
@@ -461,11 +523,13 @@ bool ZPacketQueue::ReceiveOne() {
 }
 
 void ZPacketQueue::ProcessReceiving() {
-  // Per-peer dedup sets live here (not in the class) to avoid changing the
+  // Per-peer dedup state lives here (not in the class) to avoid changing the
   // header/ABI.  Sequence numbers are only unique within a single peer's
-  // dispatcher, so dedup must be scoped per source_peer_id.
+  // dispatcher, so dedup must be scoped per source_peer_id.  Each peer's
+  // window is bounded, and the peer count is bounded by ZPeerMapping::kMaxPeers,
+  // so total dedup memory is bounded regardless of remote send volume.
   // ProcessReceiving runs on a single dedicated thread per ZPacketQueue instance.
-  std::unordered_map<u32, std::unordered_set<u32>> received_reliable_seqs;
+  std::unordered_map<u32, ReplayWindow> received_reliable_seqs;
 
   IncomingPacket pack;
   while (!stop_threads_.load()) {
@@ -479,13 +543,15 @@ void ZPacketQueue::ProcessReceiving() {
         AddAwaitingAckPacket(pack.source_peer_id, pack.sequence_number,
                              pack.acknowledgement_number);
         // But only deliver once — drop duplicate sequence numbers per peer.
-        if (!received_reliable_seqs[pack.source_peer_id]
-                 .insert(pack.sequence_number)
-                 .second) {
+        if (!received_reliable_seqs[pack.source_peer_id].Observe(
+                pack.sequence_number)) {
           continue;
         }
       }
-      channel_incoming_queues_[pack.channel].enqueue(std::move(pack), prio);
+      if (auto it = channel_incoming_queues_.find(pack.channel);
+          it != channel_incoming_queues_.end()) {
+        it->second.enqueue(std::move(pack), prio);
+      }
     } else if (result == PacketReceiver::ReceiveResult::Acknowledgement) {
       // Parse the 4-byte LE payload to get the acked sequence number
       if (pack.data.size() >= 4) {
