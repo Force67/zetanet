@@ -74,6 +74,21 @@ class ZPeerMapping {
     return &peer_list_.emplace_back(ZPeer{ZPeerId(id), addr});
   }
 
+  // Copies a peer's send address out under the lock. Callers on threads other
+  // than the one that mutates peer_list_ (e.g. the dispatcher) must use this
+  // rather than holding a ZPeer* across the lock release: a concurrent
+  // GetOrCreatePeer can reallocate peer_list_ and invalidate raw pointers.
+  bool ResolvePeerAddress(ZPeerId id, ZSocket::Address& out_address) {
+    std::shared_lock lock(mutex_);
+    for (auto& peer : peer_list_) {
+      if (peer.identifier == id) {
+        out_address = peer.address;
+        return true;
+      }
+    }
+    return false;
+  }
+
   ZPeer* GetPeerByAddress(const ZSocket::Address& addr) {
     std::shared_lock lock(mutex_);
     for (auto& peer : peer_list_) {

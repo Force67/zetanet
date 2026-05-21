@@ -57,12 +57,12 @@ class PacketDispatcher {
         }
       }
     } else {
-      ZPeer* peer = peer_list_.GetPeer(packet.destination_peer_id);
-      if (peer) {
+      ZSocket::Address address;
+      if (peer_list_.ResolvePeerAddress(packet.destination_peer_id, address)) {
         auto bytes =
             builder.BuildPacket(packet, original_sequence_number);
         if (!bytes.empty()) {
-          socket_.Send(peer->address, bytes);
+          socket_.Send(address, bytes);
         }
       }
     }
@@ -83,15 +83,16 @@ class PacketDispatcher {
         OutgoingPacket fanout_packet = packet;
         const u32 sequence_number = next_outgoing_sequence_number_.fetch_add(
             1, std::memory_order_relaxed);
-        DispatchToOne(peer, fanout_packet, builder, receipt_queue,
-                      sequence_number);
+        DispatchToOne(peer.address, peer.identifier.id, fanout_packet, builder,
+                      receipt_queue, sequence_number);
       }
     } else {
-      ZPeer* peer = peer_list_.GetPeer(packet.destination_peer_id);
-      if (peer) {
+      ZSocket::Address address;
+      if (peer_list_.ResolvePeerAddress(packet.destination_peer_id, address)) {
         const u32 sequence_number = next_outgoing_sequence_number_.fetch_add(
             1, std::memory_order_relaxed);
-        DispatchToOne(*peer, packet, builder, receipt_queue, sequence_number);
+        DispatchToOne(address, packet.destination_peer_id, packet, builder,
+                      receipt_queue, sequence_number);
       } else {
         BASE_LOGE(kLogTag,
                   "PacketDispatcher::DispatchPacket(): Failed to find peer {}",
@@ -102,7 +103,8 @@ class PacketDispatcher {
 
  private:
   void DispatchToOne(
-      ZPeer& peer,
+      const ZSocket::Address& address,
+      u32 peer_id,
       OutgoingPacket& packet,
       PacketBuilder& builder,
       base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue,
@@ -112,8 +114,8 @@ class PacketDispatcher {
       BASE_LOGE(kLogTag, "Failed to build outgoing packet");
       return;
     }
-    if (socket_.Send(peer.address, bytes) <= 0) {
-      BASE_LOGE(kLogTag, "Failed to send packet to peer {}", peer.identifier.id);
+    if (socket_.Send(address, bytes) <= 0) {
+      BASE_LOGE(kLogTag, "Failed to send packet to peer {}", peer_id);
       return;
     }
     AddReceiptIfNeeded(packet, receipt_queue, sequence_number);
