@@ -48,7 +48,10 @@ constexpr u32 kFnv1aOffset = 2166136261u;
 constexpr u32 kFnv1aPrime = 16777619u;
 
 constexpr mem_size kDispatchBatchSize = 64;
-constexpr mem_size kFixedHeaderSize = 48;
+// magic(4) + version(1) + flags(1) + transfer_id(8) + file_size(8) +
+// chunk_size(4) + chunk_index(4) + total_chunks(4) + chunk_data_size(4) +
+// chunk_checksum(4) + file_checksum(4) + file_name_size(2) = 52.
+constexpr mem_size kFixedHeaderSize = 52;
 constexpr mem_size kHmacSize = 32;
 
 constexpr char kFileHmacKeyEnv[] = "ZNET_FILE_HMAC_KEY";
