@@ -11,6 +11,9 @@
 #include <znet/z_bit_writer.h>
 #include <znet/z_client.h>
 #include <znet/z_crypto_wrapper.h>
+#include <znet/z_file_transporter.h>
+#include <znet/z_file_write_interface.h>
+#include <znet/z_p2p_node.h>
 #include <znet/z_packet_serdes.h>
 #include <znet/z_packets.h>
 #include <znet/z_server.h>
@@ -28,10 +31,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <random>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -546,6 +552,268 @@ bool TestBitWriterIntoPacketEndToEnd() {
   return ok;
 }
 
+// Regression test for the 64-bit accumulator overflow in BitWriter::WriteBits.
+// Writing a full u64 while the scratch accumulator already holds 1..7 bits used
+// to shift the high bits out of the 64-bit word and silently truncate them.
+// This exercises a u64 at every non-byte-aligned starting offset.
+bool TestBitWriter64BitAtOffset() {
+  static const u64 kValues[] = {
+      0xFFFFFFFFFFFFFFFFull, 0x0123456789ABCDEFull, 0x8000000000000001ull,
+      0xDEADBEEFCAFEBABEull, 0x00000000FFFFFFFFull, 0xFFFFFFFF00000000ull};
+
+  for (u32 prefix_bits = 0; prefix_bits <= 16; ++prefix_bits) {
+    for (const u64 value : kValues) {
+      std::vector<byte> backing(64, byte{0});
+      BitWriter w(base::Span<byte>(backing.data(), backing.size()));
+      const u32 prefix_value = prefix_bits == 0 ? 0u : 0x5u;
+      if (prefix_bits > 0) {
+        w.WriteBits(prefix_value, prefix_bits);
+      }
+      w.WriteBits(value, 64);
+      w.Finalize();
+      BIT_CHECK(w.ok(), "writer not ok writing u64 at offset");
+
+      BitReader r(backing.data(), backing.size());
+      u64 prefix_back = 0;
+      if (prefix_bits > 0) {
+        BIT_CHECK(r.ReadBits(prefix_back, prefix_bits), "read prefix");
+        BIT_CHECK(prefix_back == (prefix_value & ((u64{1} << prefix_bits) - 1)),
+                  "prefix mismatch");
+      }
+      u64 value_back = 0;
+      BIT_CHECK(r.ReadBits(value_back, 64), "read u64");
+      if (value_back != value) {
+        std::fprintf(stderr,
+                     "  u64 mismatch at prefix_bits=%u: wrote %016llx got "
+                     "%016llx\n",
+                     prefix_bits, static_cast<unsigned long long>(value),
+                     static_cast<unsigned long long>(value_back));
+        return false;
+      }
+    }
+  }
+
+  // Also exercise BitTraits<u64> after an odd-width field, the real-world
+  // shape that triggered the bug.
+  std::vector<byte> backing(32, byte{0});
+  BitWriter w(base::Span<byte>(backing.data(), backing.size()));
+  w.WriteBool(true);
+  BitTraits<u64>::Write(w, 0xA5A5A5A5A5A5A5A5ull);
+  w.Finalize();
+  BIT_CHECK(w.ok(), "trait writer ok");
+  BitReader r(backing.data(), backing.size());
+  bool flag = false;
+  u64 round_trip = 0;
+  BIT_CHECK(r.ReadBool(flag) && flag, "trait bool");
+  BIT_CHECK(BitTraits<u64>::Read(r, round_trip), "trait u64 read");
+  BIT_CHECK(round_trip == 0xA5A5A5A5A5A5A5A5ull, "trait u64 value");
+  return true;
+}
+
+base::Path MakeBasePath(const std::string& path) {
+#ifdef ZNET_USE_STL
+  return base::Path(path);
+#else
+  return base::Path(path.c_str());
+#endif
+}
+
+// In-process file transfer over a loopback ZP2PNode host/sender pair. Exercises
+// the file transporter chunking/reassembly, the memory-mapped writer, and the
+// p2p control plane end to end, verifying the received bytes match the source.
+bool TestFileTransferEndToEnd() {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  // Use a directory relative to the current working directory: the file
+  // transporter rejects absolute output paths as a path-traversal guard, and a
+  // relative temp/output pair keeps the rename on a single filesystem.
+  const fs::path work_dir =
+      fs::path("znet_ft_" +
+               std::to_string(static_cast<unsigned long long>(NextPort())));
+  fs::create_directories(work_dir, ec);
+  const fs::path input_path = work_dir / "source.bin";
+  const fs::path temp_dir = work_dir / "tmp";
+  const fs::path output_path = work_dir / "received.bin";
+  fs::create_directories(temp_dir, ec);
+
+  // Multi-chunk payload with mixed redundancy so reassembly spans many chunks.
+  // Kept modest so the whole transfer fits comfortably in loopback socket
+  // buffers; this exercises chunking/reassembly without depending on
+  // retransmit timing under burst loss.
+  std::string content;
+  {
+    std::mt19937 rng(0xF11E);
+    content.reserve(15000u);
+    while (content.size() < 15000u) {
+      const char ch = static_cast<char>(rng() & 0xFF);
+      content.push_back(ch);
+    }
+  }
+  {
+    std::ofstream out(input_path, std::ios::binary);
+    out.write(content.data(), static_cast<std::streamsize>(content.size()));
+  }
+
+  auto cleanup = [&]() {
+    std::error_code rm_ec;
+    fs::remove_all(work_dir, rm_ec);
+  };
+
+  const u16 host_port = NextPort();
+  const u16 sender_port = NextPort();
+
+  tx::network::ZP2PNode receiver_node;
+  if (!receiver_node.Begin(host_port)) {
+    std::fprintf(stderr, "  receiver Begin failed\n");
+    cleanup();
+    return false;
+  }
+  tx::network::IFileWriteFactory& mmap_factory =
+      tx::network::GetMemoryMappedFileWriteFactory();
+  tx::network::ZFileTransporter receiver(receiver_node, &mmap_factory);
+
+  tx::network::ZP2PNode sender_node;
+  if (!sender_node.Connect(base::StringRef("127.0.0.1", 9), host_port,
+                           sender_port)) {
+    std::fprintf(stderr, "  sender Connect failed\n");
+    cleanup();
+    return false;
+  }
+  tx::network::ZFileTransporter sender(sender_node);
+
+  auto pump = [&]() {
+    tx::network::IncomingPacket ignored;
+    sender_node.Update();
+    while (sender_node.Poll(tx::network::PacketChannelType::Control, ignored)) {
+    }
+    while (sender_node.Poll(tx::network::PacketChannelType::Data, ignored)) {
+    }
+  };
+
+  // Warm up the p2p connection before sending.
+  const auto warmup_end =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(800);
+  while (std::chrono::steady_clock::now() < warmup_end) {
+    pump();
+    tx::network::IncomingPacket ignored;
+    receiver_node.Update();
+    while (receiver_node.Poll(tx::network::PacketChannelType::Control,
+                              ignored)) {
+    }
+    while (receiver_node.Poll(tx::network::PacketChannelType::Data, ignored)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  tx::network::ZFileTransporter::TransferTuning tuning;
+  tuning.chunk_size = 1024;
+  if (!sender.SendFile(MakeBasePath(input_path.string()),
+                       tx::network::ZPeerId(tx::network::ZPeerId::to_server),
+                       tuning)) {
+    std::fprintf(stderr, "  SendFile failed\n");
+    cleanup();
+    return false;
+  }
+
+  // The streaming session can only be created by the file-name-bearing first
+  // chunk, but reliable chunks may arrive out of order. The library ACKs every
+  // received chunk (so it is not retransmitted), therefore a correct receiver
+  // must buffer chunks that arrive before chunk 0 and stream them once the
+  // session exists, rather than dropping them.
+  std::map<u32, tx::network::ZFileTransporter::TransferChunk> pending;
+  std::unordered_set<u32> streamed;
+  bool have_transfer = false;
+  u64 transfer_id = 0;
+  bool completed = false;
+
+  auto drain_pending = [&]() -> bool {
+    if (pending.find(0) == pending.end()) {
+      return true;  // wait for chunk 0 to bootstrap the session
+    }
+    for (auto& [index, chunk] : pending) {
+      if (streamed.count(index)) {
+        continue;
+      }
+      bool chunk_completed = false;
+      if (!receiver.StreamChunkToFile(chunk, MakeBasePath(temp_dir.string()),
+                                      &chunk_completed)) {
+        std::fprintf(stderr, "  StreamChunkToFile failed for chunk %u\n", index);
+        return false;
+      }
+      streamed.insert(index);
+      if (chunk_completed) {
+        if (!receiver.FinalizeStreamedFile(
+                transfer_id, MakeBasePath(output_path.string()))) {
+          std::fprintf(stderr, "  FinalizeStreamedFile failed\n");
+          return false;
+        }
+        completed = true;
+        return true;
+      }
+    }
+    return true;
+  };
+
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (!completed && std::chrono::steady_clock::now() < deadline) {
+    pump();
+    receiver_node.Update();
+
+    tx::network::IncomingPacket packet;
+    while (receiver_node.Poll(tx::network::PacketChannelType::Control,
+                              packet)) {
+      if (packet.type != tx::network::PacketType::FileTransfer) {
+        continue;
+      }
+      tx::network::ZFileTransporter::TransferChunk chunk;
+      if (!receiver.ParseTransferChunkPacket(packet, chunk)) {
+        continue;
+      }
+      if (!have_transfer) {
+        have_transfer = true;
+        transfer_id = chunk.transfer_id;
+      }
+      if (chunk.transfer_id != transfer_id) {
+        continue;
+      }
+      const u32 index = chunk.chunk_index;
+      pending.emplace(index, std::move(chunk));
+    }
+    while (receiver_node.Poll(tx::network::PacketChannelType::Data, packet)) {
+    }
+
+    if (!drain_pending()) {
+      cleanup();
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  if (!completed) {
+    std::fprintf(stderr, "  transfer did not complete (%zu/%zu chunks buffered)\n",
+                 streamed.size(), pending.size());
+    cleanup();
+    return false;
+  }
+
+  std::string received;
+  {
+    std::ifstream in(output_path, std::ios::binary);
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    received = ss.str();
+  }
+
+  const bool ok = received.size() == content.size() && received == content;
+  if (!ok) {
+    std::fprintf(stderr, "  content mismatch (sent %zu, got %zu bytes)\n",
+                 content.size(), received.size());
+  }
+  cleanup();
+  return ok;
+}
+
 }  // namespace
 
 int main(int /*argc*/, char** /*argv*/) {
@@ -564,6 +832,8 @@ int main(int /*argc*/, char** /*argv*/) {
       {"bit_trait_struct", &TestBitTraitStruct},
       {"bit_zbitfield_struct", &TestZBitFieldStruct},
       {"bit_writer_into_packet_e2e", &TestBitWriterIntoPacketEndToEnd},
+      {"bit_writer_u64_at_offset", &TestBitWriter64BitAtOffset},
+      {"file_transfer_e2e", &TestFileTransferEndToEnd},
   };
 
   int failures = 0;
