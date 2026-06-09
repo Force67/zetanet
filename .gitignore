@@ -38,3 +38,10 @@ ntloader/ntloader.vcxproj.user
 /Makefile
 /vendor/Makefile
 /samples/*/Makefile
+/znet/Makefile
+
+# Build object directories
+/samples/*/obj
+
+# CMake build directory
+/build-cmake
