@@ -45,3 +45,8 @@ ntloader/ntloader.vcxproj.user
 
 # CMake build directory
 /build-cmake
+
+# Local CMake build trees
+/build-cmake-eq
+/build-cmake-stl
+/build-eq
