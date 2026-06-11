@@ -27,12 +27,9 @@
 
 #if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
 #include <mbedtls/md.h>
-#elif defined(ZNET_USE_STL)
+#else
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
-#else
-#include <base/crypto/hmac.h>
-#include <base/crypto/sha.h>
 #endif
 
 namespace tx::network {
@@ -61,11 +58,9 @@ bool ComputeHmacSha256(const byte* data, mem_size size, const byte* key, mem_siz
   const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   return info != nullptr &&
          mbedtls_md_hmac(info, key, key_size, data, size, out_hmac) == 0;
-#elif defined(ZNET_USE_STL)
+#else
   unsigned int hmac_len = 0;
   return HMAC(EVP_sha256(), key, static_cast<int>(key_size), data, size, out_hmac, &hmac_len) != nullptr && hmac_len == kHmacSize;
-#else
-  return base::HmacSha256(key, key_size, data, size, out_hmac, kHmacSize);
 #endif
 }
 

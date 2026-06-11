@@ -5,10 +5,11 @@
 #include <znet/z_abi.h>
 #include <znet/z_system_command.h>
 
-#ifdef ZNET_USE_STL
-#include <znet/z_stl_compat.h>
 #include <unordered_map>
 #include <unordered_set>
+
+#ifdef ZNET_USE_STL
+#include <znet/z_stl_compat.h>
 #else
 #include <base/memory/unique_pointer.h>
 #endif

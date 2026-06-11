@@ -117,14 +117,6 @@ ZPacketQueue::ZPacketQueue(ZSocket& socket,
       congestion_control_config_({}),
       next_congestion_recovery_time_(base::Clock::now() + kCongestionRecoveryInterval),
       rate_limit_window_start_(base::Clock::now()) {
-    // Default-construct queues via operator[] (PriorityMPSCQueue is not moveable due to mutex).
-    // Both incoming and outgoing maps must be fully populated here: after
-    // construction the receiver thread and the consumer thread access them
-    // concurrently, and a structural std::map insert racing a lookup is UB.
-    channel_outgoing_queues_[PacketChannelType::Control];
-    channel_outgoing_queues_[PacketChannelType::Data];
-    channel_incoming_queues_[PacketChannelType::Control];
-    channel_incoming_queues_[PacketChannelType::Data];
     channel_outgoing_bytes_[0].store(0, std::memory_order_relaxed);
     channel_outgoing_bytes_[1].store(0, std::memory_order_relaxed);
     awaiting_ack_packet_count_.store(0, std::memory_order_relaxed);
@@ -376,7 +368,7 @@ void ZPacketQueue::ProcessOutgoingPackets() {
 mem_size ZPacketQueue::ProcessChannel(PacketChannelType channel,
                                       mem_size max_packets) {
   mem_size processed = 0;
-  auto& queue = channel_outgoing_queues_[channel];
+  auto& queue = channel_outgoing_queues_[static_cast<mem_size>(channel)];
 
   // Fast path: dispatch directly without lambda/executor overhead.
   if (!dispatch_executor_) {
@@ -535,9 +527,9 @@ bool ZPacketQueue::ReceiveOne() {
                            pack.acknowledgement_number);
     }
     auto prio = (PacketPriority)pack.flags.priority;
-    if (auto it = channel_incoming_queues_.find(pack.channel);
-        it != channel_incoming_queues_.end()) {
-      it->second.enqueue(std::move(pack), prio);
+    const mem_size channel_index = static_cast<mem_size>(pack.channel);
+    if (channel_index < kChannelCount) {
+      channel_incoming_queues_[channel_index].enqueue(std::move(pack), prio);
     }
     return true;
   } else if (result == PacketReceiver::ReceiveResult::Acknowledgement) {
@@ -577,9 +569,9 @@ void ZPacketQueue::ProcessReceiving() {
           continue;
         }
       }
-      if (auto it = channel_incoming_queues_.find(pack.channel);
-          it != channel_incoming_queues_.end()) {
-        it->second.enqueue(std::move(pack), prio);
+      const mem_size channel_index = static_cast<mem_size>(pack.channel);
+      if (channel_index < kChannelCount) {
+        channel_incoming_queues_[channel_index].enqueue(std::move(pack), prio);
       }
     } else if (result == PacketReceiver::ReceiveResult::Acknowledgement) {
       // Parse the 4-byte LE payload to get the acked sequence number
@@ -621,7 +613,7 @@ void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
   if (!outgoing_thread_running()) {
     dispatcher_.DispatchPacket(crypto_context_, out, awaiting_ack_packets_);
   } else {
-    auto& queue = channel_outgoing_queues_[PacketChannelType::Control];
+    auto& queue = GetChannelQueue(PacketChannelType::Control);
     queue.enqueue(std::move(out), PacketPriority::High);
   }
   if (ack_number == 0) {

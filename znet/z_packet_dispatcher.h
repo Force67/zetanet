@@ -9,11 +9,14 @@
 #include <znet/z_peer_mapping.h>
 #include <znet/z_packet_serdes.h>
 #include <znet/z_clock.h>
-#include <znet/fancy_queue.h>
 
 #ifdef ZNET_USE_STL
+// znet's copy of the lock-free map; equilibrium ships the same class as
+// base/containers/lock_free_ordered_map.h (included below).
+#include <znet/fancy_queue.h>
 #include <znet/z_stl_compat.h>
 #else
+#include <base/containers/lock_free_ordered_map.h>
 #include <base/atomic.h>
 #include <base/logging.h>
 #include <base/time/time.h>

@@ -14,6 +14,7 @@
 #else
 #include <base/containers/span.h>
 #include <base/containers/vector.h>
+#include <base/containers/map.h>
 #include <base/filesystem/file.h>
 #include <base/filesystem/path.h>
 #include <base/memory/unique_pointer.h>

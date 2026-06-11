@@ -7,7 +7,9 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/containers/array.h>
 #include <base/containers/vector.h>
+#include <base/threading/mutex.h>
 #include <new>
 #endif
 
@@ -68,7 +70,7 @@ class PacketBufferPool {
         bucket.hits.fetch_add(1, std::memory_order_relaxed);
         bucket.total_hits.fetch_add(1, std::memory_order_relaxed);
         BlockHeader* header = bucket.free_list.back();
-        bucket.free_list.pop_back();
+        bucket.free_list.erase(bucket.free_list.size() - 1);
         header->ref_count.store(1, std::memory_order_relaxed);
         header->requested_size = static_cast<std::uint32_t>(requested_size);
         return BlockData(header);
@@ -331,7 +333,7 @@ class PacketBufferPool {
       overflow.reserve(bucket.free_list.size() - target);
       while (bucket.free_list.size() > target) {
         overflow.push_back(bucket.free_list.back());
-        bucket.free_list.pop_back();
+        bucket.free_list.erase(bucket.free_list.size() - 1);
       }
     }
     for (BlockHeader* header : overflow) {

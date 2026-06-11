@@ -16,7 +16,7 @@
 #include <base/time/time.h>
 #include <base/containers/vector.h>
 #include <base/optional.h>
-#include <base/containers/lock_free_ordered_concurrent_hashmap.h>
+#include <base/containers/lock_free_ordered_map.h>
 #endif
 
 namespace tx::network {

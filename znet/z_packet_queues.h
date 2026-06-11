@@ -13,7 +13,7 @@
 #else
 #include <base/memory/unique_pointer.h>
 #include <base/containers/mpsc_queue.h>
-#include <base/containers/lock_free_ordered_concurrent_hashmap.h>
+#include <base/containers/lock_free_ordered_map.h>
 #endif
 
 #include <znet/z_crypto_wrapper.h>
@@ -35,6 +35,8 @@ class ZPeerMapping;
 
 class ZPacketQueue {
  public:
+  static constexpr mem_size kChannelCount = 2;
+
   struct RateLimitConfig {
     mem_size max_packets_per_second = 500000;
     mem_size max_bytes_per_second = 1024 * 1024 * 1024;  // 1 GB/s
@@ -136,22 +138,26 @@ class ZPacketQueue {
     if (!incoming_thread_running()) {
       ReceiveOne();
     }
-    auto it = channel_incoming_queues_.find(channel_type);
-    if (it == channel_incoming_queues_.end()) {
+    const mem_size index = static_cast<mem_size>(channel_type);
+    if (index >= kChannelCount) {
       return false;
     }
-    return it->second.dequeue(p);
+    return channel_incoming_queues_[index].dequeue(p);
   }
 
   PriorityMPSCQueue<OutgoingPacket>& GetChannelQueue(
       PacketChannelType channel) {
-    return channel_outgoing_queues_[channel];
+    return channel_outgoing_queues_[static_cast<mem_size>(channel)];
   }
 
   void SetCryptoProvider(ZCryptoContext* crypto) { crypto_context_ = crypto; }
 
   mem_size GetApproxOutgoingPacketCount(PacketChannelType channel) const {
-    return channel_outgoing_queues_.at(channel).size_approx();
+    const mem_size index = static_cast<mem_size>(channel);
+    if (index >= kChannelCount) {
+      return 0;
+    }
+    return channel_outgoing_queues_[index].size_approx();
   }
 
   mem_size GetApproxOutgoingBytes(PacketChannelType channel) const {
@@ -192,8 +198,12 @@ class ZPacketQueue {
   // double-decrement.
   void TryAcknowledgePacket(u32 acked_seq, u32 source_peer);
   bool HasPendingOutgoing() const {
-    return channel_outgoing_queues_.at(PacketChannelType::Control).size_approx() != 0 ||
-           channel_outgoing_queues_.at(PacketChannelType::Data).size_approx() != 0;
+    for (const auto& queue : channel_outgoing_queues_) {
+      if (queue.size_approx() != 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
  private:
@@ -204,9 +214,11 @@ class ZPacketQueue {
   std::thread outgoing_thread_;
   std::thread incoming_thread_;
 
-  base::Map<PacketChannelType, PriorityMPSCQueue<OutgoingPacket>>
+  // Indexed by PacketChannelType; the channel id of every accepted packet is
+  // validated against the Control/Data pairing during unpack.
+  base::Array<PriorityMPSCQueue<OutgoingPacket>, kChannelCount>
       channel_outgoing_queues_;
-  base::Map<PacketChannelType, PriorityMPSCQueue<IncomingPacket>>
+  base::Array<PriorityMPSCQueue<IncomingPacket>, kChannelCount>
       channel_incoming_queues_;
 
   base::LockFreeOrderedHashMap<u32, OutgoingPacket> awaiting_ack_packets_;

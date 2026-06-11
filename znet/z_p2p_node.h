@@ -4,7 +4,12 @@
 
 #include <znet/z_abi.h>
 #include <znet/z_clock.h>
+#ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
+#else
+#include <base/containers/map.h>
+#include <base/containers/queue.h>
+#endif
 #include <znet/z_transport.h>
 
 #include <chrono>

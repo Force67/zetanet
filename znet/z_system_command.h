@@ -12,6 +12,7 @@
 #include <znet/z_stl_compat.h>
 #else
 #include <base/arch.h>
+#include <base/containers/span.h>
 #include <base/containers/vector.h>
 #endif
 

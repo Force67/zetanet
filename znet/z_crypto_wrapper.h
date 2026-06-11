@@ -12,8 +12,11 @@
 #include <znet/z_stl_compat.h>
 #else
 #include <base/arch.h>
+#include <base/containers/array.h>
 #include <base/containers/vector.h>
 #include <base/containers/span.h>
+#include <base/strings/string_ref.h>
+#include <base/strings/xstring.h>
 #endif
 
 namespace tx::network {

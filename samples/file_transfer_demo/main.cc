@@ -398,7 +398,8 @@ int RunReceiver(const Options& options) {
         progress.active = true;
         progress.transfer_id = chunk.transfer_id;
         progress.total_chunks = chunk.total_chunks;
-        progress.file_name = chunk.file_name;
+        progress.file_name.assign(chunk.file_name.data(),
+                                  chunk.file_name.size());
         std::printf("[receiver] transfer started id=%llu chunks=%u file=%s\n",
                     static_cast<unsigned long long>(chunk.transfer_id),
                     chunk.total_chunks, progress.file_name.c_str());

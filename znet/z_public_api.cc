@@ -13,6 +13,9 @@
 #include <znet/z_stl_compat.h>
 #else
 #include <base/logging.h>
+#ifndef ZNET_USE_STL
+#include <base/containers/queue.h>
+#endif
 #endif
 
 #include <array>
@@ -885,7 +888,7 @@ size_t ZNetGetCongestionScalePerMille(const ZNetContext* context) {
   return transport->GetCongestionScalePerMille();
 }
 
-u64 ZNetGetLocalClockTickMs(const ZNetContext* context) {
+uint64_t ZNetGetLocalClockTickMs(const ZNetContext* context) {
   const ZAsyncTransportLayer* transport = ActiveTransport(context);
   if (!transport) {
     return 0;
@@ -893,7 +896,7 @@ u64 ZNetGetLocalClockTickMs(const ZNetContext* context) {
   return transport->GetLocalClockTickMs();
 }
 
-u64 ZNetGetSynchronizedClockTickMs(const ZNetContext* context) {
+uint64_t ZNetGetSynchronizedClockTickMs(const ZNetContext* context) {
   const ZAsyncTransportLayer* transport = ActiveTransport(context);
   if (!transport) {
     return 0;
@@ -1185,7 +1188,7 @@ ZNetResult ZNetReceiveFileChunk(ZNetContext* context,
 }
 
 ZNetResult ZNetFinalizeReceivedFile(ZNetContext* context,
-                                    u64 transfer_id,
+                                    uint64_t transfer_id,
                                     const char* output_path) {
   if (!context || transfer_id == 0 || !output_path || output_path[0] == '\0') {
     return ReturnError(context, ZNET_RESULT_INVALID_ARGUMENT,
@@ -1204,7 +1207,7 @@ ZNetResult ZNetFinalizeReceivedFile(ZNetContext* context,
   return ZNET_RESULT_OK;
 }
 
-ZNetResult ZNetAbortReceivedFile(ZNetContext* context, u64 transfer_id) {
+ZNetResult ZNetAbortReceivedFile(ZNetContext* context, uint64_t transfer_id) {
   if (!context || transfer_id == 0) {
     return ReturnError(context, ZNET_RESULT_INVALID_ARGUMENT,
                        "Invalid abort file arguments");
