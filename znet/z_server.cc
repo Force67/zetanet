@@ -75,12 +75,11 @@ bool ZServer::Begin(u16 port, const StartOptions& options) {
 bool ZServer::Update() {
   UpdateSynchronizedClock();
 
+  // Control packets are handled by ProcessSystemMessage inside Poll. The
+  // data channel is the application's: consuming it here would drop user
+  // messages, so callers poll it themselves.
   IncomingPacket packet;
-  if (Poll(PacketChannelType::Control, packet)) {
-    // Control packets are handled by ProcessSystemMessage inside Poll
-  }
-  if (Poll(PacketChannelType::Data, packet)) {
-    BASE_LOGI(kLogTag, "Incoming data: {}", packet.data);
+  while (Poll(PacketChannelType::Control, packet)) {
   }
   switch (state()) {
     case ZAsyncTransportLayer::State::kDisconnected:

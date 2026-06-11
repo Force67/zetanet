@@ -89,14 +89,11 @@ void ZClient::Disconnect() {
 void ZClient::Update() {
   UpdateSynchronizedClock();
 
+  // Control packets are handled by ProcessSystemMessage inside Poll. The
+  // data channel is the application's: draining it here would drop user
+  // messages, so callers poll it themselves.
   IncomingPacket packet;
-  if (Poll(PacketChannelType::Control, packet)) {
-    // Control packets are handled by ProcessSystemMessage inside Poll
-  }
-  while (Poll(PacketChannelType::Data, packet)) {
-    if (!IsSystemMessage(packet.type)) {
-      BASE_LOGI(kLogTag, "Incoming data: {}", packet.data);
-    }
+  while (Poll(PacketChannelType::Control, packet)) {
   }
   switch (state()) {
     case ZAsyncTransportLayer::State::kDisconnected:
