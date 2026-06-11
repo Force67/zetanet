@@ -41,28 +41,28 @@ class PacketDispatcher {
                         OutgoingPacket& packet,
                         u32 original_sequence_number) {
     tx::network::PacketBuilder builder(crypto);
+    base::Vector<byte>& bytes = WireScratch();
 
     if (packet.destination_peer_id == ZPeerId::to_server) {
-      auto bytes =
-          builder.BuildPacket(packet, original_sequence_number);
-      if (!bytes.empty()) {
-        socket_.SendtoServer(bytes);
+      if (builder.BuildPacketInto(packet, original_sequence_number, bytes)) {
+        socket_.SendtoServer(base::Span<byte>(bytes.data(), bytes.size()));
       }
     } else if (packet.destination_peer_id == ZPeerId::to_all) {
-      for (auto& peer : peer_list_.GetPeerList()) {
-        auto bytes =
-            builder.BuildPacket(packet, original_sequence_number);
-        if (!bytes.empty()) {
-          socket_.Send(peer.address, bytes);
-        }
+      // Same sequence number for every peer means identical wire bytes:
+      // build once, send N times.
+      if (!builder.BuildPacketInto(packet, original_sequence_number, bytes)) {
+        return;
+      }
+      base::Vector<ZPeer>& peers = PeerSnapshotScratch();
+      peer_list_.CopyPeerList(peers);
+      for (auto& peer : peers) {
+        socket_.Send(peer.address, base::Span<byte>(bytes.data(), bytes.size()));
       }
     } else {
       ZSocket::Address address;
       if (peer_list_.ResolvePeerAddress(packet.destination_peer_id, address)) {
-        auto bytes =
-            builder.BuildPacket(packet, original_sequence_number);
-        if (!bytes.empty()) {
-          socket_.Send(address, bytes);
+        if (builder.BuildPacketInto(packet, original_sequence_number, bytes)) {
+          socket_.Send(address, base::Span<byte>(bytes.data(), bytes.size()));
         }
       }
     }
@@ -79,7 +79,9 @@ class PacketDispatcher {
           next_outgoing_sequence_number_.fetch_add(1, std::memory_order_relaxed);
       DispatchToServer(packet, builder, receipt_queue, sequence_number);
     } else if (packet.destination_peer_id == ZPeerId::to_all) {
-      for (auto& peer : peer_list_.GetPeerList()) {
+      base::Vector<ZPeer>& peers = PeerSnapshotScratch();
+      peer_list_.CopyPeerList(peers);
+      for (auto& peer : peers) {
         OutgoingPacket fanout_packet = packet;
         const u32 sequence_number = next_outgoing_sequence_number_.fetch_add(
             1, std::memory_order_relaxed);
@@ -102,6 +104,19 @@ class PacketDispatcher {
   }
 
  private:
+  // Per-thread scratch buffers: dispatch can run on the outgoing thread or
+  // on executor workers concurrently, and reusing capacity avoids a heap
+  // allocation per packet.
+  static base::Vector<byte>& WireScratch() {
+    static thread_local base::Vector<byte> scratch;
+    return scratch;
+  }
+
+  static base::Vector<ZPeer>& PeerSnapshotScratch() {
+    static thread_local base::Vector<ZPeer> scratch;
+    return scratch;
+  }
+
   void DispatchToOne(
       const ZSocket::Address& address,
       u32 peer_id,
@@ -109,12 +124,12 @@ class PacketDispatcher {
       PacketBuilder& builder,
       base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue,
       u32 sequence_number) {
-    auto bytes = builder.BuildPacket(packet, sequence_number);
-    if (bytes.empty()) {
+    base::Vector<byte>& bytes = WireScratch();
+    if (!builder.BuildPacketInto(packet, sequence_number, bytes)) {
       BASE_LOGE(kLogTag, "Failed to build outgoing packet");
       return;
     }
-    if (socket_.Send(address, bytes) <= 0) {
+    if (socket_.Send(address, base::Span<byte>(bytes.data(), bytes.size())) <= 0) {
       BASE_LOGE(kLogTag, "Failed to send packet to peer {}", peer_id);
       return;
     }
@@ -126,12 +141,12 @@ class PacketDispatcher {
       PacketBuilder& builder,
       base::LockFreeOrderedHashMap<u32, OutgoingPacket>& receipt_queue,
       u32 sequence_number) {
-    auto bytes = builder.BuildPacket(packet, sequence_number);
-    if (bytes.empty()) {
+    base::Vector<byte>& bytes = WireScratch();
+    if (!builder.BuildPacketInto(packet, sequence_number, bytes)) {
       BASE_LOGE(kLogTag, "Failed to build outgoing packet");
       return;
     }
-    if (socket_.SendtoServer(bytes) <= 0) {
+    if (socket_.SendtoServer(base::Span<byte>(bytes.data(), bytes.size())) <= 0) {
       BASE_LOGE(kLogTag, "Failed to send packet to server");
       return;
     }

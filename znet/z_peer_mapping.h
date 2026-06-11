@@ -57,13 +57,24 @@ class ZPeerMapping {
   }
 
   ZPeer* GetOrCreatePeer(const ZSocket::Address& addr) {
+    // Fast path: the peer almost always exists already (one lookup per
+    // received packet), so take only the shared lock and let concurrent
+    // receivers scan in parallel.
+    {
+      std::shared_lock lock(mutex_);
+      for (auto& peer : peer_list_) {
+        if (peer.address == addr) {
+          return &peer;
+        }
+      }
+    }
     std::unique_lock lock(mutex_);
+    // Re-scan: another thread may have created the peer between the locks.
     for (auto& peer : peer_list_) {
       if (peer.address == addr) {
         return &peer;
       }
     }
-    // Inline CreatePeer logic (already holding unique lock)
     if (peer_list_.size() >= kMaxPeers) {
       return nullptr;
     }
@@ -102,6 +113,14 @@ class ZPeerMapping {
   base::Vector<ZPeer> GetPeerList() {
     std::shared_lock lock(mutex_);
     return peer_list_;
+  }
+
+  // Snapshot into a caller-owned vector. Copy-assignment reuses the
+  // destination's capacity, so a reused scratch vector makes broadcast
+  // fanout allocation-free in steady state.
+  void CopyPeerList(base::Vector<ZPeer>& out) const {
+    std::shared_lock lock(mutex_);
+    out = peer_list_;
   }
 
   mem_size PeerCount() const {

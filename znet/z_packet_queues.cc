@@ -179,17 +179,21 @@ bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
     return true;
   }
 
-  // Slow path: check if the window has elapsed.
-  auto now = base::Clock::now();
-  auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-      now - rate_limit_window_start_);
-
-  if (elapsed.count() >= 1) {
-    packets_sent_this_second_.store(1, std::memory_order_relaxed);
-    bytes_sent_this_second_.store(payload_bytes, std::memory_order_relaxed);
-    burst_tokens_.store(burst_allowance, std::memory_order_relaxed);
-    rate_limit_window_start_ = now;
-    return true;
+  // Slow path: check if the window has elapsed. The window start is a plain
+  // time_point shared by all producer threads, so it must be read and reset
+  // under a lock (the fast path above never gets here).
+  {
+    std::lock_guard<std::mutex> lock(rate_limit_window_mutex_);
+    const auto now = base::Clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        now - rate_limit_window_start_);
+    if (elapsed.count() >= 1) {
+      packets_sent_this_second_.store(1, std::memory_order_relaxed);
+      bytes_sent_this_second_.store(payload_bytes, std::memory_order_relaxed);
+      burst_tokens_.store(burst_allowance, std::memory_order_relaxed);
+      rate_limit_window_start_ = now;
+      return true;
+    }
   }
 
   if (current_bytes + payload_bytes > max_bytes_per_second) {
@@ -219,6 +223,7 @@ bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
 bool ZPacketQueue::StartIncomingThread() {
   if (incoming_thread_.joinable()) return true;
   stop_threads_.store(false);
+  incoming_thread_active_.store(true, std::memory_order_release);
   incoming_thread_ = std::thread(&ZPacketQueue::ProcessReceiving, this);
   return true;
 }
@@ -227,6 +232,7 @@ bool ZPacketQueue::StartOutgoingThread() {
   if (outgoing_thread_.joinable()) return true;
   EnsureDispatchExecutor();
   stop_threads_.store(false);
+  outgoing_thread_active_.store(true, std::memory_order_release);
   outgoing_thread_ = std::thread(&ZPacketQueue::ProcessOutgoingPackets, this);
   return true;
 }
@@ -259,6 +265,8 @@ void ZPacketQueue::ReconfigureDispatchWorkers(mem_size new_worker_count) {
 
 void ZPacketQueue::StopThreads() {
   stop_threads_.store(true);
+  outgoing_thread_active_.store(false, std::memory_order_release);
+  incoming_thread_active_.store(false, std::memory_order_release);
   outgoing_wakeup_cv_.notify_all();
   const auto current_thread_id = std::this_thread::get_id();
   if (outgoing_thread_.joinable() &&
@@ -291,6 +299,11 @@ void ZPacketQueue::WaitForPendingDispatchTasks() {
 }
 
 void ZPacketQueue::TrackDispatchTaskCompletion() {
+  // Decrement and notify under the mutex: if the count reached zero outside
+  // it, WaitForPendingDispatchTasks could wake (even spuriously), observe
+  // zero, and let the owner destroy this object while we still touch the
+  // condition variable.
+  std::lock_guard<std::mutex> lock(dispatch_wait_mutex_);
   const mem_size remaining =
       pending_dispatch_tasks_.fetch_sub(1, std::memory_order_acq_rel) - 1;
   if (remaining == 0) {
@@ -316,17 +329,23 @@ void ZPacketQueue::ProcessOutgoingPackets() {
     if (now_tp >= next_retry_scan) {
       const auto now = static_cast<u32>(base::GetUnixTimeStamp());
       for (auto& [seqNum, packet] : awaiting_ack_packets_) {
-        const u32 packet_age = now - packet.last_send_time;
+        // Signed difference: last_send_time can lie slightly in the future
+        // (clock step, coarse per-thread timestamp cache) and must then
+        // read as age <= 0 rather than wrap.
+        const i32 packet_age = static_cast<i32>(now - packet.last_send_time);
         // Drop packets that have exceeded retry budget to cap memory growth.
-        if (packet_age > kDropAfterSeconds) {
-          OnReliablePacketDrop();
+        if (packet_age > static_cast<i32>(kDropAfterSeconds)) {
           const mem_size dropped_bytes = packet.heap_data_size;
-          awaiting_ack_packets_.remove(seqNum);
-          SaturatingSub(awaiting_ack_packet_count_, 1);
-          SaturatingSub(awaiting_ack_bytes_, dropped_bytes);
+          // Only adjust counters if this remove() wins; an ACK arriving
+          // concurrently may have already removed and accounted for it.
+          if (awaiting_ack_packets_.remove(seqNum)) {
+            OnReliablePacketDrop();
+            SaturatingSub(awaiting_ack_packet_count_, 1);
+            SaturatingSub(awaiting_ack_bytes_, dropped_bytes);
+          }
           continue;
         }
-        if (packet_age > kResendIntervalSeconds) {
+        if (packet_age > static_cast<i32>(kResendIntervalSeconds)) {
           OnReliablePacketRetransmit();
           dispatcher_.RetransmitPacket(crypto_context_, packet, seqNum);
           packet.last_send_time = now;
@@ -338,11 +357,17 @@ void ZPacketQueue::ProcessOutgoingPackets() {
     MaybeApplyCongestionRecovery(now_tp);
 
     if (dispatched == 0) {
-      // Wait on condvar — Push() calls notify_one() so we wake immediately
-      // when a packet is enqueued.  Falls back to periodic wake for retry scans.
-      outgoing_thread_sleeping_.store(true, std::memory_order_release);
+      // Wait on the condvar until Push() notifies or the retry-scan interval
+      // elapses. Order matters: publish the sleeping flag, then re-check the
+      // queues under the wakeup mutex. A producer that enqueued before the
+      // flag was visible is caught by the re-check, and one that enqueued
+      // after sees the flag and notifies under the same mutex, so the wakeup
+      // cannot be lost.
       std::unique_lock<std::mutex> lock(outgoing_wakeup_mutex_);
-      outgoing_wakeup_cv_.wait_for(lock, kRetryScanInterval);
+      outgoing_thread_sleeping_.store(true, std::memory_order_seq_cst);
+      if (!HasPendingOutgoing()) {
+        outgoing_wakeup_cv_.wait_for(lock, kRetryScanInterval);
+      }
       outgoing_thread_sleeping_.store(false, std::memory_order_release);
     }
   }
@@ -482,6 +507,25 @@ void ZPacketQueue::MaybeApplyCongestionRecovery(base::Clock::time_point now_tp) 
   next_congestion_recovery_time_ = now_tp + kCongestionRecoveryInterval;
 }
 
+void ZPacketQueue::TryAcknowledgePacket(u32 acked_seq, u32 source_peer) {
+  bool destination_matches = false;
+  mem_size acked_bytes = 0;
+  const bool has_packet = awaiting_ack_packets_.with_value(
+      acked_seq, [&](const OutgoingPacket& packet) {
+        destination_matches =
+            (packet.destination_peer_id == source_peer) ||
+            (packet.destination_peer_id == ZPeerId::to_server) ||
+            (packet.destination_peer_id == ZPeerId::to_all);
+        acked_bytes = packet.heap_data_size;
+      });
+  if (has_packet && destination_matches &&
+      awaiting_ack_packets_.remove(acked_seq)) {
+    SaturatingSub(awaiting_ack_packet_count_, 1);
+    SaturatingSub(awaiting_ack_bytes_, acked_bytes);
+    OnReliablePacketAcknowledged();
+  }
+}
+
 bool ZPacketQueue::ReceiveOne() {
   IncomingPacket pack;
   const auto result = receiver_.ReceivePackets(crypto_context_, pack);
@@ -498,24 +542,9 @@ bool ZPacketQueue::ReceiveOne() {
     return true;
   } else if (result == PacketReceiver::ReceiveResult::Acknowledgement) {
     if (pack.data.size() >= 4) {
-      const byte* d = reinterpret_cast<const byte*>(pack.data.data());
-      const u32 acked_seq = wire_le::LoadU32(d);
-      bool destination_matches = false;
-      const bool has_packet = awaiting_ack_packets_.with_value(
-          acked_seq, [&](const OutgoingPacket& packet) {
-            destination_matches =
-                (packet.destination_peer_id == pack.source_peer_id) ||
-                (packet.destination_peer_id == ZPeerId::to_server) ||
-                (packet.destination_peer_id == ZPeerId::to_all);
-            if (destination_matches) {
-              SaturatingSub(awaiting_ack_bytes_, packet.heap_data_size);
-            }
-          });
-      if (has_packet && destination_matches) {
-        awaiting_ack_packets_.remove(acked_seq);
-        SaturatingSub(awaiting_ack_packet_count_, 1);
-        OnReliablePacketAcknowledged();
-      }
+      const u32 acked_seq = wire_le::LoadU32(
+          reinterpret_cast<const byte*>(pack.data.data()));
+      TryAcknowledgePacket(acked_seq, pack.source_peer_id);
     }
     return true;
   }
@@ -555,29 +584,19 @@ void ZPacketQueue::ProcessReceiving() {
     } else if (result == PacketReceiver::ReceiveResult::Acknowledgement) {
       // Parse the 4-byte LE payload to get the acked sequence number
       if (pack.data.size() >= 4) {
-        const byte* d = reinterpret_cast<const byte*>(pack.data.data());
-        const u32 acked_seq = wire_le::LoadU32(d);
-        bool destination_matches = false;
-        const bool has_packet = awaiting_ack_packets_.with_value(
-            acked_seq, [&](const OutgoingPacket& packet) {
-              destination_matches =
-                  (packet.destination_peer_id == pack.source_peer_id) ||
-                  (packet.destination_peer_id == ZPeerId::to_server) ||
-                  (packet.destination_peer_id == ZPeerId::to_all);
-              if (destination_matches) {
-                SaturatingSub(awaiting_ack_bytes_, packet.heap_data_size);
-              }
-            });
-        if (has_packet && destination_matches) {
-          awaiting_ack_packets_.remove(acked_seq);
-          SaturatingSub(awaiting_ack_packet_count_, 1);
-          OnReliablePacketAcknowledged();
-        }
+        const u32 acked_seq = wire_le::LoadU32(
+            reinterpret_cast<const byte*>(pack.data.data()));
+        TryAcknowledgePacket(acked_seq, pack.source_peer_id);
       }
     } else if (result == PacketReceiver::ReceiveResult::Goodbye) {
       stop_threads_.store(true);
       BASE_LOGI(kLogTag, "Goodbye packet received, stopping threads");
       break;
+    } else {
+      // Timeout/Error on the non-blocking socket: park in poll() until data
+      // arrives or the interval elapses. The interval bounds how long
+      // StopThreads() waits for this thread.
+      socket_.WaitReadable(/*timeout_ms=*/10);
     }
   };
 }
@@ -608,23 +627,7 @@ void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
   if (ack_number == 0) {
     return;
   }
-
-  bool destination_matches = false;
-  const bool has_acknowledged_packet = awaiting_ack_packets_.with_value(
-      ack_number, [&](const OutgoingPacket& packet) {
-        destination_matches =
-            (packet.destination_peer_id == return_address.id) ||
-            (packet.destination_peer_id == ZPeerId::to_server) ||
-            (packet.destination_peer_id == ZPeerId::to_all);
-        if (destination_matches) {
-          SaturatingSub(awaiting_ack_bytes_, packet.heap_data_size);
-        }
-      });
-  if (has_acknowledged_packet && destination_matches) {
-    awaiting_ack_packets_.remove(ack_number);
-    SaturatingSub(awaiting_ack_packet_count_, 1);
-    OnReliablePacketAcknowledged();
-  }
+  TryAcknowledgePacket(ack_number, return_address.id);
 }
 
 }  // namespace tx::network

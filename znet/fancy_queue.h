@@ -3,13 +3,14 @@
 // Lock-free ordered hash map with epoch-based safe memory reclamation.
 #pragma once
 
+#include <bit>
+
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
 #include <base/containers/vector.h>
 #include <functional>
 #include <utility>
-#include <stdexcept>
 #include <thread>
 #endif
 
@@ -203,41 +204,26 @@ class LockFreeOrderedHashMap {
 
   // ---- internal helpers ----
 
+  // Returns the shallowest *live* node for `key`, skipping tombstones.
+  // Tombstones stay linked until the GC sweeps them (the GC is the sole
+  // unlinker, see collect_garbage_locked); skipping them here keeps the
+  // "at most one live node per key" invariant observable for all callers.
   Node* find_in_bucket(const Key& key) const {
     mem_size index = hash_key(key);
     Node* curr = buckets[index].load(::std::memory_order_acquire);
     while (curr) {
-      if (curr->keyValue.first == key) return curr;
+      if (curr->keyValue.first == key &&
+          !curr->is_deleted.load(::std::memory_order_acquire)) {
+        return curr;
+      }
       curr = curr->bucketNext.load(::std::memory_order_acquire);
     }
     return nullptr;
   }
 
   mem_size hash_key(const Key& key) const {
-    if (bucketCount == 0)
-      throw ::std::logic_error("Bucket count is zero");
-    return keyHasher(key) % bucketCount;
-  }
-
-  // Re-traverse from the bucket head to find the correct predecessor, then
-  // CAS-unlink.  Immune to stale-prev issues: the predecessor is always
-  // fresh at the point of the CAS.
-  bool try_unlink_from_bucket(Node* node) {
-    mem_size index = hash_key(node->keyValue.first);
-    base::Atomic<Node*>* prev_ptr = &buckets[index];
-    Node* curr = prev_ptr->load(::std::memory_order_acquire);
-    while (curr) {
-      if (curr == node) {
-        Node* expected = node;
-        Node* next = node->bucketNext.load(::std::memory_order_relaxed);
-        return prev_ptr->compare_exchange_strong(
-            expected, next, ::std::memory_order_release,
-            ::std::memory_order_relaxed);
-      }
-      prev_ptr = &curr->bucketNext;
-      curr = curr->bucketNext.load(::std::memory_order_acquire);
-    }
-    return false;  // already unlinked
+    // bucketCount is a power of two (rounded up in the constructor).
+    return keyHasher(key) & (bucketCount - 1);
   }
 
   void stage_node(Node* node) {
@@ -378,7 +364,7 @@ class LockFreeOrderedHashMap {
   // ---- Constructor / Destructor ----
 
   explicit LockFreeOrderedHashMap(mem_size count)
-      : bucketCount(count > 0 ? count : 1),
+      : bucketCount(::std::bit_ceil(count > 0 ? count : mem_size{1})),
         orderHead(nullptr),
         orderTail(nullptr) {
     buckets = new base::Atomic<Node*>[bucketCount];
@@ -426,18 +412,15 @@ class LockFreeOrderedHashMap {
     Node* newNode = nullptr;
     mem_size index = hash_key(key);
 
-    // Phase 1: insert into hash bucket.
+    // Phase 1: insert into hash bucket.  Tombstones for this key may still
+    // be linked deeper in the chain. find_in_bucket skips them and the GC
+    // sweep, the sole unlinker, reclaims them.
     while (true) {
       Node* existingNode = find_in_bucket(key);
 
       if (existingNode) {
-        if (!existingNode->is_deleted.load(::std::memory_order_acquire)) {
-          delete newNode;
-          return false;
-        }
-        // Deleted node still linked. Help unlink and retry.
-        try_unlink_from_bucket(existingNode);
-        continue;
+        delete newNode;
+        return false;
       }
 
       if (!newNode)
@@ -467,12 +450,21 @@ class LockFreeOrderedHashMap {
         while (check) {
           if (check->keyValue.first == key &&
               !check->is_deleted.load(::std::memory_order_acquire)) {
-            // We are shallower; back off. The deeper node wins.
-            newNode->is_deleted.store(true, ::std::memory_order_release);
+            // We are shallower; back off. The deeper node wins. The node
+            // stays linked as a tombstone until the GC sweeps it.
+            //
+            // The back-off must claim the node via CAS: a concurrent
+            // remove() may have found our briefly live node, marked it
+            // deleted and reported success. That pairing only stays
+            // balanced for callers if this insert reports success too.
+            bool expected = false;
+            const bool we_claimed = newNode->is_deleted.compare_exchange_strong(
+                expected, true, ::std::memory_order_acq_rel,
+                ::std::memory_order_acquire);
             newNode->order_swept = true;  // never entered order chain
-            try_unlink_from_bucket(newNode);
             stage_node(newNode);
-            return false;
+            delete_since_gc_.fetch_add(1, ::std::memory_order_relaxed);
+            return !we_claimed;
           }
           check = check->bucketNext.load(::std::memory_order_acquire);
         }
@@ -583,7 +575,9 @@ class LockFreeOrderedHashMap {
  private:
   // ---- Auto-GC infrastructure ----
 
-  static constexpr mem_size kAutoGCThreshold = 4096;
+  // Tombstones stay linked in their chains until a GC pass, so the
+  // threshold bounds how many dead nodes traversals may have to skip.
+  static constexpr mem_size kAutoGCThreshold = 1024;
   base::Atomic<mem_size> delete_since_gc_{0};
   base::Atomic<mem_size> op_count_{0};
 
@@ -597,7 +591,8 @@ class LockFreeOrderedHashMap {
       if (node->is_deleted.compare_exchange_weak(
               expected, true, ::std::memory_order_release,
               ::std::memory_order_relaxed)) {
-        try_unlink_from_bucket(node);
+        // Mark only. The GC's sweep is the sole unlinker, see
+        // collect_garbage_locked().
         delete_since_gc_.fetch_add(1, ::std::memory_order_relaxed);
         return true;
       }

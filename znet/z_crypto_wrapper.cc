@@ -135,7 +135,7 @@ void ZCryptoContext::SetPreSharedKey(const base::StringRef& secret) {
     pre_shared_key_.assign(secret.data(), secret.size());
   }
   keys_initialized_ = false;
-  authenticated_ = false;
+  authenticated_.store(false, std::memory_order_release);
 }
 
 bool ZCryptoContext::InitializeKeyExchange() {
@@ -212,7 +212,7 @@ bool ZCryptoContext::VerifyServerResponse(const base::String& server_proof) {
     return false;
   }
   
-  authenticated_ = true;
+  authenticated_.store(true, std::memory_order_release);
   return true;
 }
 
@@ -443,7 +443,7 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
 }
 
 bool ZCryptoContext::IsAuthenticated() const {
-  return authenticated_;
+  return authenticated_.load(std::memory_order_acquire);
 }
 
 base::String ZCryptoContext::GenerateServerProof() {
@@ -494,7 +494,7 @@ bool ZCryptoContext::VerifyClientProof(const base::String& client_proof) {
     return false;
   }
 
-  authenticated_ = true;
+  authenticated_.store(true, std::memory_order_release);
   return true;
 }
 

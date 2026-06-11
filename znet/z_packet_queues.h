@@ -78,12 +78,15 @@ class ZPacketQueue {
     return congestion_scale_per_mille_.load(std::memory_order_relaxed);
   }
 
+  // Atomic flags rather than thread_.joinable(): these are read from the
+  // receive thread and user threads while another thread may be assigning
+  // or joining the std::thread object, which is a data race on its handle.
   bool incoming_thread_running() const {
-    return incoming_thread_.joinable();
+    return incoming_thread_active_.load(std::memory_order_acquire);
   }
 
   bool outgoing_thread_running() const {
-    return outgoing_thread_.joinable();
+    return outgoing_thread_active_.load(std::memory_order_acquire);
   }
 
   void Push(OutgoingPacket&& package_move_in) {
@@ -106,7 +109,11 @@ class ZPacketQueue {
     }
     // Only notify if the outgoing thread is sleeping.  If it's actively
     // dispatching, it will pick up the new packet on its next loop iteration.
-    if (outgoing_thread_sleeping_.load(std::memory_order_acquire)) {
+    // The mutex is taken so the notify cannot fire in the window between the
+    // consumer's last emptiness re-check and its cv wait (which would lose
+    // the wakeup until the periodic timeout).
+    if (outgoing_thread_sleeping_.load(std::memory_order_seq_cst)) {
+      std::lock_guard<std::mutex> lock(outgoing_wakeup_mutex_);
       outgoing_wakeup_cv_.notify_one();
     }
   }
@@ -133,12 +140,7 @@ class ZPacketQueue {
     if (it == channel_incoming_queues_.end()) {
       return false;
     }
-    auto& queue = it->second;
-    if (!queue.empty()) {
-      queue.dequeue(p);
-      return true;
-    }
-    return false;
+    return it->second.dequeue(p);
   }
 
   PriorityMPSCQueue<OutgoingPacket>& GetChannelQueue(
@@ -184,6 +186,15 @@ class ZPacketQueue {
   void AddAwaitingAckPacket(ZPeerId return_address,
                             u32 sequence_number,
                             u32 ack_number);
+  // Removes `acked_seq` from the awaiting-ack map if it was destined for
+  // `source_peer` and adjusts the counters. Counters are only decremented
+  // when this thread's remove() wins, so a racing duplicate ACK cannot
+  // double-decrement.
+  void TryAcknowledgePacket(u32 acked_seq, u32 source_peer);
+  bool HasPendingOutgoing() const {
+    return channel_outgoing_queues_.at(PacketChannelType::Control).size_approx() != 0 ||
+           channel_outgoing_queues_.at(PacketChannelType::Data).size_approx() != 0;
+  }
 
  private:
   tx::network::ZSocket& socket_;
@@ -221,9 +232,14 @@ class ZPacketQueue {
   base::Atomic<mem_size> awaiting_ack_bytes_{0};
 
   base::Atomic<bool>& stop_threads_;
+  base::Atomic<bool> incoming_thread_active_{false};
+  base::Atomic<bool> outgoing_thread_active_{false};
   base::Atomic<bool> outgoing_thread_sleeping_{false};
 
   RateLimitConfig rate_limit_config_;
+  // Serializes the rate-limit slow path: rate_limit_window_start_ is a plain
+  // time_point read & written by every producer thread that hits the limit.
+  std::mutex rate_limit_window_mutex_;
   base::Atomic<mem_size> packets_sent_this_second_{0};
   base::Atomic<mem_size> bytes_sent_this_second_{0};
   base::Atomic<mem_size> burst_tokens_{0};

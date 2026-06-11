@@ -7,8 +7,11 @@
 // out-of-range values.
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
+
+#include <znet/z_wire_le.h>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -43,17 +46,32 @@ class BitReader {
       ok_ = false;
       return false;
     }
+    const mem_size byte_capacity = capacity_bits_ / 8;
     u64 acc = 0;
     u32 acc_bits = 0;
     while (acc_bits < bits) {
       const mem_size byte_index = bit_offset_ / 8;
       const u32 bit_in_byte = static_cast<u32>(bit_offset_ % 8);
-      const u32 take = std::min<u32>(bits - acc_bits, 8u - bit_in_byte);
-      const u8 mask = static_cast<u8>((1u << take) - 1);
-      const u8 chunk = (buffer_[byte_index] >> bit_in_byte) & mask;
-      acc |= static_cast<u64>(chunk) << acc_bits;
-      acc_bits += take;
-      bit_offset_ += take;
+      if (byte_index + 8 <= byte_capacity) {
+        // Word path: one unaligned little-endian load yields up to
+        // 64 - bit_in_byte (>= 57) bits, so any read of <= 57 bits
+        // completes in a single iteration.
+        const u64 window = wire_le::LoadU64(buffer_ + byte_index) >> bit_in_byte;
+        const u32 take = std::min<u32>(bits - acc_bits, 64u - bit_in_byte);
+        const u64 mask =
+            (take == 64) ? ~u64{0} : ((u64{1} << take) - 1);
+        acc |= (window & mask) << acc_bits;
+        acc_bits += take;
+        bit_offset_ += take;
+      } else {
+        // Tail path: fewer than 8 readable bytes remain.
+        const u32 take = std::min<u32>(bits - acc_bits, 8u - bit_in_byte);
+        const u8 mask = static_cast<u8>((1u << take) - 1);
+        const u8 chunk = (buffer_[byte_index] >> bit_in_byte) & mask;
+        acc |= static_cast<u64>(chunk) << acc_bits;
+        acc_bits += take;
+        bit_offset_ += take;
+      }
     }
     value_out = acc;
     return true;
@@ -141,7 +159,8 @@ class BitReader {
     if (n == 0) return true;
     if (!AlignToByte()) return false;
     const mem_size byte_index = bit_offset_ / 8;
-    if (byte_index + n > capacity_bits_ / 8) {
+    // Subtract instead of add: byte_index + n could wrap for a hostile n.
+    if (n > capacity_bits_ / 8 - byte_index) {
       ok_ = false;
       return false;
     }
@@ -167,13 +186,7 @@ class BitReader {
 
  private:
   static u32 BitsRequired(u32 max_value) {
-    if (max_value == 0) return 0;
-    u32 bits = 0;
-    while (max_value > 0) {
-      ++bits;
-      max_value >>= 1;
-    }
-    return bits;
+    return static_cast<u32>(std::bit_width(max_value));
   }
 
   const unsigned char* buffer_{nullptr};

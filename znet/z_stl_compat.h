@@ -196,22 +196,60 @@ class SpinLock {
   std::atomic<bool> flag_{false};
 };
 
-// --- MPSC Queue (spinlock-based for minimum overhead) ---
+// --- MPSC Queue (Vyukov-style intrusive list: lock-free producers,
+// wait-free single consumer) ---
+//
+// enqueue() is lock-free for any number of producers: one allocation, one
+// atomic exchange, one release store.  dequeue() must only be called from a
+// single consumer thread.  A dequeue that races a producer between its
+// exchange and link store can transiently report "empty"; callers already
+// treat dequeue() == false as "nothing available right now".
 template <typename T>
 class MPSCQueue {
+  struct Node {
+    std::atomic<Node*> next{nullptr};
+    T value{};
+
+    Node() = default;
+    explicit Node(T&& v) : value(std::move(v)) {}
+  };
+
  public:
-  void enqueue(T&& item) {
-    std::lock_guard<SpinLock> lock(lock_);
-    queue_.push(std::move(item));
-    approx_size_.fetch_add(1, std::memory_order_relaxed);
+  MPSCQueue() {
+    Node* stub = new Node();
+    push_end_.store(stub, std::memory_order_relaxed);
+    pop_end_ = stub;
   }
 
+  ~MPSCQueue() {
+    Node* node = pop_end_;
+    while (node) {
+      Node* next = node->next.load(std::memory_order_relaxed);
+      delete node;
+      node = next;
+    }
+  }
+
+  MPSCQueue(const MPSCQueue&) = delete;
+  MPSCQueue& operator=(const MPSCQueue&) = delete;
+
+  void enqueue(T&& item) {
+    Node* node = new Node(std::move(item));
+    approx_size_.fetch_add(1, std::memory_order_relaxed);
+    Node* prev = push_end_.exchange(node, std::memory_order_acq_rel);
+    prev->next.store(node, std::memory_order_release);
+  }
+
+  // Single-consumer only.
   bool dequeue(T& item) {
-    std::lock_guard<SpinLock> lock(lock_);
-    if (queue_.empty())
+    Node* tail = pop_end_;
+    Node* next = tail->next.load(std::memory_order_acquire);
+    if (!next) {
       return false;
-    item = std::move(queue_.front());
-    queue_.pop();
+    }
+    item = std::move(next->value);
+    pop_end_ = next;
+    delete tail;
     approx_size_.fetch_sub(1, std::memory_order_relaxed);
     return true;
   }
@@ -225,9 +263,9 @@ class MPSCQueue {
   }
 
  private:
-  std::queue<T> queue_;
+  alignas(64) std::atomic<Node*> push_end_;  // producers
+  alignas(64) Node* pop_end_;                // consumer-owned
   std::atomic<size_t> approx_size_{0};
-  mutable SpinLock lock_;
 };
 
 // --- IdSet (simple counter-based ID generator) ---

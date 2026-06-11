@@ -25,6 +25,13 @@ class PacketBuilder {
   base::Vector<byte> BuildPacket(OutgoingPacket& packet_info,
                                  const u32 next_sequence_number);
 
+  // Builds into `out`, reusing its capacity (resize + overwrite). Returns
+  // false on failure; `out` contents are unspecified then. Preferred on the
+  // per-packet hot path to avoid an allocation per send.
+  bool BuildPacketInto(OutgoingPacket& packet_info,
+                       u32 next_sequence_number,
+                       base::Vector<byte>& out);
+
  private:
   ZCryptoContext* crypto_context_;
 

@@ -21,12 +21,14 @@
 // Non-copyable, non-moveable. The destination (packet or external span)
 // must outlive the writer.
 
+#include <bit>
 #include <cstring>
 #include <limits>
 #include <utility>
 
 #include <znet/z_network_allocator.h>
 #include <znet/z_packets.h>
+#include <znet/z_wire_le.h>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -276,16 +278,33 @@ class BitWriter {
 
  private:
   static u32 BitsRequired(u32 max_value) {
-    if (max_value == 0) return 0;
-    u32 bits = 0;
-    while (max_value > 0) {
-      ++bits;
-      max_value >>= 1;
-    }
-    return bits;
+    return static_cast<u32>(std::bit_width(max_value));
   }
 
   void FlushScratchBytes() {
+    if (scratch_bits_ < 8) {
+      return;
+    }
+    // Fast path: store the whole accumulator as one little-endian word
+    // (matches the LSB-first byte order of the per-byte emission) and
+    // advance only over the complete bytes. The over-written tail bytes are
+    // scratch space within capacity and are rewritten by later flushes.
+    if (Reserve(byte_offset_ + 8)) {
+      const u32 bytes = scratch_bits_ >> 3;
+      wire_le::StoreU64(reinterpret_cast<byte*>(buffer_ + byte_offset_),
+                        scratch_);
+      byte_offset_ += bytes;
+      scratch_ = (bytes == 8) ? 0 : (scratch_ >> (bytes * 8));
+      scratch_bits_ -= bytes * 8;
+      return;
+    }
+    // Slow path: an external (mode 3) buffer with fewer than 8 bytes left.
+    // Reserve() set ok_ = false; clear it and retry byte-wise so a buffer
+    // with exactly enough room for the remaining bits still succeeds.
+    if (!external_buffer_) {
+      return;  // pool allocation failed; ok_ is already false
+    }
+    ok_ = true;
     while (scratch_bits_ >= 8) {
       if (!Reserve(byte_offset_ + 1)) {
         return;

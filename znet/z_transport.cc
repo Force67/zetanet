@@ -103,9 +103,11 @@ void ZAsyncTransportLayer::SetBuiltInTaskExecutorConfig(
 }
 
 void ZAsyncTransportLayer::Deinit() {
-  // Close socket first to unblock the receiver thread's recvfrom()
-  socket_.DestroySocket();
+  // Join the worker threads before closing the fd. The socket is
+  // non-blocking, so the receiver exits on the stop flag within one poll
+  // interval and nobody can be inside recvfrom() when close() runs.
   packet_queue_.StopThreads();
+  socket_.DestroySocket();
   state_ = State::kDisconnected;
   ResetSynchronizedClock();
 }

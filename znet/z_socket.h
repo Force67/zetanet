@@ -90,6 +90,10 @@ class ZSocket {
   // Fast path: uses pre-cached sockaddr from Address (no inet_pton).
   i32 SendCached(const Address& addr, const base::Span<byte> data);
   i32 Receive(Address& sender, char* buffer, mem_size length);
+  // Blocks until the socket is readable or `timeout_ms` elapses. Returns
+  // true if readable. Lets receive loops on the non-blocking socket sleep
+  // instead of spinning on EAGAIN.
+  bool WaitReadable(i32 timeout_ms);
   void SetChaosOptions(const ChaosOptions& options);
 
   // Send to server sock addr

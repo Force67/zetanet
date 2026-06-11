@@ -57,7 +57,10 @@ class ZCryptoContext {
   base::Array<byte, 32> encryption_key_{};
   base::Array<byte, 32> authentication_key_{};
   bool keys_initialized_{false};
-  bool authenticated_{false};
+  // Written by the handshake thread, read by the receive thread's packet
+  // unpacker: release/acquire so the key material written before the flag
+  // flips is visible to readers that observe it as true.
+  std::atomic<bool> authenticated_{false};
   base::String local_nonce_;
   base::String local_challenge_;
   base::String server_nonce_;

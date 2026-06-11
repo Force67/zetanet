@@ -132,13 +132,23 @@ u16 ComputePacketHeaderChecksum(const byte* header_wire) {
 
 base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
                                               const u32 next_sequence_number) {
+  base::Vector<byte> out;
+  if (!BuildPacketInto(packet_info, next_sequence_number, out)) {
+    return {};
+  }
+  return out;
+}
+
+bool PacketBuilder::BuildPacketInto(OutgoingPacket& packet_info,
+                                    const u32 next_sequence_number,
+                                    base::Vector<byte>& out) {
   const byte* payload_source = nullptr;
   u32 payload_size = 0;
   u32 original_payload_size = 0;
   if (packet_info.heap_data_size > 0) {
     if (!packet_info.payload.data) {
       BASE_LOGE(kLogTag, "Payload pointer is null while size is non-zero");
-      return {};
+      return false;
     }
     payload_source = packet_info.payload.data;
     payload_size = packet_info.heap_data_size;
@@ -168,7 +178,7 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
         std::numeric_limits<u32>::max() - ZCryptoContext::kNonceSize -
             ZCryptoContext::kGcmTagSize) {
       BASE_LOGE(kLogTag, "Encrypted payload size overflow");
-      return {};
+      return false;
     }
     const u32 encrypted_wire_payload_size =
         payload_size + static_cast<u32>(ZCryptoContext::kNonceSize +
@@ -182,11 +192,11 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
                                 original_payload_size,
                                 encrypted_payload)) {
       BASE_LOGE(kLogTag, "Failed to encrypt outgoing payload");
-      return {};
+      return false;
     }
     if (encrypted_payload.size() > std::numeric_limits<u32>::max()) {
       BASE_LOGE(kLogTag, "Payload exceeds protocol size limit");
-      return {};
+      return false;
     }
     payload_size = static_cast<u32>(encrypted_payload.size());
     payload_source = payload_size > 0 ? encrypted_payload.data() : nullptr;
@@ -199,21 +209,21 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
                                     : static_cast<u32>(kUncompressedHeaderWireSize));
   if (size_of_headers > std::numeric_limits<u32>::max() - payload_size) {
     BASE_LOGE(kLogTag, "Packet size overflow");
-    return {};
+    return false;
   }
 
-  base::Vector<byte> packet(size_of_headers + payload_size);
-  FillPacketHeader(packet, packet_info, payload_size, original_payload_size,
-                   next_sequence_number);
+  out.resize(size_of_headers + payload_size);
+  FillPacketHeader(base::Span<byte>(out.data(), out.size()), packet_info,
+                   payload_size, original_payload_size, next_sequence_number);
 
   // and we copy the payload to its appropriate place
   if (payload_size > 0) {
-    std::memcpy(packet.data() + size_of_headers, payload_source, payload_size);
+    std::memcpy(out.data() + size_of_headers, payload_source, payload_size);
   }
 
-  if (packet.size() < kPacketHeaderWireSize) {
+  if (out.size() < kPacketHeaderWireSize) {
     BASE_LOGE(kLogTag, "Packet is smaller than header size");
-    return {};
+    return false;
   }
 
   mem_size offset = kPacketHeaderWireSize;
@@ -222,38 +232,38 @@ base::Vector<byte> PacketBuilder::BuildPacket(OutgoingPacket& packet_info,
   }
 
   if (packet_info.flags.compressed) {
-    if (offset + kCompressedHeaderWireSize > packet.size()) {
+    if (offset + kCompressedHeaderWireSize > out.size()) {
       BASE_LOGE(kLogTag, "Invalid packet header layout");
-      return {};
+      return false;
     }
     const mem_size payload_offset = offset + kCompressedHeaderWireSize;
-    const mem_size wire_payload_size = packet.size() - payload_offset;
+    const mem_size wire_payload_size = out.size() - payload_offset;
     const u32 payload_checksum =
-        ComputeChecksum32(packet.data() + payload_offset, wire_payload_size);
-    wire_le::StoreU32(packet.data() + offset + kCompressedChecksumOffset,
+        ComputeChecksum32(out.data() + payload_offset, wire_payload_size);
+    wire_le::StoreU32(out.data() + offset + kCompressedChecksumOffset,
                       payload_checksum);
   } else {
-    if (offset + kUncompressedHeaderWireSize > packet.size()) {
+    if (offset + kUncompressedHeaderWireSize > out.size()) {
       BASE_LOGE(kLogTag, "Invalid packet header layout");
-      return {};
+      return false;
     }
     const mem_size payload_offset = offset + kUncompressedHeaderWireSize;
-    const mem_size wire_payload_size = packet.size() - payload_offset;
+    const mem_size wire_payload_size = out.size() - payload_offset;
     const u32 payload_checksum =
-        ComputeChecksum32(packet.data() + payload_offset, wire_payload_size);
-    wire_le::StoreU32(packet.data() + offset + kUncompressedChecksumOffset,
+        ComputeChecksum32(out.data() + payload_offset, wire_payload_size);
+    wire_le::StoreU32(out.data() + offset + kUncompressedChecksumOffset,
                       payload_checksum);
   }
 
-  const u16 header_checksum = ComputePacketHeaderChecksum(packet.data());
-  wire_le::StoreU16(packet.data() + kHeaderChecksumOffset, header_checksum);
+  const u16 header_checksum = ComputePacketHeaderChecksum(out.data());
+  wire_le::StoreU16(out.data() + kHeaderChecksumOffset, header_checksum);
 
-  if (wire_le::LoadU32(packet.data() + kHeaderTotalSizeOffset) != packet.size()) {
+  if (wire_le::LoadU32(out.data() + kHeaderTotalSizeOffset) != out.size()) {
     BASE_LOGE(kLogTag, "Packet size mismatch while finalizing");
-    return {};
+    return false;
   }
 
-  return packet;
+  return true;
 }
 
 void PacketBuilder::FillPacketHeader(const base::Span<byte> outgoing_data,

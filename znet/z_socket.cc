@@ -12,6 +12,10 @@
 #include <chrono>
 #include <thread>
 
+#if !defined(_WIN32)
+#include <poll.h>
+#endif
+
 namespace tx::network {
 static constexpr char kLogTag[] = "z-socket";
 
@@ -471,6 +475,23 @@ void ZSocket::SetChaosOptions(const ChaosOptions& options) {
   chaos_rng_state_ = chaos_options_.seed;
 }
 
+bool ZSocket::WaitReadable(i32 timeout_ms) {
+  if (socket_ == ZNET_INVALID_SOCKET) {
+    return false;
+  }
+#if defined(_WIN32)
+  WSAPOLLFD pfd{};
+  pfd.fd = socket_;
+  pfd.events = POLLRDNORM;
+  return ::WSAPoll(&pfd, 1, timeout_ms) > 0;
+#else
+  pollfd pfd{};
+  pfd.fd = socket_;
+  pfd.events = POLLIN;
+  return ::poll(&pfd, 1, timeout_ms) > 0;
+#endif
+}
+
 i32 ZSocket::Receive(Address& sender, char* buffer, mem_size length) {
   if (socket_ == ZNET_INVALID_SOCKET)
     return -1;
@@ -489,6 +510,10 @@ i32 ZSocket::Receive(Address& sender, char* buffer, mem_size length) {
     // New or changed sender — do the full conversion.
     sender.cached_sa = sender_addr;
     sender.cached_sa_len = sender_len;
+
+    // Address::operator== compares raw bytes past the terminator, so the
+    // whole buffer must be zeroed before inet_ntop writes its strlen+1 bytes.
+    memset(sender.ip, 0, sizeof(sender.ip));
 
     if (sender_addr.ss_family == AF_INET6) {
       auto* addr6 = reinterpret_cast<sockaddr_in6*>(&sender_addr);
