@@ -42,7 +42,7 @@ bool AddressFromSockaddr(const sockaddr_storage& address, ZSocket::Address& out)
         nullptr) {
       return false;
     }
-    out.port = ::ntohs(addr6->sin6_port);
+    out.port = ntohs(addr6->sin6_port);
     out.address_family = AF_INET6;
     return true;
   }
@@ -53,7 +53,7 @@ bool AddressFromSockaddr(const sockaddr_storage& address, ZSocket::Address& out)
         nullptr) {
       return false;
     }
-    out.port = ::ntohs(addr4->sin_port);
+    out.port = ntohs(addr4->sin_port);
     out.address_family = AF_INET;
     return true;
   }
@@ -340,7 +340,7 @@ i32 ZSocket::Send(const Address& target, const base::Span<byte> data) {
   if (target.address_family == AF_INET6) {
     auto* addr6 = reinterpret_cast<sockaddr_in6*>(&target_addr);
     addr6->sin6_family = AF_INET6;
-    addr6->sin6_port = ::htons(target.port);
+    addr6->sin6_port = htons(target.port);
     if (::inet_pton(AF_INET6, target.ip, &addr6->sin6_addr) <= 0) {
       BASE_LOGE(kLogTag, "Failed to convert IPv6 address: {}", target.ip);
       return -1;
@@ -349,7 +349,7 @@ i32 ZSocket::Send(const Address& target, const base::Span<byte> data) {
   } else {
     auto* addr4 = reinterpret_cast<sockaddr_in*>(&target_addr);
     addr4->sin_family = AF_INET;
-    addr4->sin_port = ::htons(target.port);
+    addr4->sin_port = htons(target.port);
     if (::inet_pton(AF_INET, target.ip, &addr4->sin_addr) <= 0) {
       BASE_LOGE(kLogTag, "Failed to convert IPv4 address: {}", target.ip);
       return -1;
@@ -519,12 +519,12 @@ i32 ZSocket::Receive(Address& sender, char* buffer, mem_size length) {
     if (sender_addr.ss_family == AF_INET6) {
       auto* addr6 = reinterpret_cast<sockaddr_in6*>(&sender_addr);
       ::inet_ntop(AF_INET6, &addr6->sin6_addr, sender.ip, sizeof(sender.ip));
-      sender.port = ::ntohs(addr6->sin6_port);
+      sender.port = ntohs(addr6->sin6_port);
       sender.address_family = AF_INET6;
     } else {
       auto* addr4 = reinterpret_cast<sockaddr_in*>(&sender_addr);
       ::inet_ntop(AF_INET, &addr4->sin_addr, sender.ip, sizeof(sender.ip));
-      sender.port = ::ntohs(addr4->sin_port);
+      sender.port = ntohs(addr4->sin_port);
       sender.address_family = AF_INET;
     }
   }
