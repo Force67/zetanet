@@ -7,6 +7,7 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/atomic.h>
 #include <base/containers/array.h>
 #include <base/containers/vector.h>
 #include <base/threading/mutex.h>
