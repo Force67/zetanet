@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_file_transporter.h"
+#include <mutex>
 #include "z_crypto_backend.h"
 #include "z_file_write_interface.h"
 #include "z_transport.h"

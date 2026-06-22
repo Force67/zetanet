@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_packet_queues.h"
+#include <mutex>
 #include "z_packet_serdes.h"
 #include "z_wire_le.h"
 

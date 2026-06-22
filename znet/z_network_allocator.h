@@ -1,8 +1,10 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
+#include <cstdint>
 #include <bit>
 #include <limits>
+#include <mutex>  // std::lock_guard (libc++ does not leak it transitively)
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>

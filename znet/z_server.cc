@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_server.h"
+#include <cstring>
 #include "z_system_command.h"
 
 #ifdef ZNET_USE_STL

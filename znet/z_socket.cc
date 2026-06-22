@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_socket.h"
+#include <mutex>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>

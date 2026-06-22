@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 // Lock-free ordered hash map with epoch-based safe memory reclamation.
 #pragma once
+#include <mutex>
 
 #include <bit>
 

@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_packet_serdes.h"
+#include <cstring>
 
 #include <limits>
 

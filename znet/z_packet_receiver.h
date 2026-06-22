@@ -1,6 +1,7 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
+#include <algorithm>
 
 #include <znet/z_socket.h>
 #include <znet/z_packets.h>

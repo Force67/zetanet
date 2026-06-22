@@ -1,6 +1,7 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #include "z_p2p_node.h"
+#include <mutex>
 #include "z_wire_le.h"
 
 #include <znet/z_stl_compat.h>

@@ -1,6 +1,7 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
+#include <cstring>
 
 // Trait-based dispatch for BitWriter::Push / BitReader::Pop.
 //

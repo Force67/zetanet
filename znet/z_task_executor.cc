@@ -2,6 +2,7 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_task_executor.h"
+#include <mutex>
 
 #include <algorithm>
 #include <thread>
