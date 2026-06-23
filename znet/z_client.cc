@@ -90,9 +90,14 @@ void ZClient::Update() {
   UpdateSynchronizedClock();
 
   // Control packets run through ProcessSystemMessage inside Poll; the data
-  // channel belongs to the application.
+  // channel belongs to the application. FileTransfer chunks are application
+  // payload too, so hand them to the registered sink rather than dropping them
+  // here (they are already ACKed and would never be resent).
   IncomingPacket packet;
   while (Poll(PacketChannelType::Control, packet)) {
+    if (packet.type == PacketType::FileTransfer && file_transfer_sink_) {
+      file_transfer_sink_(file_transfer_sink_context_, packet);
+    }
   }
   switch (state()) {
     case ZAsyncTransportLayer::State::kDisconnected:

@@ -60,6 +60,16 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
   u16 negotiated_protocol_version() const { return negotiated_protocol_version_; }
   u32 negotiated_feature_flags() const { return negotiated_feature_flags_; }
 
+  // Delivers incoming FileTransfer (control-channel) packets to the application.
+  // Update() drains the control channel to process handshake and clock-sync
+  // system messages; without this hook the file-transfer chunks ZFileTransporter
+  // relies on would be discarded there and, being already ACKed, never resent.
+  // Set this to drive a receiving transporter on a threaded client.
+  void SetFileTransferSink(void (*sink)(void*, const IncomingPacket&), void* context) {
+    file_transfer_sink_ = sink;
+    file_transfer_sink_context_ = context;
+  }
+
   inline bool Poll(PacketChannelType t, IncomingPacket& p) {
     if (packet_queue_.Pop(t, p)) {
       if (IsSystemMessage(p.type)) {
@@ -91,5 +101,7 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
   base::Clock::time_point handshake_start_time_{};
   base::Clock::time_point next_clock_sync_request_time_{};
   base::Clock::time_point next_client_hello_retry_time_{};
+  void (*file_transfer_sink_)(void*, const IncomingPacket&){nullptr};
+  void* file_transfer_sink_context_{nullptr};
 };
 }  // namespace tx::network
