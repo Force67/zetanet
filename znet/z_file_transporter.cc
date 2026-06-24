@@ -246,6 +246,10 @@ bool ZFileTransporter::SendFile(const base::Path& path,
             path.ToAsciiString(), file_size, total_chunks, transfer_id);
 
   for (u32 chunk_index = 0; chunk_index < total_chunks; ++chunk_index) {
+    if (send_stop_requested_.load(std::memory_order_relaxed)) {
+      BASE_LOGI(kLogTag, "Transfer {} aborted by stop request", transfer_id);
+      return false;
+    }
     const u64 remaining = (file_size > file_offset) ? (file_size - file_offset) : 0;
     const u32 target_chunk_bytes =
         static_cast<u32>(std::min<u64>(remaining, static_cast<u64>(chunk_size)));
@@ -639,6 +643,9 @@ bool ZFileTransporter::WaitForSendWindow(const TransferTuning& tuning) const {
   const auto sleep_duration = std::chrono::milliseconds(
       std::max<u32>(1, tuning.backpressure_sleep_ms));
   while (true) {
+    if (send_stop_requested_.load(std::memory_order_relaxed)) {
+      return false;
+    }
     if (transport_layer_.state() != ZAsyncTransportLayer::State::kConnected) {
       return false;
     }

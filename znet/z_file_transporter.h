@@ -7,6 +7,7 @@
 #include <znet/z_file_write_interface.h>
 #include <znet/z_clock.h>
 
+#include <atomic>
 #include <chrono>
 
 #ifdef ZNET_USE_STL
@@ -79,6 +80,11 @@ class ZFileTransporter {
                 ZPeerId destination,
                 const TransferTuning& tuning);
 
+  // Aborts any in-progress SendFile promptly (it returns false) and makes every
+  // later SendFile a no-op. Lets an owner that drives SendFile on a worker thread
+  // tear down without waiting out the backpressure timeout. One-way latch.
+  void RequestStopSending() { send_stop_requested_.store(true, std::memory_order_relaxed); }
+
   bool BuildTransferChunkPayload(const TransferChunk& chunk,
                                  base::Vector<byte>& payload) const;
   bool ParseTransferChunkPayload(const base::Span<byte>& payload,
@@ -136,5 +142,6 @@ class ZFileTransporter {
   IFileWriteFactory* file_write_factory_{nullptr};
   mutable base::Mutex stream_mutex_;
   base::Map<u64, StreamReceiveSession> active_streams_;
+  std::atomic<bool> send_stop_requested_{false};
 };
 }  // namespace tx::network
