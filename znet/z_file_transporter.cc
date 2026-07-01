@@ -65,18 +65,11 @@ bool ComputeHmacSha256(const byte* data, mem_size size, const byte* key, mem_siz
 #endif
 }
 
-bool ContainsPathTraversal(const base::String& path) {
-  if (path.empty()) {
-    return true;
-  }
-  // Reject absolute paths
-  if (path[0] == '/' || path[0] == '\\') {
-    return true;
-  }
-  // Reject Windows drive letter paths (e.g. "C:")
-  if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
-    return true;
-  }
+// True if the path contains a ".." parent-directory segment (a leading "..",
+// "../", or "/..").  Absolute paths are allowed: this guards a caller-supplied
+// output destination the application chose itself, where an absolute path is
+// legitimate and only escaping upward is a concern.
+bool ContainsParentDirTraversal(const base::String& path) {
   for (mem_size i = 0; i < path.size(); ++i) {
     if (path[i] == '.' && i + 1 < path.size() && path[i + 1] == '.') {
       if (i + 2 >= path.size() || path[i + 2] == '/' || path[i + 2] == '\\') {
@@ -90,6 +83,23 @@ bool ContainsPathTraversal(const base::String& path) {
     }
   }
   return false;
+}
+
+// Stricter check for an untrusted remote-supplied file name: additionally rejects
+// absolute and drive-letter paths, which a sandboxed incoming name must never be.
+bool ContainsPathTraversal(const base::String& path) {
+  if (path.empty()) {
+    return true;
+  }
+  // Reject absolute paths
+  if (path[0] == '/' || path[0] == '\\') {
+    return true;
+  }
+  // Reject Windows drive letter paths (e.g. "C:")
+  if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
+    return true;
+  }
+  return ContainsParentDirTraversal(path);
 }
 
 bool IsSafeTransferFileName(const base::String& file_name) {
@@ -357,8 +367,10 @@ bool ZFileTransporter::AssembleFileFromChunks(
   }
 
   const base::String output_path_str = output_path.ToAsciiString();
-  if (IsPathTraversal(output_path_str)) {
-    BASE_LOGE(kLogTag, "Path traversal attempt detected in output path");
+  // Application-chosen output path (see FinalizeStreamedFile): allow an absolute
+  // destination, reject only empty or an upward ".." escape.
+  if (output_path_str.empty() || ContainsParentDirTraversal(output_path_str)) {
+    BASE_LOGE(kLogTag, "Parent-directory traversal in output path");
     return false;
   }
 
@@ -877,8 +889,11 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
 bool ZFileTransporter::FinalizeStreamedFile(u64 transfer_id,
                                             const base::Path& output_path) {
   const base::String out_path = output_path.ToAsciiString();
-  if (IsPathTraversal(out_path)) {
-    BASE_LOGE(kLogTag, "Path traversal attempt detected in output path");
+  // The output path is chosen by the application, not the remote peer (the remote
+  // controls only file_name, validated separately), so an absolute destination is
+  // legitimate; reject only an empty path or an upward ".." escape.
+  if (out_path.empty() || ContainsParentDirTraversal(out_path)) {
+    BASE_LOGE(kLogTag, "Parent-directory traversal in output path");
     return false;
   }
 
