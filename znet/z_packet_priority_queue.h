@@ -15,7 +15,6 @@ namespace tx::network {
 template <typename T>
 class PriorityMPSCQueue {
  public:
-  // Enqueue item with priority
   void enqueue(T&& item, PacketPriority priority) {
     switch (priority) {
       case PacketPriority::Critical:
@@ -33,8 +32,7 @@ class PriorityMPSCQueue {
     }
   }
 
-  // Dequeue item (highest priority first).
-  // Uses lock-free size_approx() to skip empty queues without acquiring a mutex.
+  // Highest priority first; size_approx() skips empty queues without locks.
   bool dequeue(T& item) {
     if (critial_priority_queue_.size_approx() > 0 &&
         critial_priority_queue_.dequeue(item))
@@ -51,7 +49,6 @@ class PriorityMPSCQueue {
     return false;
   }
 
-  // Check if the queue is empty (lock-free).
   bool empty() const {
     return size_approx() == 0;
   }

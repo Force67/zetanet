@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <bit>
 #include <limits>
-#include <mutex>  // std::lock_guard (libc++ does not leak it transitively)
+#include <mutex>  // libc++ does not leak lock_guard transitively
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -21,7 +21,7 @@ class PacketBufferPool {
  public:
   static constexpr mem_size kMinClassSize = 64;
   static constexpr mem_size kMaxClassSize = 65536;
-  static constexpr mem_size kClassCount = 11;  // 64 ... 65536
+  static constexpr mem_size kClassCount = 11;
   static constexpr mem_size kRetunePeriod = 4096;
   static constexpr mem_size kCacheBudgetBytes = 16 * 1024 * 1024;
   static constexpr mem_size kMinTargetPerClass = 8;
@@ -242,7 +242,7 @@ class PacketBufferPool {
       return 0;
     }
     // ceil(log2(requested_size)) - log2(kMinClassSize)
-    const unsigned min_bits = 6u;  // log2(64)
+    const unsigned min_bits = 6u;
     const unsigned ceil_log2 =
         static_cast<unsigned>(std::bit_width(requested_size - 1));
     const unsigned index = ceil_log2 - min_bits;

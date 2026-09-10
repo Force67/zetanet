@@ -9,13 +9,9 @@ namespace tx::network {
 struct ZPeerId {
   using id_type = u32;
   id_type id;
-  // invalid id
   static constexpr id_type invalid_id = 0xFFFFFFFF;
-  // biggest assignable id
   static constexpr id_type max_id = invalid_id - 1;
-  // id to send to all peers
   static constexpr id_type to_all = max_id - 1;
-  // send to server socket
   static constexpr id_type to_server = max_id - 2;
 
   ZPeerId() : id(invalid_id) {}

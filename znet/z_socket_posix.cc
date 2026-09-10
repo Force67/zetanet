@@ -14,7 +14,6 @@ namespace tx::network {
 static constexpr char kLogTag[] = "z-socket-posix";
 
 bool ZSocket::InitSocket() {
-  // No platform init needed on POSIX (no WSAStartup equivalent)
   return true;
 }
 
@@ -63,7 +62,7 @@ ZSocket::Error ZSocket::GetLastError() {
 #if EWOULDBLOCK != EAGAIN
     case EWOULDBLOCK:
 #endif
-      return Error::Success;  // non-blocking: no data available is not an error
+      return Error::Success;  // no data pending on a non-blocking socket
   }
   return Error::UnknownError;
 }

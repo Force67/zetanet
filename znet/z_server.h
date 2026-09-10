@@ -37,7 +37,6 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
   bool Update();
   void SendMessage(ZPeerId id, const base::String& data);
 
-  // Fetches the next packet from the queue
   bool Poll(PacketChannelType t, IncomingPacket& p) {
     while (packet_queue_.Pop(t, p)) {
       if (IsSystemMessage(p.type)) {
@@ -53,8 +52,6 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
     return false;
   }
 
-  // add a package to the queue, priority etc are decided based on the data in
-  // outgoing packet
   void Push(OutgoingPacket&& p) {
     if (state_ != State::kConnected)
       return;

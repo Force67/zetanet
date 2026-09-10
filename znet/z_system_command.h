@@ -63,7 +63,7 @@ class PacketWriter {
     return true;
   }
 
-  // Put method for scalar types
+  // Writes scalar values in little-endian byte order.
   template <typename T>
   typename std::enable_if<std::is_scalar<T>::value, bool>::type Put(
       const T value) {
@@ -95,7 +95,6 @@ class PacketWriter {
     return true;
   }
 
-  // Put method for other trivially copyable types
   template <typename T>
   typename std::enable_if<!std::is_scalar<T>::value &&
                               std::is_trivially_copyable<T>::value,
@@ -143,18 +142,15 @@ class PacketWriter {
   mem_size capacity_;
   mem_size offset_;
 
-  // Prevent copying and assignment
   PacketWriter(const PacketWriter&) = delete;
   PacketWriter& operator=(const PacketWriter&) = delete;
 };
 
 class PacketReader {
  public:
-  // Constructor takes a pointer to a buffer and its size
   PacketReader(const byte* buffer, mem_size size)
       : buffer_(buffer), capacity_(size), offset_(0) {}
 
-  // Read method for scalar types
   template <typename T>
   typename std::enable_if<std::is_scalar<T>::value, bool>::type Read(T& value) {
     if (sizeof(T) > capacity_ - offset_) {
@@ -187,7 +183,6 @@ class PacketReader {
     return true;
   }
 
-  // Read method for other trivially copyable types
   template <typename T>
   typename std::enable_if<!std::is_scalar<T>::value &&
                               std::is_trivially_copyable<T>::value,
@@ -225,7 +220,6 @@ class PacketReader {
     return ReadS(data);
   }
 
-  // Return the current position in the buffer
   mem_size position() const { return offset_; }
   mem_size remaining() const { return capacity_ - offset_; }
 
@@ -234,7 +228,6 @@ class PacketReader {
   mem_size capacity_;
   mem_size offset_;
 
-  // Prevent copying and assignment
   PacketReader(const PacketReader&) = delete;
   PacketReader& operator=(const PacketReader&) = delete;
 };

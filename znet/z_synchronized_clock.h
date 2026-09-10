@@ -14,8 +14,8 @@
 
 namespace tx::network {
 
-// Client-side, monotonic clock estimate of a remote authority (typically a server).
-// It applies RTT/2 compensation and gradually blends to new synchronization samples.
+// Client-side monotonic estimate of a remote authority clock. Applies RTT/2
+// compensation and blends gradually toward new samples.
 class ZSynchronizedClock {
  public:
   ZSynchronizedClock() noexcept { Reset(); }
@@ -32,8 +32,8 @@ class ZSynchronizedClock {
 
   bool IsSynchronized() const noexcept { return synchronized_; }
 
-  // NTP-style sample:
-  // t0 = client send, t1 = server receive, t2 = server send, t3 = client receive.
+  // NTP sample: t0 client send, t1 server receive, t2 server send, t3 client
+  // receive.
   void SynchronizeFromNtpSample(u64 client_send_tick_ms,
                                 u64 client_receive_tick_ms,
                                 u64 server_receive_tick_ms,
@@ -58,8 +58,8 @@ class ZSynchronizedClock {
       network_delay_ms = static_cast<i64>(0xFFFFFFFFu);
     }
 
-    // Classical NTP offset estimate. Under path asymmetry, residual bias remains
-    // fundamentally unidentifiable; compensation allows caller calibration.
+    // NTP offset estimate; asymmetry bias is unidentifiable, callers may
+    // compensate via SetAsymmetryCompensationMs().
     double offset_ms = 0.5 * static_cast<double>((t1 - t0) + (t2 - t3));
     offset_ms += static_cast<double>(asymmetry_compensation_ms_);
 
@@ -104,7 +104,7 @@ class ZSynchronizedClock {
     }
     u64 next_tick = static_cast<u64>(estimate + 0.5);
 
-    // Keep the synchronized clock monotonic.
+    // Stay monotonic.
     if (next_tick < simulated_tick_ms_) {
       next_tick = simulated_tick_ms_;
     }

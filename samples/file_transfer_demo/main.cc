@@ -464,7 +464,7 @@ int main(int argc, char** argv) {
   const int rc = options.mode == Mode::Receiver ? RunReceiver(options)
                                                 : RunSender(options);
   if (options.mode == Mode::Sender && rc == 0) {
-    // Avoid sender teardown instability in current runtime after heavy transfer loops.
+    // _Exit avoids sender teardown instability after heavy transfer loops.
     std::fflush(stdout);
     std::fflush(stderr);
     std::_Exit(0);

@@ -89,9 +89,8 @@ void ZClient::Disconnect() {
 void ZClient::Update() {
   UpdateSynchronizedClock();
 
-  // Control packets are handled by ProcessSystemMessage inside Poll. The
-  // data channel is the application's: draining it here would drop user
-  // messages, so callers poll it themselves.
+  // Control packets run through ProcessSystemMessage inside Poll; the data
+  // channel belongs to the application.
   IncomingPacket packet;
   while (Poll(PacketChannelType::Control, packet)) {
   }

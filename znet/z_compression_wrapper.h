@@ -15,10 +15,9 @@
 
 namespace tx::network {
 
-// wrapper around the preferred compression library
 class ZCompressionContext {
  public:
-  static constexpr mem_size kMaxDecompressedSize = 64 * 1024 * 1024;  // 64 MB limit
+  static constexpr mem_size kMaxDecompressedSize = 64 * 1024 * 1024;
   static constexpr mem_size kMaxExpansionRatio = 256;
   static constexpr mem_size kExpansionSlackBytes = 1024;
 

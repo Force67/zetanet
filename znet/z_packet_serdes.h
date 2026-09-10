@@ -25,9 +25,7 @@ class PacketBuilder {
   base::Vector<byte> BuildPacket(OutgoingPacket& packet_info,
                                  const u32 next_sequence_number);
 
-  // Builds into `out`, reusing its capacity (resize + overwrite). Returns
-  // false on failure; `out` contents are unspecified then. Preferred on the
-  // per-packet hot path to avoid an allocation per send.
+  // Reuses capacity on the hot path to avoid an allocation per send.
   bool BuildPacketInto(OutgoingPacket& packet_info,
                        u32 next_sequence_number,
                        base::Vector<byte>& out);
@@ -52,7 +50,6 @@ class PacketBuilder {
     if (!crypto_context_) {
       return false;
     }
-    // Stack-allocated AAD avoids per-packet heap allocation.
     byte aad[20];
     const u8 flags =
         (packet_info.flags.reliable ? 1 : 0) |
@@ -130,7 +127,6 @@ class PacketUnpacker {
     if (!crypto_context_) {
       return false;
     }
-    // Stack-allocated AAD avoids per-packet heap allocation.
     byte aad[20];
     const u8 flags =
         (header.flags.is_reliable ? 1 : 0) |

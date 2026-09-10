@@ -58,8 +58,7 @@ class ZPeerMapping {
   }
 
   ZPeer* GetOrCreatePeer(const ZSocket::Address& addr) {
-    // Fast path: the peer almost always exists already (one lookup per
-    // received packet), so take only the shared lock and let concurrent
+    // Peer almost always exists; take only the shared lock so concurrent
     // receivers scan in parallel.
     {
       std::shared_lock lock(mutex_);
@@ -70,7 +69,7 @@ class ZPeerMapping {
       }
     }
     std::unique_lock lock(mutex_);
-    // Re-scan: another thread may have created the peer between the locks.
+    // Re-scan: another thread may have created the peer in between.
     for (auto& peer : peer_list_) {
       if (peer.address == addr) {
         return &peer;
@@ -86,10 +85,8 @@ class ZPeerMapping {
     return &peer_list_.emplace_back(ZPeer{ZPeerId(id), addr});
   }
 
-  // Copies a peer's send address out under the lock. Callers on threads other
-  // than the one that mutates peer_list_ (e.g. the dispatcher) must use this
-  // rather than holding a ZPeer* across the lock release: a concurrent
-  // GetOrCreatePeer can reallocate peer_list_ and invalidate raw pointers.
+  // Copies the address out under the lock; a concurrent GetOrCreatePeer can
+  // reallocate peer_list_ and invalidate ZPeer* handles.
   bool ResolvePeerAddress(ZPeerId id, ZSocket::Address& out_address) {
     std::shared_lock lock(mutex_);
     for (auto& peer : peer_list_) {
@@ -116,9 +113,8 @@ class ZPeerMapping {
     return peer_list_;
   }
 
-  // Snapshot into a caller-owned vector. Copy-assignment reuses the
-  // destination's capacity, so a reused scratch vector makes broadcast
-  // fanout allocation-free in steady state.
+  // Copy-assignment reuses capacity, making broadcast fanout
+  // allocation-free in steady state.
   void CopyPeerList(base::Vector<ZPeer>& out) const {
     std::shared_lock lock(mutex_);
     out = peer_list_;

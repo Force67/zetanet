@@ -11,8 +11,6 @@
 #include <znet/z_clock.h>
 
 #ifdef ZNET_USE_STL
-// znet's copy of the lock-free map; equilibrium ships the same class as
-// base/containers/lock_free_ordered_map.h (included below).
 #include <znet/fancy_queue.h>
 #include <znet/z_stl_compat.h>
 #else
@@ -38,8 +36,8 @@ class PacketDispatcher {
     awaiting_ack_bytes_ = bytes;
   }
 
-  // Retransmit a packet using its original sequence number.
-  // Does NOT allocate a new sequence number or touch the receipt queue.
+  // Retransmit with the original sequence number; no new allocation, no
+  // receipt-queue changes.
   void RetransmitPacket(ZCryptoContext* crypto,
                         OutgoingPacket& packet,
                         u32 original_sequence_number) {
@@ -51,8 +49,7 @@ class PacketDispatcher {
         socket_.SendtoServer(base::Span<byte>(bytes.data(), bytes.size()));
       }
     } else if (packet.destination_peer_id == ZPeerId::to_all) {
-      // Same sequence number for every peer means identical wire bytes:
-      // build once, send N times.
+      // Same sequence for every peer means identical wire bytes: build once.
       if (!builder.BuildPacketInto(packet, original_sequence_number, bytes)) {
         return;
       }
@@ -107,9 +104,8 @@ class PacketDispatcher {
   }
 
  private:
-  // Per-thread scratch buffers: dispatch can run on the outgoing thread or
-  // on executor workers concurrently, and reusing capacity avoids a heap
-  // allocation per packet.
+  // Per-thread scratch buffers; dispatch runs on the outgoing thread and
+  // executor workers concurrently.
   static base::Vector<byte>& WireScratch() {
     static thread_local base::Vector<byte> scratch;
     return scratch;
@@ -164,8 +160,8 @@ class PacketDispatcher {
         packet.last_send_time == 0) {
       const mem_size payload_bytes = packet.heap_data_size;
       packet.flags.awaiting_ack = true;
-      // Use coarse timestamp to avoid per-packet syscall.  The retry
-      // scan interval (10 ms) is far larger than any cache staleness.
+      // Coarse cached timestamp avoids a per-packet syscall; the retry scan
+      // interval dwarfs the cache staleness.
       {
         static thread_local u32 tl_cached_ts = 0;
         static thread_local base::Clock::time_point tl_ts_refresh{};

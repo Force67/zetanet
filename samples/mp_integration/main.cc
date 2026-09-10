@@ -1,10 +1,8 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 //
-// End-to-end multiplayer integration tests. Covers each combination of
-// (encryption x compression x reliable) at both the codec level
-// (PacketBuilder/PacketUnpacker round-trip) and over a real UDP loopback
-// ZServer/ZClient pair. Run by CI.
+// End-to-end multiplayer integration tests: every (encryption x compression x
+// reliable) combination, at codec level and over a UDP loopback pair. Run by CI.
 
 #include <znet/z_bit_reader.h>
 #include <znet/z_bit_traits.h>
@@ -63,10 +61,8 @@ u16 NextPort() {
   return static_cast<u16>(next_port.fetch_add(1));
 }
 
-// LZ4 only shrinks inputs with redundancy. Generate a payload that repeats
-// a small alphabet so compression triggers; otherwise PacketBuilder's
-// "compression didn't help" branch clears the compressed flag and the
-// compressed path on the wire is never exercised.
+// LZ4 only shrinks redundant input; repeat a small alphabet so compression
+// triggers instead of falling into PacketBuilder's "didn't help" branch.
 std::string MakeCompressiblePayload(std::size_t bytes, std::uint32_t seed) {
   std::string out;
   out.reserve(bytes);
@@ -148,10 +144,9 @@ bool CodecRoundtripOnce(const CodecCase& c,
   return true;
 }
 
-// Codec-level round-trip with no network or crypto context. Isolates
-// PacketBuilder/PacketUnpacker from the rest of the stack. Encryption
-// variants are exercised by the network test below; they need an
-// authenticated ZCryptoContext, which only the real handshake produces.
+// Codec-level round-trip without network or crypto context, isolating
+// PacketBuilder/PacketUnpacker. Encryption needs an authenticated
+// ZCryptoContext, exercised by the network tests below.
 bool TestCodecRoundtrip() {
   const CodecCase cases[] = {
       {false, false, false},
@@ -160,8 +155,6 @@ bool TestCodecRoundtrip() {
       {true, false, true},
   };
 
-  // A range of payload sizes so we hit both "compression helps" and
-  // "compression doesn't help" branches in PacketBuilder.
   const std::size_t sizes[] = {32, 256, 4096, 32 * 1024};
 
   bool all_ok = true;
@@ -175,8 +168,8 @@ bool TestCodecRoundtrip() {
     }
   }
 
-  // Incompressible payload to hit the "compressed_payload.size() >=
-  // payload_size" branch where the builder clears the compressed flag.
+  // Incompressible payload, hitting the branch that clears the compressed
+  // flag when compression does not shrink the data.
   std::string incompressible(2048, '\0');
   std::mt19937 rng(0xDEAD);
   for (auto& ch : incompressible) {
@@ -228,9 +221,8 @@ bool RoundtripOverNetwork(bool encryption, bool compression) {
     return false;
   }
 
-  // The receiver thread populates the channel queues, but the handshake
-  // state machine lives inside ProcessSystemMessage, which only runs when
-  // Poll(Control) is called. Drive that until both sides are connected.
+  // The handshake state machine runs inside ProcessSystemMessage during
+  // Poll(Control); drive it until both sides are connected.
   const bool connected = WaitForCondition(5000, [&]() {
     IncomingPacket pkt;
     while (server.Poll(PacketChannelType::Control, pkt)) {
@@ -246,8 +238,6 @@ bool RoundtripOverNetwork(bool encryption, bool compression) {
     return false;
   }
 
-  // Mix of compressible and incompressible content, large and small, to hit
-  // both branches of the codec when use_compression is on.
   std::vector<std::string> payloads;
   payloads.push_back(MakeCompressiblePayload(64, 1));
   payloads.push_back(MakeCompressiblePayload(512, 2));
@@ -263,8 +253,8 @@ bool RoundtripOverNetwork(bool encryption, bool compression) {
   std::vector<std::string> received;
   const bool got_all = WaitForCondition(5000, [&]() {
     IncomingPacket pkt;
-    // Drain the control channel so the server-side handshake state machine
-    // continues to process ClientAuthProof and ACKs while data flows.
+    // Keep the server-side handshake state machine running (ClientAuthProof,
+    // ACKs) while data flows.
     while (server.Poll(PacketChannelType::Control, pkt)) {
     }
     while (client.Poll(PacketChannelType::Control, pkt)) {
@@ -278,8 +268,8 @@ bool RoundtripOverNetwork(bool encryption, bool compression) {
     return received.size() >= payloads.size();
   });
 
-  // The protocol uses reliable retransmission but does not promise in-order
-  // delivery, so compare as multisets.
+  // Reliable retransmission does not promise in-order delivery; compare as
+  // multisets.
   bool ok = got_all;
   if (got_all) {
     std::vector<std::string> expected = payloads;
@@ -329,7 +319,6 @@ using tx::network::ZUintMax;
   } while (0)
 
 bool TestBitPrimitives() {
-  // Write a mix of primitives, then read them back.
   std::vector<byte> backing(64, byte{0});
   BitWriter w(base::Span<byte>(backing.data(), backing.size()));
   w.WriteBool(true);
@@ -363,7 +352,6 @@ bool TestBitPrimitives() {
   return r.ok();
 }
 
-// Manual trait specialization on a user struct.
 struct PlayerSnapshot {
   i32 health;
   f32 pos_x;
@@ -408,7 +396,6 @@ bool TestBitTraitStruct() {
   return true;
 }
 
-// ZBitField struct: per-field specs declared inline.
 struct PosFloatSpec {
   static constexpr f32 kMin = -1024.0f;
   static constexpr f32 kMax = 1024.0f;
@@ -467,9 +454,8 @@ bool TestZBitFieldStruct() {
   return true;
 }
 
-// End-to-end. BitWriter fills an OutgoingPacket's pooled buffer in place,
-// the packet is sent through a real ZServer/ZClient pair, the receiver
-// decodes with BitReader.
+// End-to-end: BitWriter fills an OutgoingPacket in place, the packet crosses
+// a real ZServer/ZClient pair, the receiver decodes with BitReader.
 bool TestBitWriterIntoPacketEndToEnd() {
   const u16 port = NextPort();
   ZServer server;
@@ -501,8 +487,6 @@ bool TestBitWriterIntoPacketEndToEnd() {
 
   PlayerSnapshot src{63, 17.5f, -400.5f, true};
 
-  // Construct the packet with no payload; BitWriter allocates the pooled
-  // buffer and fills it in place.
   const tx::network::PackageFlags flags{
       .reliable = 1,
       .encrypted = 0,
@@ -552,10 +536,8 @@ bool TestBitWriterIntoPacketEndToEnd() {
   return ok;
 }
 
-// Regression test for the 64-bit accumulator overflow in BitWriter::WriteBits.
-// Writing a full u64 while the scratch accumulator already holds 1..7 bits used
-// to shift the high bits out of the 64-bit word and silently truncate them.
-// This exercises a u64 at every non-byte-aligned starting offset.
+// Regression: a full u64 written while the scratch accumulator holds 1..7
+// bits, at every non-byte-aligned starting offset.
 bool TestBitWriter64BitAtOffset() {
   static const u64 kValues[] = {
       0xFFFFFFFFFFFFFFFFull, 0x0123456789ABCDEFull, 0x8000000000000001ull,
@@ -593,8 +575,7 @@ bool TestBitWriter64BitAtOffset() {
     }
   }
 
-  // Also exercise BitTraits<u64> after an odd-width field, the real-world
-  // shape that triggered the bug.
+  // BitTraits<u64> after an odd-width field, the shape that triggered the bug.
   std::vector<byte> backing(32, byte{0});
   BitWriter w(base::Span<byte>(backing.data(), backing.size()));
   w.WriteBool(true);
@@ -618,15 +599,13 @@ base::Path MakeBasePath(const std::string& path) {
 #endif
 }
 
-// In-process file transfer over a loopback ZP2PNode host/sender pair. Exercises
-// the file transporter chunking/reassembly, the memory-mapped writer, and the
-// p2p control plane end to end, verifying the received bytes match the source.
+// In-process file transfer over a loopback ZP2PNode pair, covering chunking,
+// reassembly, the memory-mapped writer, and the p2p control plane.
 bool TestFileTransferEndToEnd() {
   namespace fs = std::filesystem;
   std::error_code ec;
-  // Use a directory relative to the current working directory: the file
-  // transporter rejects absolute output paths as a path-traversal guard, and a
-  // relative temp/output pair keeps the rename on a single filesystem.
+  // Relative work directory: absolute output paths are rejected by the
+  // transporter, and relative paths keep the rename on one filesystem.
   const fs::path work_dir =
       fs::path("znet_ft_" +
                std::to_string(static_cast<unsigned long long>(NextPort())));
@@ -636,10 +615,6 @@ bool TestFileTransferEndToEnd() {
   const fs::path output_path = work_dir / "received.bin";
   fs::create_directories(temp_dir, ec);
 
-  // Multi-chunk payload with mixed redundancy so reassembly spans many chunks.
-  // Kept modest so the whole transfer fits comfortably in loopback socket
-  // buffers; this exercises chunking/reassembly without depending on
-  // retransmit timing under burst loss.
   std::string content;
   {
     std::mt19937 rng(0xF11E);
@@ -715,11 +690,9 @@ bool TestFileTransferEndToEnd() {
     return false;
   }
 
-  // The streaming session can only be created by the file-name-bearing first
-  // chunk, but reliable chunks may arrive out of order. The library ACKs every
-  // received chunk (so it is not retransmitted), therefore a correct receiver
-  // must buffer chunks that arrive before chunk 0 and stream them once the
-  // session exists, rather than dropping them.
+  // The session exists only after the file-name-bearing chunk 0 arrives, and
+  // received chunks are ACKed so they are never retransmitted. Buffer early
+  // chunks and stream them once the session exists.
   std::map<u32, tx::network::ZFileTransporter::TransferChunk> pending;
   std::unordered_set<u32> streamed;
   bool have_transfer = false;

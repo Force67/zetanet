@@ -17,16 +17,10 @@
 
 namespace base {
 
-// ---------------------------------------------------------------------------
-// Epoch-based reclamation (EBR).
-// Protects concurrent readers from use-after-free: a node is only freed
-// once every thread that could possibly hold a pointer to it has exited
-// its read-side critical section.  Based on ParlayHash (CMU).
-// ---------------------------------------------------------------------------
+// Epoch-based reclamation. A node is freed only once every thread that could
+// hold a pointer to it has exited its read-side critical section.
 namespace ebr {
 
-// Maximum concurrent threads that can hold an EBR guard simultaneously.
-// Only live threads consume slots; IDs are recycled when threads exit.
 constexpr int kMaxSlots = 4096;
 
 struct alignas(64) AnnounceSlot {
@@ -37,7 +31,7 @@ struct EpochState {
   alignas(64) std::atomic<long> current{0};
   AnnounceSlot slots[kMaxSlots];
 
-  // Thread ID pool — mutex only taken on thread birth/death (not hot path).
+  // Thread ID pool; the mutex is only taken on thread birth/death.
   std::mutex pool_mutex;
   std::vector<int> free_ids;
   std::atomic<int> high_watermark{0};
@@ -50,17 +44,14 @@ struct EpochState {
       return id;
     }
     int id = high_watermark.load(std::memory_order_relaxed);
-    // Release: ensures try_advance() (which loads with acquire) sees this
-    // slot as part of its scan range before the new thread announces.
+    // Release: try_advance() must see this slot before the new thread announces.
     high_watermark.store(id + 1, std::memory_order_release);
     return id;
   }
 
-  // Slot reuse safety: between the -1 store and a new thread's announce(),
-  // try_advance() may see -1 and skip this slot.  This is correct — the old
-  // thread has exited its critical section, and the new thread has not yet
-  // entered one, so no reader holds a dangling pointer.  The new thread's
-  // announce() retry loop guarantees it pins the current (or later) epoch.
+  // Between the -1 store and the next announce, try_advance() may skip this
+  // slot. Safe: the old thread left its critical section and the new one has
+  // not entered one, so no reader holds a dangling pointer.
   void release_id(int id) {
     slots[id].epoch.store(-1, std::memory_order_release);
     std::lock_guard<std::mutex> lk(pool_mutex);
@@ -99,7 +90,6 @@ inline EpochState& state() {
   return *s;
 }
 
-// Per-thread registration with automatic ID recycling on thread exit.
 struct ThreadReg {
   int id;
   int nest_count = 0;
@@ -112,8 +102,7 @@ inline ThreadReg& thread_reg() {
   return reg;
 }
 
-// RAII guard.  Supports nesting (only the outermost announce/unannounce
-// touches the global array) and move semantics (for iterators).
+// RAII guard. Supports nesting; only the outermost scope announces.
 struct Guard {
   struct inactive_t {};
   static constexpr inactive_t inactive{};
@@ -151,22 +140,18 @@ struct Guard {
 
 }  // namespace ebr
 
-// ---------------------------------------------------------------------------
-// LockFreeOrderedHashMap
-// ---------------------------------------------------------------------------
-
 template <typename Key, typename Value>
 class LockFreeOrderedHashMap {
  private:
   struct Node {
     ::std::pair<Key, Value> keyValue;
-    base::Atomic<Node*> bucketNext;  // next in hash bucket chain
-    base::Atomic<Node*> orderNext;   // next in insertion-order chain
+    base::Atomic<Node*> bucketNext;
+    base::Atomic<Node*> orderNext;
     base::Atomic<bool> is_deleted;
-    Node* staging_next;              // lock-free staging stack link
-    bool bucket_swept;               // GC unlinked from bucket chain
-    bool order_swept;                // GC unlinked from order chain
-    long retired_epoch;              // epoch when fully unlinked (-1 = live)
+    Node* staging_next;
+    bool bucket_swept;
+    bool order_swept;
+    long retired_epoch;  // epoch when fully unlinked, -1 = live
 
     Node(const Key& k, Value&& v)
         : keyValue(::std::make_pair(k, ::std::move(v))),
@@ -196,19 +181,15 @@ class LockFreeOrderedHashMap {
   base::Atomic<Node*> orderHead;
   base::Atomic<Node*> orderTail;
 
-  // Lock-free Treiber stack: insert() pushes here via CAS (no mutex).
+  // Treiber stack of nodes not yet seen by the GC.
   base::Atomic<Node*> staging_head_{nullptr};
 
   // GC-owned state (only accessed under gc_mutex_).
   base::Mutex gc_mutex_;
   base::Vector<Node*> all_nodes_;
 
-  // ---- internal helpers ----
-
-  // Returns the shallowest *live* node for `key`, skipping tombstones.
-  // Tombstones stay linked until the GC sweeps them (the GC is the sole
-  // unlinker, see collect_garbage_locked); skipping them here keeps the
-  // "at most one live node per key" invariant observable for all callers.
+  // Shallowest live node for the key; tombstones stay linked until the GC
+  // sweep, the sole unlinker, reclaims them.
   Node* find_in_bucket(const Key& key) const {
     mem_size index = hash_key(key);
     Node* curr = buckets[index].load(::std::memory_order_acquire);
@@ -223,7 +204,7 @@ class LockFreeOrderedHashMap {
   }
 
   mem_size hash_key(const Key& key) const {
-    // bucketCount is a power of two (rounded up in the constructor).
+    // bucketCount is a power of two.
     return keyHasher(key) & (bucketCount - 1);
   }
 
@@ -237,11 +218,8 @@ class LockFreeOrderedHashMap {
   }
 
  public:
-  // ---- Iterators (CRTP, no vtable, epoch-protected) ----
-  // NOTE: Iterators hold an ebr::Guard for the lifetime of traversal.
-  // A long-lived iterator pins the epoch and prevents *all* garbage
-  // collection from making progress.  Avoid storing iterators across
-  // operations; prefer short-lived traversals or ordered_keys_snapshot().
+  // Iterators hold an ebr::Guard while alive. A long-lived iterator stalls
+  // all GC; keep traversals short.
 
   template <typename IteratorType>
   class IteratorBase {
@@ -260,13 +238,11 @@ class LockFreeOrderedHashMap {
    public:
     using KeyValuePair = ::std::pair<Key, Value>;
 
-    // Active iterator: pins the epoch so traversed nodes stay alive.
     IteratorBase(const LockFreeOrderedHashMap<Key, Value>* m, Node* start_node)
         : map(m), currentNode(start_node), guard_() {
       skip_deleted();
     }
 
-    // End sentinel: no epoch pin needed.
     IteratorBase(const LockFreeOrderedHashMap<Key, Value>* m)
         : map(m), currentNode(nullptr), guard_(ebr::Guard::inactive) {}
 
@@ -343,8 +319,6 @@ class LockFreeOrderedHashMap {
     }
   };
 
-  // ---- begin / end ----
-
   OrderIterator order_begin() const {
     return OrderIterator(this,
                          orderHead.load(::std::memory_order_acquire));
@@ -362,8 +336,6 @@ class LockFreeOrderedHashMap {
   }
   BucketIterator end() const { return BucketIterator(this); }
 
-  // ---- Constructor / Destructor ----
-
   explicit LockFreeOrderedHashMap(mem_size count)
       : bucketCount(::std::bit_ceil(count > 0 ? count : mem_size{1})),
         orderHead(nullptr),
@@ -373,11 +345,7 @@ class LockFreeOrderedHashMap {
       buckets[i].store(nullptr, ::std::memory_order_relaxed);
   }
 
-  // Destructor assumes no concurrent operations.  The staging stack and
-  // all_nodes_ are disjoint: staging holds nodes pushed since the last GC,
-  // while all_nodes_ holds nodes drained by previous GC passes.  Both sets
-  // are walked and freed unconditionally (EBR safety is irrelevant during
-  // single-threaded teardown).
+  // Assumes no concurrent operations; frees staged and tracked nodes.
   ~LockFreeOrderedHashMap() {
     Node* staged = staging_head_.load(::std::memory_order_relaxed);
     while (staged) {
@@ -395,9 +363,7 @@ class LockFreeOrderedHashMap {
   LockFreeOrderedHashMap(LockFreeOrderedHashMap&&) = delete;
   LockFreeOrderedHashMap& operator=(LockFreeOrderedHashMap&&) = delete;
 
-  // ---- Core operations ----
-  // NOTE: No rehashing path — performance degrades at high load factors.
-  // Callers should size the bucket count for expected peak occupancy.
+  // NOTE: no rehash path; size the bucket count for peak occupancy.
 
   bool insert(const Key& key, Value&& value) {
     return insert_internal(key, ::std::move(value));
@@ -413,9 +379,6 @@ class LockFreeOrderedHashMap {
     Node* newNode = nullptr;
     mem_size index = hash_key(key);
 
-    // Phase 1: insert into hash bucket.  Tombstones for this key may still
-    // be linked deeper in the chain. find_in_bucket skips them and the GC
-    // sweep, the sole unlinker, reclaims them.
     while (true) {
       Node* existingNode = find_in_bucket(key);
 
@@ -433,31 +396,16 @@ class LockFreeOrderedHashMap {
       if (buckets[index].compare_exchange_weak(
               oldHead, newNode, ::std::memory_order_release,
               ::std::memory_order_relaxed)) {
-        // Post-CAS duplicate detection.
-        //
-        // Correctness relies on the prepend-chain ordering invariant:
-        // the scan follows newNode→bucketNext (toward *older* nodes),
-        // so it only sees nodes that CAS'd *before* us (they are deeper
-        // in the chain).  A node that CAS'd *after* us sits between the
-        // bucket head and us — unreachable from bucketNext.
-        //
-        // Among any set of concurrent duplicates for the same key, exactly
-        // one — the deepest (first to CAS) — finds no duplicate behind
-        // itself and proceeds.  Every shallower node finds the deeper one
-        // and backs off.  No symmetric tiebreaker is needed because the
-        // acyclic singly-linked chain provides natural asymmetry.
+        // Post-CAS duplicate detection: the scan walks toward older nodes
+        // only, so the first CAS winner for a key proceeds and every later
+        // (shallower) duplicate backs off.
         Node* check =
             newNode->bucketNext.load(::std::memory_order_acquire);
         while (check) {
           if (check->keyValue.first == key &&
               !check->is_deleted.load(::std::memory_order_acquire)) {
-            // We are shallower; back off. The deeper node wins. The node
-            // stays linked as a tombstone until the GC sweeps it.
-            //
-            // The back-off must claim the node via CAS: a concurrent
-            // remove() may have found our briefly live node, marked it
-            // deleted and reported success. That pairing only stays
-            // balanced for callers if this insert reports success too.
+            // Back off; the deeper node wins. Claim the node so a concurrent
+            // remove() that saw it live stays balanced with our result.
             bool expected = false;
             const bool we_claimed = newNode->is_deleted.compare_exchange_strong(
                 expected, true, ::std::memory_order_acq_rel,
@@ -474,7 +422,7 @@ class LockFreeOrderedHashMap {
       }
     }
 
-    // Phase 2: append to insertion-order list (Michael & Scott).
+    // Phase 2: append to the insertion-order list (Michael & Scott).
     newNode->orderNext.store(nullptr, ::std::memory_order_relaxed);
     Node* expected_tail = nullptr;
 
@@ -541,14 +489,8 @@ class LockFreeOrderedHashMap {
     return false;
   }
 
-  // Epoch-based garbage collector.
-  // 1. Drain staging stack.
-  // 2. Sweep bucket chains (CAS-unlink deleted nodes).
-  // 3. Sweep order chain  (unlink deleted non-tail nodes).
-  // 4. Stamp the retirement epoch on fully-unlinked nodes.
-  // 5. Advance the global epoch.
-  // 6. Free nodes whose retirement epoch is 2+ epochs in the past
-  //    (guaranteed unreachable by any concurrent reader).
+  // Drains the staging stack, sweeps both chains, stamps retirement epochs,
+  // then frees nodes retired 2+ epochs ago.
   void collect_garbage() {
     std::lock_guard<base::Mutex> lock(gc_mutex_);
     collect_garbage_locked();
@@ -560,7 +502,6 @@ class LockFreeOrderedHashMap {
     return removed;
   }
 
-  // Snapshot of keys in insertion order (skips deleted entries).
   base::Vector<Key> ordered_keys_snapshot() const {
     ebr::Guard guard;
     base::Vector<Key> keys;
@@ -574,10 +515,6 @@ class LockFreeOrderedHashMap {
   }
 
  private:
-  // ---- Auto-GC infrastructure ----
-
-  // Tombstones stay linked in their chains until a GC pass, so the
-  // threshold bounds how many dead nodes traversals may have to skip.
   static constexpr mem_size kAutoGCThreshold = 1024;
   base::Atomic<mem_size> delete_since_gc_{0};
   base::Atomic<mem_size> op_count_{0};
@@ -592,8 +529,7 @@ class LockFreeOrderedHashMap {
       if (node->is_deleted.compare_exchange_weak(
               expected, true, ::std::memory_order_release,
               ::std::memory_order_relaxed)) {
-        // Mark only. The GC's sweep is the sole unlinker, see
-        // collect_garbage_locked().
+        // Mark only; the GC sweep is the sole unlinker.
         delete_since_gc_.fetch_add(1, ::std::memory_order_relaxed);
         return true;
       }
@@ -601,17 +537,11 @@ class LockFreeOrderedHashMap {
     }
   }
 
-  // Called after every insert/remove, outside the EBR guard scope, so the
-  // epoch can advance freely and retired nodes can actually be freed.
+  // Runs outside any EBR guard so retired nodes can actually be freed.
   void post_mutate() {
     mem_size n = op_count_.fetch_add(1, ::std::memory_order_relaxed);
-    // Periodically advance the epoch so retired nodes become freeable.
     if ((n & 0xFF) == 0)
       ebr::state().try_advance();
-    // Trigger GC when enough deletions have accumulated.  Keyed off
-    // delete count (not staging count) so insert-heavy workloads don't
-    // pay for GC sweeps on live nodes.  try_to_lock avoids blocking the
-    // hot path if GC is already running on another thread.
     if (delete_since_gc_.load(::std::memory_order_relaxed) >=
         kAutoGCThreshold) {
       ::std::unique_lock<base::Mutex> lock(gc_mutex_, ::std::try_to_lock);
@@ -621,7 +551,6 @@ class LockFreeOrderedHashMap {
   }
 
   void collect_garbage_locked() {
-    // 1. Drain lock-free staging stack into the tracked list.
     Node* staged =
         staging_head_.exchange(nullptr, ::std::memory_order_acquire);
     while (staged) {
@@ -631,7 +560,6 @@ class LockFreeOrderedHashMap {
     }
     delete_since_gc_.store(0, ::std::memory_order_relaxed);
 
-    // 2. Sweep bucket chains: CAS-unlink deleted nodes.
     for (mem_size i = 0; i < bucketCount; ++i) {
       base::Atomic<Node*>* prev_ptr = &buckets[i];
       Node* curr = prev_ptr->load(::std::memory_order_acquire);
@@ -655,7 +583,6 @@ class LockFreeOrderedHashMap {
       }
     }
 
-    // 3. CAS-unlink deleted non-tail nodes from the order chain.
     Node* prev = nullptr;
     Node* curr = orderHead.load(::std::memory_order_acquire);
     while (curr) {
@@ -688,7 +615,6 @@ class LockFreeOrderedHashMap {
       curr = next;
     }
 
-    // 4. Stamp retirement epoch on fully-swept nodes.
     long current_e = ebr::state().get_current();
     for (mem_size i = 0; i < all_nodes_.size(); ++i) {
       Node* n = all_nodes_[i];
@@ -697,10 +623,9 @@ class LockFreeOrderedHashMap {
         n->retired_epoch = current_e;
     }
 
-    // 5. Advance the global epoch.
     ebr::state().try_advance();
 
-    // 6. Free nodes retired 2+ epochs ago (provably unreachable).
+    // Free nodes retired 2+ epochs ago; no concurrent reader can reach them.
     long safe = ebr::state().get_current();
     mem_size write_idx = 0;
     for (mem_size i = 0; i < all_nodes_.size(); ++i) {

@@ -395,7 +395,7 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
         return;
       }
 
-      // Optional compatibility field: announced local port from joining node.
+      // Optional compatibility field: announced local port.
       u16 announced_local_port = 0;
       if (cursor + sizeof(u16) <= size) {
         wire_le::ReadU16(data, size, cursor, announced_local_port);

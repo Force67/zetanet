@@ -3,8 +3,6 @@
 #pragma once
 
 // Mirror of BitWriter; see z_bit_writer.h for the wire format.
-// LSB-first within each byte. Helpers return false on overflow or
-// out-of-range values.
 
 #include <algorithm>
 #include <bit>
@@ -53,9 +51,7 @@ class BitReader {
       const mem_size byte_index = bit_offset_ / 8;
       const u32 bit_in_byte = static_cast<u32>(bit_offset_ % 8);
       if (byte_index + 8 <= byte_capacity) {
-        // Word path: one unaligned little-endian load yields up to
-        // 64 - bit_in_byte (>= 57) bits, so any read of <= 57 bits
-        // completes in a single iteration.
+        // One unaligned LE load yields up to 64 - bit_in_byte bits.
         const u64 window = wire_le::LoadU64(buffer_ + byte_index) >> bit_in_byte;
         const u32 take = std::min<u32>(bits - acc_bits, 64u - bit_in_byte);
         const u64 mask =
@@ -64,7 +60,6 @@ class BitReader {
         acc_bits += take;
         bit_offset_ += take;
       } else {
-        // Tail path: fewer than 8 readable bytes remain.
         const u32 take = std::min<u32>(bits - acc_bits, 8u - bit_in_byte);
         const u8 mask = static_cast<u8>((1u << take) - 1);
         const u8 chunk = (buffer_[byte_index] >> bit_in_byte) & mask;

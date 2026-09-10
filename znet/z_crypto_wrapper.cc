@@ -243,7 +243,7 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
     return false;
   }
 
-  // Use a per-session/domain prefix + packet counter for fast unique nonces.
+  // Per-session prefix + packet counter keep nonces unique without a syscall.
   byte nonce[12]{};
   const u32 nonce_prefix = nonce_prefix_.load(std::memory_order_relaxed);
   u64 counter = nonce_counter_.fetch_add(1, std::memory_order_relaxed);
@@ -283,8 +283,7 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
     return false;
   }
 #else
-  // Reuse a thread-local EVP context to avoid per-packet allocation.
-  // Wrapped in a struct so the destructor frees it on thread exit.
+  // Thread-local EVP context; freed on thread exit.
   struct TlEvpCtx {
     EVP_CIPHER_CTX* ctx = nullptr;
     TlEvpCtx() { ctx = EVP_CIPHER_CTX_new(); }
@@ -387,8 +386,7 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
     return false;
   }
 #else
-  // Reuse a thread-local EVP context to avoid per-packet allocation.
-  // Wrapped in a struct so the destructor frees it on thread exit.
+  // Thread-local EVP context; freed on thread exit.
   struct TlEvpCtx {
     EVP_CIPHER_CTX* ctx = nullptr;
     TlEvpCtx() { ctx = EVP_CIPHER_CTX_new(); }
@@ -470,15 +468,9 @@ bool ZCryptoContext::VerifyClientProof(const base::String& client_proof) {
     return false;
   }
 
-  // Client computes proof as: HMAC(server_nonce + local_nonce + server_challenge + local_challenge)
-  // From the server's perspective, server_nonce_ is the client's nonce, local_nonce_ is the server's nonce
-  // The client's GenerateClientProof uses: server_nonce_ + local_nonce_ + server_challenge_ + local_challenge_
-  // From the server's perspective (where ProcessServerKey stored client data into server_nonce_/server_challenge_):
-  //   client's server_nonce_ = our local_nonce_
-  //   client's local_nonce_ = our server_nonce_
-  //   client's server_challenge_ = our local_challenge_
-  //   client's local_challenge_ = our server_challenge_
-  // So expected: local_nonce_ + server_nonce_ + local_challenge_ + server_challenge_
+  // Client proof is HMAC(server_nonce + local_nonce + server_challenge +
+  // local_challenge) over the client's names, which maps to
+  // local_nonce_ + server_nonce_ + local_challenge_ + server_challenge_ here.
   base::String verify_data = local_nonce_ + server_nonce_ + local_challenge_ + server_challenge_;
   base::Array<byte, 32> expected_proof{};
   if (!HmacSha256(encryption_key_.data(), encryption_key_.size(),
@@ -503,7 +495,7 @@ bool ZCryptoContext::DeriveSessionKeys() {
     return false;
   }
 
-  // Sort nonces lexicographically so both sides derive the same keys
+  // Sort nonces so both sides derive identical keys.
   base::String first_nonce, second_nonce;
   if (local_nonce_ < server_nonce_) {
     first_nonce = local_nonce_;
@@ -513,7 +505,6 @@ bool ZCryptoContext::DeriveSessionKeys() {
     second_nonce = local_nonce_;
   }
 
-  // Derive new encryption key: SHA-256(current_enc_key + sorted_nonces)
   base::String enc_input(reinterpret_cast<const char*>(encryption_key_.data()),
                         encryption_key_.size());
   enc_input += first_nonce + second_nonce + "session-enc";
@@ -523,7 +514,6 @@ bool ZCryptoContext::DeriveSessionKeys() {
     return false;
   }
 
-  // Derive new authentication key: SHA-256(current_auth_key + sorted_nonces)
   base::String auth_input(reinterpret_cast<const char*>(authentication_key_.data()),
                          authentication_key_.size());
   auth_input += first_nonce + second_nonce + "session-auth";
@@ -533,8 +523,8 @@ bool ZCryptoContext::DeriveSessionKeys() {
     return false;
   }
 
-  // Derive per-direction nonce prefix so peers using the same session key
-  // never reuse the same GCM nonce space.
+  // Per-direction nonce prefix keeps GCM nonce spaces disjoint between peers
+  // sharing a session key.
   base::String nonce_input = first_nonce + second_nonce + "session-nonce-domain";
   base::Array<byte, 32> nonce_hash{};
   if (!Sha256(reinterpret_cast<const byte*>(nonce_input.data()),

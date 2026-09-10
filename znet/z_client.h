@@ -60,7 +60,6 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
   u16 negotiated_protocol_version() const { return negotiated_protocol_version_; }
   u32 negotiated_feature_flags() const { return negotiated_feature_flags_; }
 
-  // Fetches the next packet from the queue
   inline bool Poll(PacketChannelType t, IncomingPacket& p) {
     if (packet_queue_.Pop(t, p)) {
       if (IsSystemMessage(p.type)) {

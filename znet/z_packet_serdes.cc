@@ -22,8 +22,7 @@ static constexpr char kLogTag[] = "z-packet-serdes";
 static constexpr u32 kTimeshift =
     1701290985;
 
-// Coarse thread-local timestamp cache: avoids a syscall per packet without
-// cross-thread sharing/data races.
+// Coarse thread-local timestamp cache.
 static thread_local u32 g_cached_shifted_timestamp{0};
 static thread_local base::Clock::time_point g_timestamp_refresh{};
 
@@ -122,7 +121,6 @@ u32 ComputeChecksum32(const byte* data, mem_size size) {
 }
 
 u16 ComputePacketHeaderChecksum(const byte* header_wire) {
-  // 20-byte stack copy with checksum field zeroed, then one-shot xxHash.
   byte header_copy[kPacketHeaderWireSize];
   std::memcpy(header_copy, header_wire, kPacketHeaderWireSize);
   wire_le::StoreU16(header_copy + kHeaderChecksumOffset, 0);
@@ -156,7 +154,6 @@ bool PacketBuilder::BuildPacketInto(OutgoingPacket& packet_info,
   }
   original_payload_size = payload_size;
 
-  // Compression (before encryption)
   base::Vector<byte> compressed_payload;
   if (packet_info.flags.compressed && payload_size > 0) {
     if (!ZCompressionContext::Compress(payload_source, payload_size,
@@ -164,7 +161,6 @@ bool PacketBuilder::BuildPacketInto(OutgoingPacket& packet_info,
       BASE_LOGE(kLogTag, "Compression failed, sending uncompressed");
       packet_info.flags.compressed = 0;
     } else if (compressed_payload.size() >= payload_size) {
-      // Compression didn't help, send uncompressed
       packet_info.flags.compressed = 0;
     } else {
       payload_source = compressed_payload.data();
@@ -172,7 +168,6 @@ bool PacketBuilder::BuildPacketInto(OutgoingPacket& packet_info,
     }
   }
 
-  // Encryption
   base::Vector<byte> encrypted_payload;
   if (packet_info.flags.encrypted) {
     if (payload_size >
@@ -217,7 +212,6 @@ bool PacketBuilder::BuildPacketInto(OutgoingPacket& packet_info,
   FillPacketHeader(base::Span<byte>(out.data(), out.size()), packet_info,
                    payload_size, original_payload_size, next_sequence_number);
 
-  // and we copy the payload to its appropriate place
   if (payload_size > 0) {
     std::memcpy(out.data() + size_of_headers, payload_source, payload_size);
   }
@@ -306,7 +300,7 @@ void PacketBuilder::FillPacketHeader(const base::Span<byte> outgoing_data,
     wire_le::StoreU32(write_ptr + kCompressedOriginalSizeOffset,
                       original_payload_size);
     wire_le::StoreU32(write_ptr + kCompressedChecksumOffset, 0);
-    write_ptr[kCompressedFlagsOffset] = 1;  // payload metadata is LE.
+    write_ptr[kCompressedFlagsOffset] = 1;  // little-endian metadata
     write_ptr[kCompressedFlagsOffset + 1] = 0;
     write_ptr[kCompressedFlagsOffset + 2] = 0;
     write_ptr[kCompressedFlagsOffset + 3] = 0;
@@ -448,8 +442,7 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
                .awaiting_ack = 0,
                .reserved = 0};
 
-  // Fast path: no encryption, no compression — assign directly to output string
-  // without intermediate vector allocation.
+  // Plain path: assign straight into the output string.
   if (!header.flags.is_encrypted && !header.flags.is_compressed) {
     if (payload_size > 0) {
       out.data.assign(reinterpret_cast<const char*>(in_buffer + offset),
@@ -458,7 +451,6 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
       out.data.clear();
     }
   } else {
-    // Slow path: need intermediate buffer for decrypt/decompress.
     base::Vector<byte> payload_data(payload_size);
     if (payload_size > 0) {
       std::memcpy(payload_data.data(), in_buffer + offset, payload_size);

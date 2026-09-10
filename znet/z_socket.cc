@@ -178,17 +178,15 @@ bool ZSocket::CreateServer(u16 port, bool ipv6) {
     return false;
   }
 
-
   if (ipv6) {
-    // Allow IPv6-only mode
     int v6only = 1;
     setsockopt(socket_, IPPROTO_IPV6, IPV6_V6ONLY,
                reinterpret_cast<const char*>(&v6only), sizeof(v6only));
   }
 
-  // Enlarge socket buffers to reduce kernel-level drops under high throughput.
+  // Reduce kernel-level drops under high throughput.
   {
-    int buf_size = 4 * 1024 * 1024;  // 4 MB
+    int buf_size = 4 * 1024 * 1024;
     setsockopt(socket_, SOL_SOCKET, SO_RCVBUF,
                reinterpret_cast<const char*>(&buf_size), sizeof(buf_size));
     setsockopt(socket_, SOL_SOCKET, SO_SNDBUF,
@@ -252,7 +250,7 @@ bool ZSocket::CreateClient(const base::StringRef ip,
 
   // Enlarge socket buffers to reduce kernel-level drops under high throughput.
   {
-    int buf_size = 4 * 1024 * 1024;  // 4 MB
+    int buf_size = 4 * 1024 * 1024;
     setsockopt(socket_, SOL_SOCKET, SO_RCVBUF,
                reinterpret_cast<const char*>(&buf_size), sizeof(buf_size));
     setsockopt(socket_, SOL_SOCKET, SO_SNDBUF,
@@ -328,7 +326,7 @@ bool ZSocket::ResolveAddress(const base::StringRef host,
 }
 
 i32 ZSocket::Send(const Address& target, const base::Span<byte> data) {
-  // Fast path: use cached sockaddr if available (populated by Receive).
+  // Prefer the cached sockaddr filled by Receive().
   if (target.cached_sa_len > 0) {
     sockaddr_storage sa = target.cached_sa;
     return InternalSend(sa, target.cached_sa_len, data);
@@ -500,20 +498,17 @@ i32 ZSocket::Receive(Address& sender, char* buffer, mem_size length) {
   socklen_t sender_len = sizeof(sender_addr);
   i32 result = InternalReceive(sender_addr, sender_len, buffer, length);
   if (result > 0) {
-    // Fast path: if the raw binary address matches the previous receive,
-    // skip the expensive inet_ntop conversion.  This is the common case
-    // when the same peer sends many packets in a row.
+    // Same sender as last time: skip the inet_ntop conversion.
     if (sender.cached_sa_len == sender_len &&
         memcmp(&sender.cached_sa, &sender_addr, sender_len) == 0) {
-      return result;  // ip/port/family already correct from last time
+      return result;
     }
 
-    // New or changed sender — do the full conversion.
     sender.cached_sa = sender_addr;
     sender.cached_sa_len = sender_len;
 
-    // Address::operator== compares raw bytes past the terminator, so the
-    // whole buffer must be zeroed before inet_ntop writes its strlen+1 bytes.
+    // operator== reads raw bytes past the terminator, so zero the buffer
+    // before inet_ntop writes its strlen+1 bytes.
     memset(sender.ip, 0, sizeof(sender.ip));
 
     if (sender_addr.ss_family == AF_INET6) {

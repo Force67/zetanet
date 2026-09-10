@@ -1,8 +1,7 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
-//
-// STL compatibility layer: when ZNET_USE_STL is defined, this header provides
-// STL-based replacements for all equilibrium/base types used by zetanet.
+// STL compatibility layer: STL-based replacements for the equilibrium/base
+// types used by zetanet, active when ZNET_USE_STL is defined.
 #pragma once
 
 #ifdef ZNET_USE_STL
@@ -30,9 +29,7 @@
 #include <immintrin.h>
 #endif
 
-// ---------------------------------------------------------------------------
 // Primitive type aliases (matching equilibrium/base/arch.h)
-// ---------------------------------------------------------------------------
 using u8 = uint8_t;
 using u16 = uint16_t;
 using u32 = uint32_t;
@@ -46,9 +43,7 @@ using f64 = double;
 using mem_size = size_t;
 using byte = unsigned char;
 
-// ---------------------------------------------------------------------------
 // Utility macros
-// ---------------------------------------------------------------------------
 #if defined(_MSC_VER)
 #define STRONG_INLINE __forceinline
 #else
@@ -65,22 +60,17 @@ constexpr size_t _countof_impl(const T (&)[N]) noexcept {
 
 #ifndef constinit
 #if __cpp_constinit >= 201907L
-// Already a keyword
+// keyword already exists
 #else
 #define constinit
 #endif
 #endif
 
-// ---------------------------------------------------------------------------
-// base:: namespace shims
-// ---------------------------------------------------------------------------
 namespace base {
 
-// --- Strings ---
 using String = std::string;
 using StringRef = std::string_view;
 
-// --- Containers ---
 enum class VectorReservePolicy { kDefault, kForData };
 
 template <typename T>
@@ -91,16 +81,13 @@ class Vector : public std::vector<T> {
   explicit Vector(size_t count, VectorReservePolicy)
       : std::vector<T>(count) {}
 
-  // equilibrium uses length() on vectors
   size_t length() const { return this->size(); }
 
-  // equilibrium-style erase by index
   void erase(size_t index) {
     this->std::vector<T>::erase(this->begin() + index);
   }
 };
 
-// --- Span ---
 template <typename T>
 class Span : public std::span<const T> {
  public:
@@ -108,11 +95,10 @@ class Span : public std::span<const T> {
   Span() : std::span<const T>() {}
   Span(const T* data, size_t count) : std::span<const T>(data, count) {}
 
-  // equilibrium span has length()
   size_t length() const { return this->size(); }
 };
 
-// --- Smart pointers ---
+// Smart pointers
 template <typename T>
 class UniquePointer : public std::unique_ptr<T> {
  public:
@@ -126,20 +112,16 @@ UniquePointer<T> MakeUnique(Args&&... args) {
   return UniquePointer<T>(new T(std::forward<Args>(args)...));
 }
 
-// --- Move ---
 template <typename T>
 constexpr std::remove_reference_t<T>&& move(T&& t) noexcept {
   return std::move(t);
 }
 
-// --- Atomics ---
 template <typename T>
 using Atomic = std::atomic<T>;
 
-// --- Mutex ---
 using Mutex = std::mutex;
 
-// --- Containers ---
 template <typename K, typename V>
 using Map = std::map<K, V>;
 
@@ -172,7 +154,7 @@ inline u64 GetUnixTimeStamp() {
           .count());
 }
 
-// --- Spinlock (faster than std::mutex for very short critical sections) ---
+// --- Spinlock ---
 class SpinLock {
  public:
   void lock() noexcept {
@@ -196,14 +178,9 @@ class SpinLock {
   std::atomic<bool> flag_{false};
 };
 
-// --- MPSC Queue (Vyukov-style intrusive list: lock-free producers,
-// wait-free single consumer) ---
-//
-// enqueue() is lock-free for any number of producers: one allocation, one
-// atomic exchange, one release store.  dequeue() must only be called from a
-// single consumer thread.  A dequeue that races a producer between its
-// exchange and link store can transiently report "empty"; callers already
-// treat dequeue() == false as "nothing available right now".
+// --- MPSC queue: lock-free producers, single consumer ---
+// A dequeue racing a producer between its exchange and link store may
+// transiently report empty; callers treat dequeue() == false as "not now".
 template <typename T>
 class MPSCQueue {
   struct Node {
@@ -263,12 +240,12 @@ class MPSCQueue {
   }
 
  private:
-  alignas(64) std::atomic<Node*> push_end_;  // producers
-  alignas(64) Node* pop_end_;                // consumer-owned
+  alignas(64) std::atomic<Node*> push_end_;
+  alignas(64) Node* pop_end_;
   std::atomic<size_t> approx_size_{0};
 };
 
-// --- IdSet (simple counter-based ID generator) ---
+// --- ID generator; ids are not reused ---
 template <typename T, T InvalidId, T MaxId>
 class IdSet {
  public:
@@ -279,16 +256,14 @@ class IdSet {
     return next_id_++;
   }
 
-  void ReleaseId(T) {
-    // Simple implementation: IDs are not reused
-  }
+  void ReleaseId(T) {}
 
  private:
   T next_id_{0};
   std::mutex mutex_;
 };
 
-// --- Logging ---
+// Logging
 enum class LogLevel : int {
   kVerbose = 0,
   kDebug = 1,
@@ -330,8 +305,7 @@ inline const char* LogLevelToName(LogLevel level) {
   }
 }
 
-// Simple fmt-like formatting using snprintf with variadic templates.
-// Supports a single {} replacement per argument (like fmtlib basics).
+// snprintf-based formatting; one {} per argument.
 namespace detail {
 inline std::string format_one(const char* fmt) {
   return std::string(fmt);
@@ -400,7 +374,7 @@ inline void LogMessage(const char* tag, LogLevel level, const std::string& msg) 
   }
 }
 
-}  // namespace base (temporarily close for filesystem includes)
+}  // namespace base
 
 #include <filesystem>
 #include <fstream>
@@ -482,9 +456,7 @@ class File {
 
 }  // namespace base
 
-// ---------------------------------------------------------------------------
 // Logging macros
-// ---------------------------------------------------------------------------
 #define BASE_LOGI(tag, fmt, ...) \
   base::LogMessage(tag, base::LogLevel::kInfo, base::Format(fmt, ##__VA_ARGS__))
 #define BASE_LOGW(tag, fmt, ...) \

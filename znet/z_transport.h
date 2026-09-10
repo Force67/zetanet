@@ -39,7 +39,7 @@ class ZAsyncTransportLayer {
     base::StringRef pre_shared_key{};
     bool use_compression;
     bool allow_ipv6;
-    bool start_threads = true;  // false = synchronous mode (no background threads)
+    bool start_threads = true;  // false = synchronous mode
     ZSocket::ChaosOptions chaos{};
   };
 
@@ -55,12 +55,12 @@ class ZAsyncTransportLayer {
 
   void Deinit();
 
-  // Set a custom executor before Init/Connect/Begin to integrate zetanet with
-  // an existing job system. Ownership stays with the caller.
+  // Integrates zetanet with an existing job system; ownership stays with the
+  // caller. Set before Init/Connect/Begin.
   void SetTaskExecutor(ITaskExecutor* executor);
 
-  // Configure the built-in executor used when no custom executor is set.
-  // worker_count = 0 picks a sensible default based on hardware concurrency.
+  // Configures the built-in executor; worker_count 0 picks a default from
+  // hardware concurrency.
   void SetBuiltInTaskExecutorConfig(mem_size worker_count,
                                     mem_size max_queued_tasks = 0);
 
@@ -90,11 +90,9 @@ class ZAsyncTransportLayer {
   void SetClockAsymmetryCompensationMs(i32 compensation_ms);
   i32 GetClockAsymmetryCompensationMs() const;
 
-  // Thread scaling tiers: at each peer_count threshold, the dispatch thread
-  // pool is (re)configured with the given number of workers.
-  // The first tier also starts the outgoing thread.
-  // Default tiers: 32 peers → 1 worker, 64 → 2, 128 → 4.
-  // Call DisableAdaptiveThreading() for full direct mode (no threads at all).
+  // At each peer_count threshold, the dispatch pool is reconfigured with the
+  // given worker count; the first tier also starts the outgoing thread.
+  // DisableAdaptiveThreading() switches to full direct mode.
   struct ThreadScalingTier {
     size_t peer_count;
     size_t dispatch_workers;
@@ -110,9 +108,7 @@ class ZAsyncTransportLayer {
     scaling_tier_count_ = 0;
   }
 
-  // Start the incoming (receiving) thread immediately.
-  // Useful for throughput-sensitive scenarios where the caller wants
-  // background receive processing without waiting for adaptive scaling.
+  // Starts the incoming thread immediately.
   bool WarmIncomingThread() {
     return packet_queue_.StartIncomingThread();
   }

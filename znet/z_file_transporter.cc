@@ -46,9 +46,9 @@ constexpr u32 kFnv1aOffset = 2166136261u;
 constexpr u32 kFnv1aPrime = 16777619u;
 
 constexpr mem_size kDispatchBatchSize = 64;
-// magic(4) + version(1) + flags(1) + transfer_id(8) + file_size(8) +
-// chunk_size(4) + chunk_index(4) + total_chunks(4) + chunk_data_size(4) +
-// chunk_checksum(4) + file_checksum(4) + file_name_size(2) = 52.
+// magic(4) version(1) flags(1) transfer_id(8) file_size(8) chunk_size(4)
+// chunk_index(4) total_chunks(4) chunk_data_size(4) chunk_checksum(4)
+// file_checksum(4) file_name_size(2) = 52.
 constexpr mem_size kFixedHeaderSize = 52;
 constexpr mem_size kHmacSize = 32;
 
@@ -65,10 +65,8 @@ bool ComputeHmacSha256(const byte* data, mem_size size, const byte* key, mem_siz
 #endif
 }
 
-// True if the path contains a ".." parent-directory segment (a leading "..",
-// "../", or "/..").  Absolute paths are allowed: this guards a caller-supplied
-// output destination the application chose itself, where an absolute path is
-// legitimate and only escaping upward is a concern.
+// Parent-directory segments only; absolute paths are allowed because callers
+// pick their own output destination.
 bool ContainsParentDirTraversal(const base::String& path) {
   for (mem_size i = 0; i < path.size(); ++i) {
     if (path[i] == '.' && i + 1 < path.size() && path[i + 1] == '.') {
@@ -85,17 +83,15 @@ bool ContainsParentDirTraversal(const base::String& path) {
   return false;
 }
 
-// Stricter check for an untrusted remote-supplied file name: additionally rejects
-// absolute and drive-letter paths, which a sandboxed incoming name must never be.
+// Stricter check for untrusted remote file names: also rejects absolute and
+// drive-letter paths.
 bool ContainsPathTraversal(const base::String& path) {
   if (path.empty()) {
     return true;
   }
-  // Reject absolute paths
   if (path[0] == '/' || path[0] == '\\') {
     return true;
   }
-  // Reject Windows drive letter paths (e.g. "C:")
   if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
     return true;
   }
@@ -262,7 +258,7 @@ bool ZFileTransporter::SendFile(const base::Path& path,
     const u32 bytes_read = static_cast<u32>(bytes_read_u64);
 
     if (target_chunk_bytes != bytes_read) {
-      // A short read before EOF implies local file mutation or IO issues.
+      // A short read before EOF implies local file mutation or IO trouble.
       if (file_offset + bytes_read < file_size) {
         BASE_LOGE(kLogTag,
                   "Unexpected short read for chunk {} (got {} expected {})",
@@ -367,8 +363,6 @@ bool ZFileTransporter::AssembleFileFromChunks(
   }
 
   const base::String output_path_str = output_path.ToAsciiString();
-  // Application-chosen output path (see FinalizeStreamedFile): allow an absolute
-  // destination, reject only empty or an upward ".." escape.
   if (output_path_str.empty() || ContainsParentDirTraversal(output_path_str)) {
     BASE_LOGE(kLogTag, "Parent-directory traversal in output path");
     return false;
@@ -889,9 +883,6 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
 bool ZFileTransporter::FinalizeStreamedFile(u64 transfer_id,
                                             const base::Path& output_path) {
   const base::String out_path = output_path.ToAsciiString();
-  // The output path is chosen by the application, not the remote peer (the remote
-  // controls only file_name, validated separately), so an absolute destination is
-  // legitimate; reject only an empty path or an upward ".." escape.
   if (out_path.empty() || ContainsParentDirTraversal(out_path)) {
     BASE_LOGE(kLogTag, "Parent-directory traversal in output path");
     return false;
@@ -987,7 +978,6 @@ bool ZFileTransporter::ValidatePath(const base::Path& base_dir,
   if (ContainsPathTraversal(file_str)) {
     return false;
   }
-  // Ensure the file path starts with the base directory prefix
   if (base_str.empty()) {
     return true;
   }

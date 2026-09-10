@@ -2,24 +2,9 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-// Bit-level packet writer.
-//
-// 64-bit LSB-first accumulator. Flushes whole bytes to the destination
-// buffer once at least 56 bits are queued. Targeted at game-state payloads:
-// range-quantized integers, quantized floats, unit quaternions, packed
-// booleans.
-//
-// Three construction modes:
-//   1. BitWriter(packet, reserve_bytes): writes into an OutgoingPacket's
-//      pooled buffer. Finalize() sets packet.heap_data_size to the actual
-//      byte count. Avoids the extra copy on send.
-//   2. BitWriter(reserve_bytes): owns a pool-allocated buffer. data() and
-//      Detach() return the bytes after Finalize().
-//   3. BitWriter(Span<byte>): caller-provided buffer. No allocation, no
-//      growth. Overflow sets ok() to false.
-//
-// Non-copyable, non-moveable. The destination (packet or external span)
-// must outlive the writer.
+// 64-bit LSB-first bit writer. Flushes whole bytes once at least 56 bits
+// are queued. Targets game-state payloads: quantized ints, floats, unit
+// quaternions, packed booleans.
 
 #include <bit>
 #include <cstring>
@@ -45,9 +30,6 @@ class BitWriter {
   static constexpr mem_size kFlushThresholdBits = 56;
   static constexpr mem_size kDefaultReserveBytes = 256;
 
-  // Mode 1: attach to an OutgoingPacket. The packet must currently have no
-  // heap buffer (use the no-data ctor). On Finalize(), packet.heap_data_size
-  // is set to the actual bytes written.
   BitWriter(OutgoingPacket& packet, mem_size reserve_bytes)
       : packet_(&packet) {
     if (reserve_bytes == 0) {
@@ -63,8 +45,6 @@ class BitWriter {
                               static_cast<u32>(capacity_));
   }
 
-  // Mode 2: standalone, pool-backed. Read result via data() / Detach() after
-  // Finalize().
   explicit BitWriter(mem_size reserve_bytes) {
     if (reserve_bytes == 0) {
       reserve_bytes = kDefaultReserveBytes;
@@ -78,7 +58,6 @@ class BitWriter {
     owns_buffer_ = true;
   }
 
-  // Mode 3: caller-provided buffer, no growth.
   explicit BitWriter(base::Span<byte> external)
       : buffer_(reinterpret_cast<unsigned char*>(
             const_cast<byte*>(external.data()))),
@@ -89,9 +68,6 @@ class BitWriter {
     if (!finalized_) {
       Finalize();
     }
-    // Mode 1: packet owns the buffer, don't release.
-    // Mode 2: we own; release if not detached.
-    // Mode 3: external buffer, never owned.
     if (owns_buffer_ && buffer_) {
       PacketBufferPool::Instance().Release(buffer_);
     }
@@ -122,8 +98,6 @@ class BitWriter {
       scratch_ |= value << scratch_bits_;
       scratch_bits_ += bits;
     } else {
-      // The value would overflow the 64-bit accumulator. Pack the low `room`
-      // bits, drain the full accumulator, then stash the remaining high bits.
       if (room > 0) {
         scratch_ |= value << scratch_bits_;
       }
@@ -139,10 +113,9 @@ class BitWriter {
 
   void WriteBool(bool v) { WriteBits(v ? 1u : 0u, 1); }
 
-  // Unsigned integer in [0, max_inclusive], encoded in ceil(log2(max+1)) bits.
   void WriteUint(u32 value, u32 max_inclusive) {
     if (max_inclusive == 0) {
-      return;  // single-valued, zero bits
+      return;
     }
     if (value > max_inclusive) {
       ok_ = false;
@@ -152,8 +125,6 @@ class BitWriter {
     WriteBits(value, bits);
   }
 
-  // Signed integer in [min, max], inclusive. Encoded as (value - min) in
-  // ceil(log2(max - min + 1)) bits.
   void WriteInt(i32 value, i32 min, i32 max) {
     if (max < min || value < min || value > max) {
       ok_ = false;
@@ -167,7 +138,6 @@ class BitWriter {
     WriteBits(biased, BitsRequired(range));
   }
 
-  // Quantize `value` from [min, max] into `bits` bits. Out-of-range clamps.
   void WriteFloat(f32 value, f32 min, f32 max, u32 bits) {
     if (bits == 0 || bits > 32 || max <= min) {
       ok_ = false;
@@ -185,9 +155,8 @@ class BitWriter {
     WriteBits(quantized, bits);
   }
 
-  // Pack a unit quaternion as smallest-three: 2 bits for the index of the
-  // largest absolute component, then `per_component_bits` each for the other
-  // three signed-fixed-point in [-sqrt(0.5), sqrt(0.5)].
+  // Unit quaternion as smallest-three: 2 bits for the index of the largest
+  // absolute component, then `per_component_bits` per remaining component.
   void WriteUnitQuat(f32 x, f32 y, f32 z, f32 w, u32 per_component_bits = 9) {
     f32 c[4] = {x, y, z, w};
     u32 largest = 0;
@@ -199,8 +168,6 @@ class BitWriter {
         largest = i;
       }
     }
-    // Flip sign so the largest is positive; the recovered component is then
-    // sqrt(1 - sum_sq), no sign bit needed.
     if (c[largest] < 0) {
       for (auto& v : c) v = -v;
     }
@@ -212,7 +179,6 @@ class BitWriter {
     }
   }
 
-  // Append a raw byte run. Aligns to byte boundary first.
   void WriteBytes(const byte* data, mem_size n) {
     if (!ok_ || n == 0) return;
     AlignToByte();
@@ -234,17 +200,13 @@ class BitWriter {
     }
   }
 
-  // Generic dispatch into BitTraits<T>::Write.
   template <typename T>
   void Push(const T& value);
 
-  // Flush trailing bits to the buffer and (mode 1) update the packet's
-  // heap_data_size.
   void Finalize() {
     if (finalized_) return;
     finalized_ = true;
     if (!ok_) return;
-    // Drain whatever's still in the accumulator.
     while (scratch_bits_ > 0) {
       if (!Reserve(byte_offset_ + 1)) {
         return;
@@ -258,14 +220,13 @@ class BitWriter {
     }
   }
 
-  // Mode 2/3: returns the bytes written. Must call Finalize first.
+  // Must call Finalize() first.
   base::Span<byte> data() const {
     return base::Span<byte>(reinterpret_cast<const byte*>(buffer_),
                             byte_offset_);
   }
 
-  // Mode 2 only: hand the pool-owned buffer to the caller. After Detach the
-  // writer no longer owns it; caller must Release via PacketBufferPool.
+  // Hands the pool-owned buffer to the caller, who must Release it.
   unsigned char* Detach(mem_size& size_out) {
     Finalize();
     size_out = byte_offset_;
@@ -285,10 +246,9 @@ class BitWriter {
     if (scratch_bits_ < 8) {
       return;
     }
-    // Fast path: store the whole accumulator as one little-endian word
-    // (matches the LSB-first byte order of the per-byte emission) and
-    // advance only over the complete bytes. The over-written tail bytes are
-    // scratch space within capacity and are rewritten by later flushes.
+    // Store the whole accumulator as one little-endian word and advance over
+    // the complete bytes only. The over-written tail bytes are scratch space
+    // within capacity, rewritten by later flushes.
     if (Reserve(byte_offset_ + 8)) {
       const u32 bytes = scratch_bits_ >> 3;
       wire_le::StoreU64(reinterpret_cast<byte*>(buffer_ + byte_offset_),
@@ -298,11 +258,10 @@ class BitWriter {
       scratch_bits_ -= bytes * 8;
       return;
     }
-    // Slow path: an external (mode 3) buffer with fewer than 8 bytes left.
-    // Reserve() set ok_ = false; clear it and retry byte-wise so a buffer
-    // with exactly enough room for the remaining bits still succeeds.
+    // External buffer with fewer than 8 bytes left: Reserve() set ok_ =
+    // false; retry byte-wise so a buffer that exactly fits still succeeds.
     if (!external_buffer_) {
-      return;  // pool allocation failed; ok_ is already false
+      return;
     }
     ok_ = true;
     while (scratch_bits_ >= 8) {
@@ -315,8 +274,7 @@ class BitWriter {
     }
   }
 
-  // Ensure `needed` bytes of capacity. Grows for modes 1/2. For mode 3
-  // (external buffer) this fails and sets ok_ = false.
+  // Grow capacity for pool-backed buffers; external buffers fail instead.
   bool Reserve(mem_size needed) {
     if (needed <= capacity_) return true;
     if (external_buffer_) {
@@ -347,8 +305,6 @@ class BitWriter {
       std::memcpy(new_buf, buffer_, byte_offset_);
     }
     if (packet_) {
-      // Hand the new buffer to the packet (which will release it on dtor)
-      // and release the old one ourselves.
       unsigned char* old = reinterpret_cast<unsigned char*>(
           packet_->DetachHeapBuffer());
       packet_->AttachHeapBuffer(reinterpret_cast<byte*>(new_buf),
@@ -357,7 +313,6 @@ class BitWriter {
         PacketBufferPool::Instance().Release(old);
       }
     } else {
-      // Mode 2: we owned the old buffer.
       if (buffer_ && owns_buffer_) {
         PacketBufferPool::Instance().Release(buffer_);
       }

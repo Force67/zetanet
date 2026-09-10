@@ -36,14 +36,12 @@ void SaturatingSub(base::Atomic<mem_size>& value, mem_size delta) {
   }
 }
 
-// Bounded per-peer replay/duplicate filter. Reliable sequence numbers rise
-// monotonically per sender, so a sliding bitmap window relative to the
-// highest seen value is sufficient to drop duplicates (retransmits) and
-// replays without the unbounded growth of a per-peer "seen everything" set.
+// Sliding bitmap window per peer. Reliable sequence numbers rise per sender,
+// so duplicates and replays are dropped relative to the highest seen value
+// without unbounded per-peer state.
 class ReplayWindow {
  public:
-  // returns true if `seq` is new (should be delivered), false for a duplicate
-  // or a replay that has already scrolled out of the window.
+  // True if seq was not seen before.
   bool Observe(u32 seq) {
     if (!initialized_) {
       initialized_ = true;
@@ -70,7 +68,7 @@ class ReplayWindow {
     }
     const u32 behind = highest_ - seq;
     if (behind >= kWindow) {
-      return false;  // too old; treat as a replay and drop.
+      return false;
     }
     if (Test(seq)) {
       return false;
@@ -80,7 +78,7 @@ class ReplayWindow {
   }
 
  private:
-  static constexpr u32 kWindow = 8192;  // bits; ~1 KiB of state per peer.
+  static constexpr u32 kWindow = 8192;
   void Set(u32 seq) { bits_[(seq % kWindow) / 64] |= (u64{1} << (seq % 64)); }
   void Clear(u32 seq) { bits_[(seq % kWindow) / 64] &= ~(u64{1} << (seq % 64)); }
   bool Test(u32 seq) const {
@@ -161,20 +159,14 @@ bool ZPacketQueue::CheckRateLimit(mem_size payload_bytes) {
   const mem_size burst_allowance =
       ScaleLimitByPerMille(rate_limit_config_.burst_allowance, congestion_scale);
 
-  // Fast path: skip rate limit checks if limits are at defaults (very high).
-  // The default is 500K pkts/s and 1 GB/s — for benchmarks this never triggers.
   mem_size current_packets = packets_sent_this_second_.fetch_add(1, std::memory_order_relaxed);
   mem_size current_bytes = bytes_sent_this_second_.fetch_add(payload_bytes, std::memory_order_relaxed);
 
-  // Only check clock when approaching the limit (99% of packets skip this).
   if (current_packets < max_packets_per_second &&
       current_bytes + payload_bytes <= max_bytes_per_second) {
     return true;
   }
 
-  // Slow path: check if the window has elapsed. The window start is a plain
-  // time_point shared by all producer threads, so it must be read and reset
-  // under a lock (the fast path above never gets here).
   {
     std::lock_guard<std::mutex> lock(rate_limit_window_mutex_);
     const auto now = base::Clock::now();
@@ -241,7 +233,6 @@ void ZPacketQueue::ReconfigureDispatchWorkers(mem_size new_worker_count) {
   if (external_dispatch_executor_) return;
 
   if (outgoing_thread_.joinable()) {
-    // Upgrade: stop all threads, recreate executor, restart.
     bool had_incoming = incoming_thread_.joinable();
     StopThreads();
     owned_dispatch_executor_.Reset();
@@ -250,7 +241,6 @@ void ZPacketQueue::ReconfigureDispatchWorkers(mem_size new_worker_count) {
     if (had_incoming) StartIncomingThread();
     StartOutgoingThread();
   } else {
-    // First start: set worker count, then launch outgoing thread.
     built_in_dispatch_worker_count_ = new_worker_count;
     StartOutgoingThread();
   }
@@ -292,10 +282,8 @@ void ZPacketQueue::WaitForPendingDispatchTasks() {
 }
 
 void ZPacketQueue::TrackDispatchTaskCompletion() {
-  // Decrement and notify under the mutex: if the count reached zero outside
-  // it, WaitForPendingDispatchTasks could wake (even spuriously), observe
-  // zero, and let the owner destroy this object while we still touch the
-  // condition variable.
+  // Notify under the mutex: a spurious wake outside it could observe zero
+  // and let the owner destroy this object while we touch the condvar.
   std::lock_guard<std::mutex> lock(dispatch_wait_mutex_);
   const mem_size remaining =
       pending_dispatch_tasks_.fetch_sub(1, std::memory_order_acq_rel) - 1;
@@ -313,7 +301,6 @@ void ZPacketQueue::ProcessOutgoingPackets() {
     dispatched +=
         ProcessChannel(PacketChannelType::Data, GetDataDispatchBudget());
 
-    // Periodically collect garbage from the ack tracking map
     if ((gc_counter_++ % 1000) == 0) {
       awaiting_ack_packets_.collect_garbage();
     }
@@ -323,14 +310,12 @@ void ZPacketQueue::ProcessOutgoingPackets() {
       const auto now = static_cast<u32>(base::GetUnixTimeStamp());
       for (auto& [seqNum, packet] : awaiting_ack_packets_) {
         // Signed difference: last_send_time can lie slightly in the future
-        // (clock step, coarse per-thread timestamp cache) and must then
-        // read as age <= 0 rather than wrap.
+        // and must then read as age <= 0 rather than wrap.
         const i32 packet_age = static_cast<i32>(now - packet.last_send_time);
-        // Drop packets that have exceeded retry budget to cap memory growth.
         if (packet_age > static_cast<i32>(kDropAfterSeconds)) {
           const mem_size dropped_bytes = packet.heap_data_size;
-          // Only adjust counters if this remove() wins; an ACK arriving
-          // concurrently may have already removed and accounted for it.
+          // Counter adjustments only when this remove() wins; a concurrent
+          // ACK may have already removed and accounted for the packet.
           if (awaiting_ack_packets_.remove(seqNum)) {
             OnReliablePacketDrop();
             SaturatingSub(awaiting_ack_packet_count_, 1);
@@ -350,12 +335,8 @@ void ZPacketQueue::ProcessOutgoingPackets() {
     MaybeApplyCongestionRecovery(now_tp);
 
     if (dispatched == 0) {
-      // Wait on the condvar until Push() notifies or the retry-scan interval
-      // elapses. Order matters: publish the sleeping flag, then re-check the
-      // queues under the wakeup mutex. A producer that enqueued before the
-      // flag was visible is caught by the re-check, and one that enqueued
-      // after sees the flag and notifies under the same mutex, so the wakeup
-      // cannot be lost.
+      // Publish the sleeping flag, then re-check under the wakeup mutex so a
+      // producer enqueuing in between cannot lose the wakeup.
       std::unique_lock<std::mutex> lock(outgoing_wakeup_mutex_);
       outgoing_thread_sleeping_.store(true, std::memory_order_seq_cst);
       if (!HasPendingOutgoing()) {
@@ -371,7 +352,7 @@ mem_size ZPacketQueue::ProcessChannel(PacketChannelType channel,
   mem_size processed = 0;
   auto& queue = channel_outgoing_queues_[static_cast<mem_size>(channel)];
 
-  // Fast path: dispatch directly without lambda/executor overhead.
+  // No executor: dispatch inline.
   if (!dispatch_executor_) {
     while (processed < max_packets) {
       OutgoingPacket packet;
@@ -545,26 +526,21 @@ bool ZPacketQueue::ReceiveOne() {
 }
 
 void ZPacketQueue::ProcessReceiving() {
-  // Per-peer dedup state lives here (not in the class) to avoid changing the
-  // header/ABI.  Sequence numbers are only unique within a single peer's
-  // dispatcher, so dedup must be scoped per source_peer_id.  Each peer's
-  // window is bounded, and the peer count is bounded by ZPeerMapping::kMaxPeers,
-  // so total dedup memory is bounded regardless of remote send volume.
-  // ProcessReceiving runs on a single dedicated thread per ZPacketQueue instance.
+  // Per-peer dedup state, scoped per source_peer_id because sequence numbers
+  // are only unique within one peer's dispatcher. Bounded by the per-peer
+  // window and kMaxPeers. Runs on a single dedicated thread per instance.
   std::unordered_map<u32, ReplayWindow> received_reliable_seqs;
 
   IncomingPacket pack;
   while (!stop_threads_.load()) {
     const auto result = receiver_.ReceivePackets(crypto_context_, pack);
     if (result == PacketReceiver::ReceiveResult::Success) {
-      // record the new packet on the proper channel queue.
       auto prio = (PacketPriority)pack.flags.priority;
 
       if (pack.flags.reliable) {
-        // Always ACK so the sender stops retransmitting.
+        // Always ACK so the sender stops retransmitting, but deliver once.
         AddAwaitingAckPacket(pack.source_peer_id, pack.sequence_number,
                              pack.acknowledgement_number);
-        // But only deliver once — drop duplicate sequence numbers per peer.
         if (!received_reliable_seqs[pack.source_peer_id].Observe(
                 pack.sequence_number)) {
           continue;
@@ -575,7 +551,6 @@ void ZPacketQueue::ProcessReceiving() {
         channel_incoming_queues_[channel_index].enqueue(std::move(pack), prio);
       }
     } else if (result == PacketReceiver::ReceiveResult::Acknowledgement) {
-      // Parse the 4-byte LE payload to get the acked sequence number
       if (pack.data.size() >= 4) {
         const u32 acked_seq = wire_le::LoadU32(
             reinterpret_cast<const byte*>(pack.data.data()));
@@ -586,9 +561,8 @@ void ZPacketQueue::ProcessReceiving() {
       BASE_LOGI(kLogTag, "Goodbye packet received, stopping threads");
       break;
     } else {
-      // Timeout/Error on the non-blocking socket: park in poll() until data
-      // arrives or the interval elapses. The interval bounds how long
-      // StopThreads() waits for this thread.
+      // Nothing readable: park in poll() until data arrives. The interval
+      // bounds how long StopThreads() waits for this thread.
       socket_.WaitReadable(/*timeout_ms=*/10);
     }
   };
@@ -605,7 +579,6 @@ void ZPacketQueue::AddAwaitingAckPacket(ZPeerId return_address,
                            .acknowledged = 1,
                            .awaiting_ack = 0,
                            .reserved = 0};
-  // Serialize the acknowledged sequence number as a 4-byte LE payload
   byte ack_payload[4];
   wire_le::StoreU32(ack_payload, sequence_number);
   OutgoingPacket out(return_address.id, PacketType::Acknowledgement,

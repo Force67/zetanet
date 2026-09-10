@@ -76,9 +76,8 @@ bool ZServer::Begin(u16 port, const StartOptions& options) {
 bool ZServer::Update() {
   UpdateSynchronizedClock();
 
-  // Control packets are handled by ProcessSystemMessage inside Poll. The
-  // data channel is the application's: consuming it here would drop user
-  // messages, so callers poll it themselves.
+  // Control packets run through ProcessSystemMessage inside Poll; the data
+  // channel belongs to the application.
   IncomingPacket packet;
   while (Poll(PacketChannelType::Control, packet)) {
   }
@@ -123,9 +122,8 @@ void ZServer::SendMessage(ZPeerId id, const base::String& data) {
 void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
   switch (p.type) {
     case PacketType::ClientHello: {
-      // Duplicate ClientHello can happen due reliable retransmits; respond with
-      // ServerHello again so the client can complete handshake if it missed the
-      // previous response.
+      // Duplicate ClientHello can come from reliable retransmits; answer with
+      // ServerHello again so a client that missed it can still finish.
       if (handshaked_peers_.count(p.source_peer_id)) {
         u16 protocol_version = system_commands::kProtocolVersionCurrent;
         u32 negotiated_features =
@@ -183,7 +181,6 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
         return;
       }
 
-      // Skip encryption algorithm list
       base::Vector<byte> enc_algos(request.encryption_algo_list_len);
       if (!reader.ReadS(enc_algos)) {
         BASE_LOGE(kLogTag, "Malformed ClientHello: invalid encryption algorithm list");
@@ -192,7 +189,6 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
         return;
       }
 
-      // Skip compression algorithm list
       base::Vector<byte> comp_algos(request.compression_algo_list_len);
       if (!reader.ReadS(comp_algos)) {
         BASE_LOGE(kLogTag, "Malformed ClientHello: invalid compression algorithm list");
@@ -201,7 +197,6 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
         return;
       }
 
-      // Read client public key
       base::Vector<byte> client_key;
       if (request.pub_key_list_len > 0) {
         if (!reader.ReadList(client_key)) {
@@ -212,7 +207,6 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
         }
       }
 
-      // Read client challenge
       base::String client_challenge;
       if (request.challenge_len > 0) {
         base::Vector<byte> temp_challenge;
@@ -235,7 +229,6 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
                             system_commands::HandshakeRejectReason::MalformedPacket);
           return;
         }
-        // Process client's key material
         base::String client_nonce(reinterpret_cast<const char*>(client_key.data()),
                                  client_key.size());
         crypto_context_->ProcessServerKey(client_nonce, client_challenge);
@@ -260,7 +253,6 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
         packet_queue_.ReconfigureDispatchWorkers(1);
       }
 
-      // Advance through thread scaling tiers as peer count grows.
       while (current_scaling_tier_ < scaling_tier_count_ &&
              handshaked_peers_.size() >= scaling_tiers_[current_scaling_tier_].peer_count) {
         packet_queue_.ReconfigureDispatchWorkers(

@@ -19,19 +19,16 @@
 
 namespace tx::network {
 
-// Pluggable task executor used by internal hot paths.
-// Users can provide their own implementation to integrate with an existing
-// job system; otherwise zetanet uses the built-in threadpool implementation.
+// Pluggable task executor for internal hot paths; supply your own to hook
+// into an existing job system, otherwise the built-in pool is used.
 class ZNET_API ITaskExecutor {
  public:
   using Task = std::function<void()>;
 
   virtual ~ITaskExecutor() = default;
 
-  // Enqueue a task for asynchronous execution.
   virtual void Submit(Task task) = 0;
 
-  // Block until all previously submitted tasks have finished.
   virtual void Drain() = 0;
 };
 
@@ -49,8 +46,8 @@ class ZNET_API ZInlineTaskExecutor final : public ITaskExecutor {
 class ZNET_API ZThreadPoolTaskExecutor final : public ITaskExecutor {
  public:
   struct Options {
-    mem_size worker_count{0};      // 0 => auto
-    mem_size max_queued_tasks{0};  // 0 => unbounded
+    mem_size worker_count{0};      // 0 = hardware default
+    mem_size max_queued_tasks{0};  // 0 = unbounded
   };
 
   ZThreadPoolTaskExecutor();

@@ -3,24 +3,9 @@
 #pragma once
 #include <cstring>
 
-// Trait-based dispatch for BitWriter::Push / BitReader::Pop.
-//
-// User types opt in by specializing BitTraits<T>:
-//
-//   template <>
-//   struct tx::network::BitTraits<MyStruct> {
-//     static void Write(BitWriter& w, const MyStruct& v) { ... }
-//     static bool Read(BitReader& r, MyStruct& v) { ... }
-//   };
-//
-// Per-field users can wrap members in ZBitField<T, Spec>; the matching
-// trait is provided automatically. A Spec is a struct with static
-// Write(BitWriter&, T) / Read(BitReader&, T&) methods. Built-in specs:
-//
-//   ZIntRange<Min, Max>      i32 in [Min, Max]
-//   ZUintMax<Max>            u32 in [0, Max]
-//   ZBoolBit                 single-bit bool
-//   ZFloatRange<RangeSpec>   float quantized to RangeSpec::kBits
+// Trait-based dispatch for BitWriter::Push / BitReader::Pop. User types opt
+// in by specializing BitTraits<T>; per-field members can be wrapped in
+// ZBitField<T, Spec> instead.
 
 #include <znet/z_bit_reader.h>
 #include <znet/z_bit_writer.h>
@@ -35,8 +20,6 @@ namespace tx::network {
 
 template <typename T>
 struct BitTraits;
-
-// ---------- primitives ----------
 
 template <>
 struct BitTraits<bool> {
@@ -115,8 +98,6 @@ struct BitTraits<f32> {
   }
 };
 
-// ---------- ZBitField + Specs ----------
-
 template <typename T, typename Spec>
 struct ZBitField {
   T value{};
@@ -175,8 +156,6 @@ struct ZFloatRange {
     return r.ReadFloat(v, RangeSpec::kMin, RangeSpec::kMax, RangeSpec::kBits);
   }
 };
-
-// ---------- Push / Pop dispatch ----------
 
 template <typename T>
 inline void BitWriter::Push(const T& value) {

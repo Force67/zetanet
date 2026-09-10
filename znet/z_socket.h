@@ -57,12 +57,12 @@ class ZSocket {
   };
 
   struct Address {
-    char ip[46]{};  // INET6_ADDRSTRLEN
+    char ip[46]{};
     u16 port{};
     u8 address_family{AF_INET};
 
-    // Cached binary sockaddr populated on Receive() and ResolveAddress().
-    // Lets Send() skip inet_pton on every packet.
+    // Binary sockaddr filled by Receive() and ResolveAddress(), letting
+    // Send() skip inet_pton per packet.
     sockaddr_storage cached_sa{};
     socklen_t cached_sa_len{0};
 
@@ -70,38 +70,32 @@ class ZSocket {
       if (port != other.port || address_family != other.address_family) {
         return false;
       }
-      // Fast path: compare only the significant bytes of the IP address.
+      // Compare only the significant bytes of the address.
       if (address_family == AF_INET) {
-        // IPv4: only need 4 bytes (xxx.xxx.xxx.xxx, max 15 chars)
         return memcmp(ip, other.ip, 16) == 0;
       }
       return memcmp(ip, other.ip, sizeof(ip)) == 0;
     }
   };
 
-  // Resolve hostnames or numeric IPs into an endpoint address.
-  // When ipv6 is false, resolves IPv4; when true, resolves IPv6.
   static bool ResolveAddress(const base::StringRef host,
                              u16 port,
                              bool ipv6,
                              Address& out);
 
   i32 Send(const Address& addr, const base::Span<byte> data);
-  // Fast path: uses pre-cached sockaddr from Address (no inet_pton).
+  // Uses the pre-cached sockaddr; no inet_pton.
   i32 SendCached(const Address& addr, const base::Span<byte> data);
   i32 Receive(Address& sender, char* buffer, mem_size length);
-  // Blocks until the socket is readable or `timeout_ms` elapses. Returns
-  // true if readable. Lets receive loops on the non-blocking socket sleep
-  // instead of spinning on EAGAIN.
+  // Blocks until readable or timeout; lets receive loops on the non-blocking
+  // socket sleep instead of spinning on EAGAIN.
   bool WaitReadable(i32 timeout_ms);
   void SetChaosOptions(const ChaosOptions& options);
 
-  // Send to server sock addr
   i32 SendtoServer(const base::Span<byte> data) {
     return InternalSend(server_, server_len_, data);
   }
 
-  // OS specific error.
   static i32 GetLastSocketPlatformError();
 
   enum class Error {
@@ -118,7 +112,7 @@ class ZSocket {
     ConnectionTimedOut,
     ConnectionAborted,
     UnknownError,
-    ErrorCount  // This should always be the last element
+    ErrorCount
   };
   static Error GetLastError();
   static const char* GetErrorString(Error error);

@@ -26,11 +26,10 @@ class PacketReceiver {
   static constexpr char kLogTag[] = "packet-receiver";
 
   static constexpr const mem_size InitialBufferSize = 65507;
-  static constexpr const mem_size MaxBufferSize =
-      65507;  // Maximum UDP payload size
-  static constexpr const mem_size MinimumBufferSize = 512;  // Min buffer size
-  static constexpr float ResizeDownThreshold = 0.5f;  // Threshold for downsizing
-  static constexpr float Alpha = 0.1f;  // Smoothing factor for moving average
+  static constexpr const mem_size MaxBufferSize = 65507;
+  static constexpr const mem_size MinimumBufferSize = 512;
+  static constexpr float ResizeDownThreshold = 0.5f;
+  static constexpr float Alpha = 0.1f;
 
   explicit PacketReceiver(ZSocket& socket, ZPeerMapping& peer_list)
       : socket_(socket),
@@ -44,8 +43,6 @@ class PacketReceiver {
 
   ReceiveResult ReceivePackets(ZCryptoContext* crypto,
                                IncomingPacket& incoming) {
-    // UDP is datagram-based: receive the entire packet in one call.
-    // The buffer must be large enough for the largest expected datagram.
     i32 recvResult =
         socket_.Receive(address, (char*)incoming_buffer_.data(),
                         static_cast<i32>(incoming_buffer_.size()));
@@ -98,7 +95,6 @@ class PacketReceiver {
       return false;
     }
 
-    // find the peer associated with this address
     ZPeer* peer = peer_list_.GetOrCreatePeer(address);
     if (!peer) {
       BASE_LOGE(
@@ -107,8 +103,6 @@ class PacketReceiver {
           (u16)incoming.type);
       return false;
     }
-    // the peer list manages the peers unique identifier, so we apply it here to
-    // the data packet
     incoming.source_peer_id = peer->identifier.id;
 
     return true;
@@ -128,7 +122,7 @@ class PacketReceiver {
       if (error == ZSocket::Error::NotConnected) {
         return ReceiveResult::Goodbye;
       }
-      // For non-blocking sockets, EAGAIN/EWOULDBLOCK is normal
+      // EAGAIN on a non-blocking socket is normal.
       if (error == ZSocket::Error::Success) {
         return ReceiveResult::Timeout;
       }
@@ -140,18 +134,15 @@ class PacketReceiver {
   void ResizeBufferIfNeeded(mem_size packet_size) {
     UpdateAveragePacketSize(packet_size);
 
-    // Resize up if needed
     if (packet_size > incoming_buffer_.size()) {
       incoming_buffer_.resize(std::min(packet_size, MaxBufferSize));
-      memset(incoming_buffer_.data(), 0, incoming_buffer_.size());  // re-zero
-    }
-    // Resize down if conditions are met
-    else if (average_packet_size_ <
-                 incoming_buffer_.size() * ResizeDownThreshold &&
-             incoming_buffer_.size() > MinimumBufferSize) {
+      memset(incoming_buffer_.data(), 0, incoming_buffer_.size());
+    } else if (average_packet_size_ <
+                   incoming_buffer_.size() * ResizeDownThreshold &&
+               incoming_buffer_.size() > MinimumBufferSize) {
       incoming_buffer_.resize(std::max(
           static_cast<mem_size>(average_packet_size_), MinimumBufferSize));
-      memset(incoming_buffer_.data(), 0, incoming_buffer_.size());  // re-zero
+      memset(incoming_buffer_.data(), 0, incoming_buffer_.size());
     }
   }
 
@@ -165,6 +156,6 @@ class PacketReceiver {
   ZPeerMapping& peer_list_;
   ZSocket::Address address{};
   base::Vector<byte> incoming_buffer_;
-  f32 average_packet_size_;  // Average size of recent packets
+  f32 average_packet_size_;
 };
 }  // namespace tx::network
