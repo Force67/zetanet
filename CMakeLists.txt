@@ -101,7 +101,7 @@ if(ZNET_CRYPTO_BACKEND STREQUAL "openssl")
   target_compile_definitions(zetanet PUBLIC ZNET_CRYPTO_BACKEND_OPENSSL)
   target_link_libraries(zetanet PUBLIC OpenSSL::Crypto OpenSSL::SSL)
   if(WIN32)
-    target_link_libraries(zetanet PUBLIC Crypt32)
+    target_link_libraries(zetanet PUBLIC crypt32)  # lowercase: a cross linker matches the mingw libcrypt32.a name
   endif()
 else()
   target_compile_definitions(zetanet PUBLIC ZNET_CRYPTO_BACKEND_MBEDTLS)
@@ -113,7 +113,7 @@ else()
   endif()
   target_link_libraries(zetanet PUBLIC ${MBEDTLS_LIB} ${MBEDX509_LIB} ${MBEDCRYPTO_LIB})
   if(WIN32)
-    target_link_libraries(zetanet PUBLIC Crypt32)
+    target_link_libraries(zetanet PUBLIC crypt32)  # lowercase: a cross linker matches the mingw libcrypt32.a name
   endif()
 endif()
 
