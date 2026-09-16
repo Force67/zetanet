@@ -2,6 +2,9 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_socket.h"
+
+#include <string.h>  // memset/memcpy/memcmp, on the sockaddr scratch below
+
 #include <mutex>
 
 #ifdef ZNET_USE_STL
