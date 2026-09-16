@@ -11,6 +11,8 @@
 #include <base/strings/string_ref.h>
 #endif
 
+#include <string.h>  // memcmp, on the address comparisons below
+
 #include <mutex>
 
 // Platform-specific socket includes and typedefs

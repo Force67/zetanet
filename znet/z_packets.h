@@ -2,6 +2,8 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
+#include <string.h>  // memcpy, where a payload is filled
+
 #include <limits>
 
 #ifdef ZNET_USE_STL
