@@ -108,6 +108,11 @@ class ZAsyncTransportLayer {
     scaling_tier_count_ = 0;
   }
 
+  // Where a peer's datagrams come from, as seen by this side.
+  bool ResolvePeerAddress(u32 peer_id, tx::network::ZSocket::Address& out) {
+    return peer_mapping_.ResolvePeerAddress(ZPeerId(peer_id), out);
+  }
+
   // Starts the incoming thread immediately.
   bool WarmIncomingThread() {
     return packet_queue_.StartIncomingThread();

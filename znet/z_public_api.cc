@@ -779,6 +779,30 @@ ZNetRole ZNetGetRole(const ZNetContext* context) {
   return ZNET_ROLE_NONE;
 }
 
+ZNetResult ZNetGetPeerAddress(ZNetContext* context,
+                              uint32_t peer_id,
+                              char* ip_out,
+                              size_t ip_capacity,
+                              uint16_t* port_out) {
+  ZAsyncTransportLayer* transport = ActiveTransport(context);
+  if (!transport || !ip_out || ip_capacity == 0 || !port_out) {
+    return ZNET_RESULT_INVALID_ARGUMENT;
+  }
+  tx::network::ZSocket::Address address;
+  if (!transport->ResolvePeerAddress(peer_id, address)) {
+    return ZNET_RESULT_INVALID_ARGUMENT;
+  }
+  size_t length = 0;
+  while (length + 1 < ip_capacity && length < sizeof(address.ip) &&
+         address.ip[length] != '\0') {
+    ip_out[length] = address.ip[length];
+    ++length;
+  }
+  ip_out[length] = '\0';
+  *port_out = address.port;
+  return ZNET_RESULT_OK;
+}
+
 ZNetConnectionState ZNetGetConnectionState(const ZNetContext* context) {
   const ZAsyncTransportLayer* transport = ActiveTransport(context);
   if (!transport) {

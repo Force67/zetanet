@@ -269,6 +269,13 @@ ZNET_API ZNetResult ZNetStop(ZNetContext* context);
 ZNET_API ZNetResult ZNetUpdate(ZNetContext* context);
 
 ZNET_API ZNetRole ZNetGetRole(const ZNetContext* context);
+/* The address a peer's datagrams come from: its IP as text, and its port.
+ * ZNET_RESULT_INVALID_ARGUMENT for a peer this context does not know. */
+ZNET_API ZNetResult ZNetGetPeerAddress(ZNetContext* context,
+                                       uint32_t peer_id,
+                                       char* ip_out,
+                                       size_t ip_capacity,
+                                       uint16_t* port_out);
 ZNET_API ZNetConnectionState ZNetGetConnectionState(const ZNetContext* context);
 ZNET_API ZNetResult ZNetGetP2PNodeType(const ZNetContext* context,
                                        ZNetP2PNodeType* out_type);
