@@ -11,6 +11,9 @@
 #ifndef ZNET_BASE_CLOCK_DEFINED
 #define ZNET_BASE_CLOCK_DEFINED 1
 namespace base {
+#ifdef ZNET_USE_STL
+inline namespace znet_stl {
+#endif
 class Clock {
  public:
   using clock = std::chrono::steady_clock;
@@ -22,6 +25,9 @@ class Clock {
 
   static time_point now() noexcept { return clock::now(); }
 };
+#ifdef ZNET_USE_STL
+}  // namespace znet_stl
+#endif
 }  // namespace base
 #endif
 

@@ -66,7 +66,11 @@ constexpr size_t _countof_impl(const T (&)[N]) noexcept {
 #endif
 #endif
 
+// The inline namespace gives these their own mangled names, so a program that
+// links this build next to equilibrium's base gets two sets of symbols and not
+// an ODR violation the linker resolves by picking one.
 namespace base {
+inline namespace znet_stl {
 
 using String = std::string;
 using StringRef = std::string_view;
@@ -374,12 +378,14 @@ inline void LogMessage(const char* tag, LogLevel level, const std::string& msg) 
   }
 }
 
+}  // namespace znet_stl
 }  // namespace base
 
 #include <filesystem>
 #include <fstream>
 
 namespace base {  // reopen
+inline namespace znet_stl {
 
 class Path {
  public:
@@ -454,6 +460,7 @@ class File {
   std::fstream stream_;
 };
 
+}  // namespace znet_stl
 }  // namespace base
 
 // Logging macros
