@@ -26,7 +26,8 @@
 
 #include "z_network_allocator.h"
 
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
 #include <mbedtls/md.h>
 #else
 #include <openssl/hmac.h>
@@ -55,7 +56,9 @@ constexpr mem_size kHmacSize = 32;
 constexpr char kFileHmacKeyEnv[] = "ZNET_FILE_HMAC_KEY";
 
 bool ComputeHmacSha256(const byte* data, mem_size size, const byte* key, mem_size key_size, byte* out_hmac) {
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  return false;
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   return info != nullptr &&
          mbedtls_md_hmac(info, key, key_size, data, size, out_hmac) == 0;

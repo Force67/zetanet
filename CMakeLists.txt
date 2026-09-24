@@ -11,8 +11,8 @@ project(Zetanet CXX C)
 
 option(ZNET_USE_STL "Build with the STL compatibility layer instead of equilibrium" ON)
 option(ZNET_BUILD_SAMPLES "Build the sample and integration-test executables" ON)
-set(ZNET_CRYPTO_BACKEND "openssl" CACHE STRING "Crypto backend: openssl or mbedtls")
-set_property(CACHE ZNET_CRYPTO_BACKEND PROPERTY STRINGS openssl mbedtls)
+set(ZNET_CRYPTO_BACKEND "openssl" CACHE STRING "Crypto backend: openssl, mbedtls or none")
+set_property(CACHE ZNET_CRYPTO_BACKEND PROPERTY STRINGS openssl mbedtls none)
 
 if(NOT ZNET_USE_STL AND
    NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/equilibrium/CMakeLists.txt")
@@ -22,8 +22,9 @@ if(NOT ZNET_USE_STL AND
 endif()
 
 if(NOT ZNET_CRYPTO_BACKEND STREQUAL "openssl" AND
-   NOT ZNET_CRYPTO_BACKEND STREQUAL "mbedtls")
-  message(FATAL_ERROR "ZNET_CRYPTO_BACKEND must be 'openssl' or 'mbedtls'")
+   NOT ZNET_CRYPTO_BACKEND STREQUAL "mbedtls" AND
+   NOT ZNET_CRYPTO_BACKEND STREQUAL "none")
+  message(FATAL_ERROR "ZNET_CRYPTO_BACKEND must be 'openssl', 'mbedtls' or 'none'")
 endif()
 
 # The equilibrium base headers require C++23 (premake passes -std=c++2b).
@@ -103,6 +104,9 @@ if(ZNET_CRYPTO_BACKEND STREQUAL "openssl")
   if(WIN32)
     target_link_libraries(zetanet PUBLIC Crypt32)
   endif()
+elseif(ZNET_CRYPTO_BACKEND STREQUAL "none")
+  # Encryption is refused at start; plaintext transport only.
+  target_compile_definitions(zetanet PUBLIC ZNET_CRYPTO_BACKEND_NONE)
 else()
   target_compile_definitions(zetanet PUBLIC ZNET_CRYPTO_BACKEND_MBEDTLS)
   find_library(MBEDTLS_LIB mbedtls)

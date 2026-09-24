@@ -5,7 +5,8 @@
 
 #include <cstring>
 
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/gcm.h>
@@ -30,7 +31,9 @@ namespace {
 constexpr char kLogTag[] = "z-crypto";
 
 bool Sha256(const byte* data, mem_size size, base::Array<byte, 32>& out_hash) {
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  return false;
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
   const int starts_result = mbedtls_sha256_starts(&ctx, 0);
@@ -71,7 +74,9 @@ base::String BytesToHex(const byte* data, mem_size size) {
 bool HmacSha256(const byte* key, mem_size key_size,
                 const byte* data, mem_size data_size,
                 base::Array<byte, 32>& out_mac) {
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  return false;
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   if (!info) {
     return false;
@@ -101,7 +106,9 @@ bool ConstantTimeEquals(const base::String& lhs, const base::String& rhs) {
 }
 
 bool RandomBytes(byte* out, mem_size size) {
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  return false;
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   mbedtls_entropy_context entropy;
   mbedtls_ctr_drbg_context ctr_drbg;
   mbedtls_entropy_init(&entropy);
@@ -139,6 +146,10 @@ void ZCryptoContext::SetPreSharedKey(const base::StringRef& secret) {
 }
 
 bool ZCryptoContext::InitializeKeyExchange() {
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  BASE_LOGE(kLogTag, "Encryption requested but zetanet was built without a crypto backend");
+  return false;
+#endif
   if (keys_initialized_) {
     return true;
   }
@@ -262,7 +273,9 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
     return false;
   }
 
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  return false;
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   mbedtls_gcm_context gcm;
   mbedtls_gcm_init(&gcm);
 
@@ -367,7 +380,9 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
   
   plaintext.resize(ciphertext_size);
 
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  return false;
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   mbedtls_gcm_context gcm;
   mbedtls_gcm_init(&gcm);
   int result = mbedtls_gcm_setkey(
