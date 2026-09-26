@@ -5,12 +5,13 @@
 #include <znet/z_abi.h>
 #include <znet/z_system_command.h>
 
-#include <unordered_map>
-#include <unordered_set>
-
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/time/time.h>
+#include <base/memory/move.h>
+#include <base/containers/unordered_map.h>
+#include <base/containers/unordered_set.h>
 #include <base/memory/unique_pointer.h>
 #endif
 
@@ -55,7 +56,7 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
   void Push(OutgoingPacket&& p) {
     if (state_ != State::kConnected)
       return;
-    packet_queue_.Push(std::move(p));
+    packet_queue_.Push(base::move(p));
   }
 
   void ProcessSystemMessage(const IncomingPacket& p);
@@ -71,11 +72,11 @@ class ZNET_API ZServer final : public ZAsyncTransportLayer {
   struct PeerHandshakeInfo {
     u16 protocol_version{0};
     u32 negotiated_features{0};
-    base::Clock::time_point connected_at{};
+    base::TimeTicks connected_at{};
   };
 
-  std::unordered_set<u32> handshaked_peers_;
-  std::unordered_set<u32> authenticated_peers_;
-  std::unordered_map<u32, PeerHandshakeInfo> peer_handshake_info_;
+  base::UnorderedSet<u32> handshaked_peers_;
+  base::UnorderedSet<u32> authenticated_peers_;
+  base::UnorderedMap<u32, PeerHandshakeInfo> peer_handshake_info_;
 };
 }  // namespace tx::network

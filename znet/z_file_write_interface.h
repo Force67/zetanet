@@ -2,8 +2,6 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <string>
-
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else

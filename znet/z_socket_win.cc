@@ -65,6 +65,8 @@ ZSocket::Error ZSocket::GetLastError() {
       return Error::ConnectionTimedOut;
     case WSAECONNABORTED:
       return Error::ConnectionAborted;
+    case WSAEWOULDBLOCK:
+      return Error::Success;  // no data pending on a non-blocking socket
   }
   return Error::UnknownError;
 }

@@ -11,19 +11,24 @@ project(Zetanet CXX C)
 
 option(ZNET_USE_STL "Build with the STL compatibility layer instead of equilibrium" ON)
 option(ZNET_BUILD_SAMPLES "Build the sample and integration-test executables" ON)
-set(ZNET_CRYPTO_BACKEND "openssl" CACHE STRING "Crypto backend: openssl or mbedtls")
-set_property(CACHE ZNET_CRYPTO_BACKEND PROPERTY STRINGS openssl mbedtls)
+set(ZNET_CRYPTO_BACKEND "openssl" CACHE STRING "Crypto backend: openssl, mbedtls or none")
+set_property(CACHE ZNET_CRYPTO_BACKEND PROPERTY STRINGS openssl mbedtls none)
 
-if(NOT ZNET_USE_STL AND
-   NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/equilibrium/CMakeLists.txt")
+# A parent project that already builds equilibrium::base (rx, say) supplies it;
+# otherwise ZNET_EQUILIBRIUM_DIR names the checkout to build it from.
+set(ZNET_EQUILIBRIUM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/equilibrium" CACHE PATH
+  "equilibrium checkout used when ZNET_USE_STL=OFF and no equilibrium::base target exists")
+if(NOT ZNET_USE_STL AND NOT TARGET equilibrium::base AND
+   NOT EXISTS "${ZNET_EQUILIBRIUM_DIR}/CMakeLists.txt")
   message(FATAL_ERROR
     "ZNET_USE_STL=OFF requires the vendor/equilibrium submodule "
     "(git submodule update --init vendor/equilibrium vendor/fmtlib)")
 endif()
 
 if(NOT ZNET_CRYPTO_BACKEND STREQUAL "openssl" AND
-   NOT ZNET_CRYPTO_BACKEND STREQUAL "mbedtls")
-  message(FATAL_ERROR "ZNET_CRYPTO_BACKEND must be 'openssl' or 'mbedtls'")
+   NOT ZNET_CRYPTO_BACKEND STREQUAL "mbedtls" AND
+   NOT ZNET_CRYPTO_BACKEND STREQUAL "none")
+  message(FATAL_ERROR "ZNET_CRYPTO_BACKEND must be 'openssl', 'mbedtls' or 'none'")
 endif()
 
 # The equilibrium base headers require C++23 (premake passes -std=c++2b).
@@ -47,16 +52,16 @@ add_library(znet_lz4 STATIC ${ZNET_LZ4_SOURCES})
 target_include_directories(znet_lz4 PUBLIC "${ZNET_LZ4_DIR}")
 
 # --- equilibrium base (ZNET_USE_STL=OFF only) ---
-if(NOT ZNET_USE_STL)
-  # znet passes std::memory_order_* to base::Atomic; build base in its
-  # documented std::atomic mode so the types line up.
-  set(EQ_USE_STD_ATOMIC ON CACHE BOOL "" FORCE)
+if(NOT ZNET_USE_STL AND NOT TARGET equilibrium::base)
   set(EQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   if(WIN32)
     # base's windows file utilities format with fmtlib, which zetanet vendors.
     set(EQ_FMTLIB_DIR "${ZNET_ROOT}/vendor/fmtlib" CACHE PATH "" FORCE)
   endif()
-  add_subdirectory("${ZNET_ROOT}/vendor/equilibrium" equilibrium EXCLUDE_FROM_ALL)
+  add_subdirectory("${ZNET_EQUILIBRIUM_DIR}" equilibrium EXCLUDE_FROM_ALL)
+  # Nothing here std::formats a base string; without this, base's xstring.h
+  # pulls <format> into every TU that names one.
+  target_compile_definitions(eq_base PUBLIC BASE_NO_STD_FORMAT)
 endif()
 
 # --- zetanet library ---
@@ -77,6 +82,9 @@ if(ZNET_USE_STL)
   target_compile_definitions(zetanet PUBLIC ZNET_USE_STL)
 else()
   target_link_libraries(zetanet PUBLIC equilibrium::base)
+  # The equilibrium configuration follows base's rules, exceptions included.
+  target_compile_options(zetanet PRIVATE
+    $<IF:$<CXX_COMPILER_ID:MSVC>,/EHs-c-,-fno-exceptions>)
 endif()
 
 if(WIN32)
@@ -103,6 +111,9 @@ if(ZNET_CRYPTO_BACKEND STREQUAL "openssl")
   if(WIN32)
     target_link_libraries(zetanet PUBLIC Crypt32)
   endif()
+elseif(ZNET_CRYPTO_BACKEND STREQUAL "none")
+  # Encryption is refused at start; plaintext transport only.
+  target_compile_definitions(zetanet PUBLIC ZNET_CRYPTO_BACKEND_NONE)
 else()
   target_compile_definitions(zetanet PUBLIC ZNET_CRYPTO_BACKEND_MBEDTLS)
   find_library(MBEDTLS_LIB mbedtls)
@@ -131,6 +142,10 @@ if(ZNET_BUILD_SAMPLES)
     if(EXISTS "${sample_main}")
       add_executable(${sample} "${sample_main}")
       target_link_libraries(${sample} PRIVATE zetanet)
+      if(NOT ZNET_USE_STL)
+        target_compile_options(${sample} PRIVATE
+          $<IF:$<CXX_COMPILER_ID:MSVC>,/EHs-c-,-fno-exceptions>)
+      endif()
     else()
       message(STATUS "Skipping missing sample: ${sample}")
     endif()

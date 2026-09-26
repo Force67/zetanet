@@ -5,16 +5,14 @@
 
 #include <string.h>  // memset/memcpy/memcmp, on the sockaddr scratch below
 
-#include <mutex>
-
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
 #include <base/logging.h>
 #endif
-
-#include <chrono>
-#include <thread>
 
 #if !defined(_WIN32)
 #include <poll.h>
@@ -414,7 +412,7 @@ i32 ZSocket::InternalSend(sockaddr_storage& target, socklen_t addr_len,
     return send_direct(target, addr_len, data.data(), data.size());
   }
 
-  std::lock_guard<std::mutex> lock(chaos_mutex_);
+  base::LockGuard<base::Mutex> lock(chaos_mutex_);
   if (chaos_rng_state_ == 0) {
     chaos_rng_state_ = chaos_options_.seed != 0 ? chaos_options_.seed : 1;
   }
@@ -430,7 +428,7 @@ i32 ZSocket::InternalSend(sockaddr_storage& target, socklen_t addr_len,
       const u32 delay = NextRandom(chaos_rng_state_) %
                         (chaos_options_.jitter_ms + 1u);
       if (delay > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        base::SleepForMilliseconds(delay);
       }
     }
     return send_direct(out_target, out_len, bytes, size);
@@ -461,7 +459,7 @@ i32 ZSocket::InternalSend(sockaddr_storage& target, socklen_t addr_len,
 }
 
 void ZSocket::SetChaosOptions(const ChaosOptions& options) {
-  std::lock_guard<std::mutex> lock(chaos_mutex_);
+  base::LockGuard<base::Mutex> lock(chaos_mutex_);
   chaos_options_ = options;
   if (chaos_options_.drop_percent > 100) {
     chaos_options_.drop_percent = 100;

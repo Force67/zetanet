@@ -2,10 +2,10 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_crypto_wrapper.h"
+#include <string.h>
 
-#include <cstring>
-
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/gcm.h>
@@ -22,6 +22,8 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/atomic.h>
+#include <base/containers/array.h>
 #include <base/logging.h>
 #endif
 
@@ -30,7 +32,9 @@ namespace {
 constexpr char kLogTag[] = "z-crypto";
 
 bool Sha256(const byte* data, mem_size size, base::Array<byte, 32>& out_hash) {
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  return false;
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
   const int starts_result = mbedtls_sha256_starts(&ctx, 0);
@@ -71,7 +75,9 @@ base::String BytesToHex(const byte* data, mem_size size) {
 bool HmacSha256(const byte* key, mem_size key_size,
                 const byte* data, mem_size data_size,
                 base::Array<byte, 32>& out_mac) {
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  return false;
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   if (!info) {
     return false;
@@ -101,7 +107,9 @@ bool ConstantTimeEquals(const base::String& lhs, const base::String& rhs) {
 }
 
 bool RandomBytes(byte* out, mem_size size) {
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  return false;
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   mbedtls_entropy_context entropy;
   mbedtls_ctr_drbg_context ctr_drbg;
   mbedtls_entropy_init(&entropy);
@@ -135,10 +143,14 @@ void ZCryptoContext::SetPreSharedKey(const base::StringRef& secret) {
     pre_shared_key_.assign(secret.data(), secret.size());
   }
   keys_initialized_ = false;
-  authenticated_.store(false, std::memory_order_release);
+  authenticated_.store(false, base::memory_order_release);
 }
 
 bool ZCryptoContext::InitializeKeyExchange() {
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  BASE_LOGE(kLogTag, "Encryption requested but zetanet was built without a crypto backend");
+  return false;
+#endif
   if (keys_initialized_) {
     return true;
   }
@@ -171,8 +183,8 @@ bool ZCryptoContext::InitializeKeyExchange() {
   if (initial_prefix == 0) {
     initial_prefix = 1;
   }
-  nonce_prefix_.store(initial_prefix, std::memory_order_relaxed);
-  nonce_counter_.store(0, std::memory_order_relaxed);
+  nonce_prefix_.store(initial_prefix, base::memory_order_relaxed);
+  nonce_counter_.store(0, base::memory_order_relaxed);
   
   return true;
 }
@@ -212,7 +224,7 @@ bool ZCryptoContext::VerifyServerResponse(const base::String& server_proof) {
     return false;
   }
   
-  authenticated_.store(true, std::memory_order_release);
+  authenticated_.store(true, base::memory_order_release);
   return true;
 }
 
@@ -245,16 +257,16 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
 
   // Per-session prefix + packet counter keep nonces unique without a syscall.
   byte nonce[12]{};
-  const u32 nonce_prefix = nonce_prefix_.load(std::memory_order_relaxed);
-  u64 counter = nonce_counter_.fetch_add(1, std::memory_order_relaxed);
-  std::memcpy(nonce, &nonce_prefix, sizeof(nonce_prefix));
-  std::memcpy(nonce + sizeof(nonce_prefix), &counter, sizeof(counter));
+  const u32 nonce_prefix = nonce_prefix_.load(base::memory_order_relaxed);
+  u64 counter = nonce_counter_.fetch_add(1, base::memory_order_relaxed);
+  memcpy(nonce, &nonce_prefix, sizeof(nonce_prefix));
+  memcpy(nonce + sizeof(nonce_prefix), &counter, sizeof(counter));
 
   const mem_size tag_size = kGcmTagSize;
   const mem_size ciphertext_size = plaintext.size();
 
   encrypted.resize(sizeof(nonce) + ciphertext_size + tag_size);
-  std::memcpy(encrypted.data(), nonce, sizeof(nonce));
+  memcpy(encrypted.data(), nonce, sizeof(nonce));
 
   if (plaintext.empty()) {
     encrypted.clear();
@@ -262,7 +274,9 @@ bool ZCryptoContext::EncryptPayload(const base::Span<byte>& plaintext,
     return false;
   }
 
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  return false;
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   mbedtls_gcm_context gcm;
   mbedtls_gcm_init(&gcm);
 
@@ -367,7 +381,9 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
   
   plaintext.resize(ciphertext_size);
 
-#if defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
+#if defined(ZNET_CRYPTO_BACKEND_NONE)
+  return false;
+#elif defined(ZNET_CRYPTO_BACKEND_MBEDTLS)
   mbedtls_gcm_context gcm;
   mbedtls_gcm_init(&gcm);
   int result = mbedtls_gcm_setkey(
@@ -441,7 +457,7 @@ bool ZCryptoContext::DecryptPayload(const base::Span<byte>& encrypted_data,
 }
 
 bool ZCryptoContext::IsAuthenticated() const {
-  return authenticated_.load(std::memory_order_acquire);
+  return authenticated_.load(base::memory_order_acquire);
 }
 
 base::String ZCryptoContext::GenerateServerProof() {
@@ -486,7 +502,7 @@ bool ZCryptoContext::VerifyClientProof(const base::String& client_proof) {
     return false;
   }
 
-  authenticated_.store(true, std::memory_order_release);
+  authenticated_.store(true, base::memory_order_release);
   return true;
 }
 
@@ -532,7 +548,7 @@ bool ZCryptoContext::DeriveSessionKeys() {
     return false;
   }
   u32 nonce_prefix = 0;
-  std::memcpy(&nonce_prefix, nonce_hash.data(), sizeof(nonce_prefix));
+  memcpy(&nonce_prefix, nonce_hash.data(), sizeof(nonce_prefix));
   const bool local_first =
       (local_nonce_ < server_nonce_) ||
       (local_nonce_ == server_nonce_ && local_challenge_ < server_challenge_);
@@ -544,8 +560,8 @@ bool ZCryptoContext::DeriveSessionKeys() {
 
   encryption_key_ = new_enc_key;
   authentication_key_ = new_auth_key;
-  nonce_prefix_.store(nonce_prefix, std::memory_order_relaxed);
-  nonce_counter_.store(0, std::memory_order_relaxed);
+  nonce_prefix_.store(nonce_prefix, base::memory_order_relaxed);
+  nonce_counter_.store(0, base::memory_order_relaxed);
   return true;
 }
 
@@ -582,7 +598,7 @@ bool ZCryptoContext::DeriveKeyMaterial(const base::String& secret) {
   enc_seed[0] = 'e';
   enc_seed[1] = 'n';
   enc_seed[2] = 'c';
-  std::memcpy(enc_seed.data() + 3, master_key.data(), master_key.size());
+  memcpy(enc_seed.data() + 3, master_key.data(), master_key.size());
   if (!Sha256(enc_seed.data(), enc_seed.size(), encryption_key_)) {
     return false;
   }
@@ -592,7 +608,7 @@ bool ZCryptoContext::DeriveKeyMaterial(const base::String& secret) {
   auth_seed[1] = 'u';
   auth_seed[2] = 't';
   auth_seed[3] = 'h';
-  std::memcpy(auth_seed.data() + 4, master_key.data(), master_key.size());
+  memcpy(auth_seed.data() + 4, master_key.data(), master_key.size());
   return Sha256(auth_seed.data(), auth_seed.size(), authentication_key_);
 }
 

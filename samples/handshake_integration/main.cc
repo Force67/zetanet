@@ -6,15 +6,16 @@
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
+#else
+#include <base/atomic.h>
+#include <base/strings/xstring.h>
+#include <base/threading/thread.h>
+#include <base/time/time.h>
 #endif
 
-#include <atomic>
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <iostream>
-#include <string>
-#include <thread>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 namespace {
 
@@ -36,7 +37,7 @@ constexpr char kTestPsk[] = "0123456789abcdef0123456789abcdef";
 const base::StringRef kTestPskRef{kTestPsk, sizeof(kTestPsk) - 1};
 
 u16 NextPort() {
-  static std::atomic<u16> next_port{18050};
+  static base::Atomic<u16> next_port{18050};
   return static_cast<u16>(next_port.fetch_add(1));
 }
 
@@ -90,13 +91,13 @@ ZClient::ConnectionOptions MakeClientOptions(
 
 template <typename Fn>
 bool WaitForCondition(int timeout_ms, Fn&& fn) {
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-  while (std::chrono::steady_clock::now() < deadline) {
+  const base::TimeTicks deadline =
+      base::TimeTicks::Now() + base::Milliseconds(timeout_ms);
+  while (base::TimeTicks::Now() < deadline) {
     if (fn()) {
       return true;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    base::SleepForMilliseconds(1);
   }
   return fn();
 }
@@ -250,14 +251,14 @@ bool TestHandshakeSuccess() {
   ZServer server;
   server.DisableAdaptiveThreading();
   if (!server.Begin(port, MakeServerOptions(false, false))) {
-    std::cerr << "TestHandshakeSuccess: failed to start server\n";
+    fprintf(stderr, "TestHandshakeSuccess: failed to start server\n");
     return false;
   }
 
   ZClient client;
   client.DisableAdaptiveThreading();
   if (!client.Connect("127.0.0.1", port, MakeClientOptions(false, false))) {
-    std::cerr << "TestHandshakeSuccess: failed to connect client\n";
+    fprintf(stderr, "TestHandshakeSuccess: failed to connect client\n");
     server.Deinit();
     return false;
   }
@@ -282,13 +283,13 @@ bool TestProtocolVersionMismatchReject() {
   ZServer server;
   server.DisableAdaptiveThreading();
   if (!server.Begin(port, MakeServerOptions(false, false))) {
-    std::cerr << "TestProtocolVersionMismatchReject: failed to start server\n";
+    fprintf(stderr, "TestProtocolVersionMismatchReject: failed to start server\n");
     return false;
   }
 
   ZSocket raw_client;
   if (!raw_client.CreateClient("127.0.0.1", port, false, 0)) {
-    std::cerr << "TestProtocolVersionMismatchReject: failed to create raw client\n";
+    fprintf(stderr, "TestProtocolVersionMismatchReject: failed to create raw client\n");
     server.Deinit();
     return false;
   }
@@ -313,7 +314,7 @@ bool TestProtocolVersionMismatchReject() {
   OutgoingPacket out(tx::network::ZPeerId::to_server, PacketType::ClientHello,
                      PacketChannelType::Control, flags, writer.data());
   if (!BuildAndSend(raw_client, out, 1)) {
-    std::cerr << "TestProtocolVersionMismatchReject: failed to send ClientHello\n";
+    fprintf(stderr, "TestProtocolVersionMismatchReject: failed to send ClientHello\n");
     raw_client.DestroySocket();
     server.Deinit();
     return false;
@@ -333,13 +334,13 @@ bool TestFeatureMismatchReject() {
   ZServer server;
   server.DisableAdaptiveThreading();
   if (!server.Begin(port, MakeServerOptions(true, false, kTestPskRef))) {
-    std::cerr << "TestFeatureMismatchReject: failed to start server\n";
+    fprintf(stderr, "TestFeatureMismatchReject: failed to start server\n");
     return false;
   }
 
   ZSocket raw_client;
   if (!raw_client.CreateClient("127.0.0.1", port, false, 0)) {
-    std::cerr << "TestFeatureMismatchReject: failed to create raw client\n";
+    fprintf(stderr, "TestFeatureMismatchReject: failed to create raw client\n");
     server.Deinit();
     return false;
   }
@@ -364,7 +365,7 @@ bool TestFeatureMismatchReject() {
   OutgoingPacket out(tx::network::ZPeerId::to_server, PacketType::ClientHello,
                      PacketChannelType::Control, flags, writer.data());
   if (!BuildAndSend(raw_client, out, 1)) {
-    std::cerr << "TestFeatureMismatchReject: failed to send ClientHello\n";
+    fprintf(stderr, "TestFeatureMismatchReject: failed to send ClientHello\n");
     raw_client.DestroySocket();
     server.Deinit();
     return false;
@@ -383,14 +384,14 @@ bool TestClientHandshakeTimeout() {
   const u16 port = NextPort();
   SilentServer silent_server;
   if (!silent_server.Start(port)) {
-    std::cerr << "TestClientHandshakeTimeout: failed to start silent server\n";
+    fprintf(stderr, "TestClientHandshakeTimeout: failed to start silent server\n");
     return false;
   }
 
   ZClient client;
   client.DisableAdaptiveThreading();
   if (!client.Connect("127.0.0.1", port, MakeClientOptions(false, false))) {
-    std::cerr << "TestClientHandshakeTimeout: failed to connect client\n";
+    fprintf(stderr, "TestClientHandshakeTimeout: failed to connect client\n");
     silent_server.Stop();
     return false;
   }
@@ -414,21 +415,21 @@ bool TestAuthenticationFailureReject() {
   ZServer server;
   server.DisableAdaptiveThreading();
   if (!server.Begin(port, MakeServerOptions(true, false, kTestPskRef))) {
-    std::cerr << "TestAuthenticationFailureReject: failed to start server\n";
+    fprintf(stderr, "TestAuthenticationFailureReject: failed to start server\n");
     return false;
   }
 
   ZSocket raw_client;
   if (!raw_client.CreateClient("127.0.0.1", port, false, 0)) {
-    std::cerr << "TestAuthenticationFailureReject: failed to create raw client\n";
+    fprintf(stderr, "TestAuthenticationFailureReject: failed to create raw client\n");
     server.Deinit();
     return false;
   }
 
   {
     tx::network::PacketWriter writer;
-    const std::string client_key = "dummy-client-nonce";
-    const std::string client_challenge = "dummy-client-challenge";
+    const base::String client_key = "dummy-client-nonce";
+    const base::String client_challenge = "dummy-client-challenge";
     sys::ClientHello hello{
         .protocol_version = sys::kProtocolVersionCurrent,
         .feature_flags = static_cast<u32>(sys::kFeatureClockSync |
@@ -454,7 +455,7 @@ bool TestAuthenticationFailureReject() {
     OutgoingPacket out(tx::network::ZPeerId::to_server, PacketType::ClientHello,
                        PacketChannelType::Control, flags, writer.data());
     if (!BuildAndSend(raw_client, out, 1)) {
-      std::cerr << "TestAuthenticationFailureReject: failed to send ClientHello\n";
+      fprintf(stderr, "TestAuthenticationFailureReject: failed to send ClientHello\n");
       raw_client.DestroySocket();
       server.Deinit();
       return false;
@@ -465,7 +466,7 @@ bool TestAuthenticationFailureReject() {
       WaitForPacketType(raw_client, [&]() { server.Update(); },
                         PacketType::ServerHello, 3000);
   if (!saw_server_hello) {
-    std::cerr << "TestAuthenticationFailureReject: did not receive ServerHello\n";
+    fprintf(stderr, "TestAuthenticationFailureReject: did not receive ServerHello\n");
     raw_client.DestroySocket();
     server.Deinit();
     return false;
@@ -473,7 +474,7 @@ bool TestAuthenticationFailureReject() {
 
   {
     tx::network::PacketWriter writer;
-    const std::string bogus_proof = "invalid-proof";
+    const base::String bogus_proof = "invalid-proof";
     sys::ClientAuthProof proof_hdr{.proof_len = static_cast<u8>(bogus_proof.size())};
     writer.Put(proof_hdr);
     writer.PutList(base::Span<byte>(
@@ -490,7 +491,7 @@ bool TestAuthenticationFailureReject() {
                        PacketType::ClientAuthProof, PacketChannelType::Control,
                        flags, writer.data());
     if (!BuildAndSend(raw_client, out, 2)) {
-      std::cerr << "TestAuthenticationFailureReject: failed to send ClientAuthProof\n";
+      fprintf(stderr, "TestAuthenticationFailureReject: failed to send ClientAuthProof\n");
       raw_client.DestroySocket();
       server.Deinit();
       return false;
@@ -510,14 +511,14 @@ bool TestClientMapsServerGoodbyeReason() {
   const u16 port = NextPort();
   RejectingServer rejector;
   if (!rejector.Start(port)) {
-    std::cerr << "TestClientMapsServerGoodbyeReason: failed to start rejector\n";
+    fprintf(stderr, "TestClientMapsServerGoodbyeReason: failed to start rejector\n");
     return false;
   }
 
   ZClient client;
   client.DisableAdaptiveThreading();
   if (!client.Connect("127.0.0.1", port, MakeClientOptions(false, false))) {
-    std::cerr << "TestClientMapsServerGoodbyeReason: failed to connect client\n";
+    fprintf(stderr, "TestClientMapsServerGoodbyeReason: failed to connect client\n");
     rejector.Stop();
     return false;
   }
@@ -538,6 +539,10 @@ bool TestClientMapsServerGoodbyeReason() {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Results interleave with the library's stderr logs; line buffering keeps
+  // them in order when stdout is a pipe.
+  setvbuf(stdout, nullptr, _IOLBF, 0);
+
   struct TestCase {
     const char* name;
     bool (*fn)();
@@ -557,32 +562,32 @@ int main(int argc, char** argv) {
 
   for (int i = 1; i < argc; ++i) {
     const char* arg = argv[i];
-    if (std::strcmp(arg, "--chaos-drop") == 0 && i + 1 < argc) {
-      g_chaos.drop_percent = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+    if (strcmp(arg, "--chaos-drop") == 0 && i + 1 < argc) {
+      g_chaos.drop_percent = static_cast<u32>(strtoul(argv[++i], nullptr, 10));
       continue;
     }
-    if (std::strcmp(arg, "--chaos-reorder") == 0 && i + 1 < argc) {
+    if (strcmp(arg, "--chaos-reorder") == 0 && i + 1 < argc) {
       g_chaos.reorder_percent =
-          static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+          static_cast<u32>(strtoul(argv[++i], nullptr, 10));
       continue;
     }
-    if (std::strcmp(arg, "--chaos-jitter") == 0 && i + 1 < argc) {
-      g_chaos.jitter_ms = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+    if (strcmp(arg, "--chaos-jitter") == 0 && i + 1 < argc) {
+      g_chaos.jitter_ms = static_cast<u32>(strtoul(argv[++i], nullptr, 10));
       continue;
     }
-    if (std::strcmp(arg, "--chaos-seed") == 0 && i + 1 < argc) {
-      g_chaos.seed = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+    if (strcmp(arg, "--chaos-seed") == 0 && i + 1 < argc) {
+      g_chaos.seed = static_cast<u32>(strtoul(argv[++i], nullptr, 10));
       continue;
     }
-    if (std::strcmp(arg, "--help") == 0) {
-      std::cout << "HandshakeIntegration options:\n"
-                << "  --chaos-drop <0..100>\n"
-                << "  --chaos-reorder <0..100>\n"
-                << "  --chaos-jitter <ms>\n"
-                << "  --chaos-seed <value>\n";
+    if (strcmp(arg, "--help") == 0) {
+      printf("HandshakeIntegration options:\n"
+             "  --chaos-drop <0..100>\n"
+             "  --chaos-reorder <0..100>\n"
+             "  --chaos-jitter <ms>\n"
+             "  --chaos-seed <value>\n");
       return 0;
     }
-    std::cerr << "Unknown argument: " << arg << std::endl;
+    fprintf(stderr, "Unknown argument: %s\n", arg);
     return 2;
   }
   if (g_chaos.seed == 0) {
@@ -604,16 +609,16 @@ int main(int argc, char** argv) {
   for (size_t i = 0; i < test_count; ++i) {
     const TestCase& test = tests[i];
     const bool ok = test.fn();
-    std::cout << (ok ? "[PASS] " : "[FAIL] ") << test.name << std::endl;
+    printf("%s%s\n", ok ? "[PASS] " : "[FAIL] ", test.name);
     if (!ok) {
       ++failures;
     }
   }
 
   if (failures > 0) {
-    std::cerr << "Handshake integration failures: " << failures << std::endl;
+    fprintf(stderr, "Handshake integration failures: %d\n", failures);
     return 1;
   }
-  std::cout << "All handshake integration tests passed." << std::endl;
+  printf("All handshake integration tests passed.\n");
   return 0;
 }

@@ -1,11 +1,10 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
-#include <cstring>
+#include <stdint.h>
+#include <string.h>
 
-#include <limits>
 #include <new>
-#include <type_traits>
 
 #include "z_wire_le.h"
 
@@ -15,19 +14,26 @@
 #include <base/arch.h>
 #include <base/containers/span.h>
 #include <base/containers/vector.h>
+#include <base/meta/traits.h>
 #endif
 
 namespace tx::network {
 namespace detail {
-template <typename T, bool IsEnum = std::is_enum<T>::value>
+template <typename T, bool IsEnum = base::is_enum_v<T>>
 struct WireRawType {
   using type = T;
 };
 
 template <typename T>
 struct WireRawType<T, true> {
-  using type = typename std::underlying_type<T>::type;
+  using type = base::underlying_type_t<T>;
 };
+
+// Arithmetic and enum values take the little-endian scalar path. Pointers,
+// the rest of std::is_scalar, are trivially copyable and land in the memcpy
+// overload, which writes the same bytes the scalar path's memcpy fallback did.
+template <typename T>
+inline constexpr bool kIsWireScalar = base::is_arithmetic_v<T> || base::is_enum_v<T>;
 }  // namespace detail
 
 class PacketWriter {
@@ -43,7 +49,7 @@ class PacketWriter {
     }
     mem_size new_capacity = capacity_ == 0 ? 1 : capacity_;
     while (new_capacity < required) {
-      if (new_capacity > std::numeric_limits<mem_size>::max() / 2) {
+      if (new_capacity > static_cast<mem_size>(-1) / 2) {
         new_capacity = required;
         break;
       }
@@ -56,7 +62,7 @@ class PacketWriter {
     if (!new_buffer) {
       return false;
     }
-    std::memcpy(new_buffer, buffer_, offset_);
+    memcpy(new_buffer, buffer_, offset_);
     delete[] buffer_;
     buffer_ = new_buffer;
     capacity_ = new_capacity;
@@ -65,18 +71,18 @@ class PacketWriter {
 
   // Writes scalar values in little-endian byte order.
   template <typename T>
-  typename std::enable_if<std::is_scalar<T>::value, bool>::type Put(
+  base::enable_if_t<detail::kIsWireScalar<T>, bool> Put(
       const T value) {
-    if (sizeof(T) > std::numeric_limits<mem_size>::max() - offset_ ||
+    if (sizeof(T) > static_cast<mem_size>(-1) - offset_ ||
         !EnsureCapacity(offset_ + sizeof(T))) {
       return false;
     }
-    if constexpr (std::is_integral<T>::value || std::is_enum<T>::value) {
+    if constexpr (base::is_integral_v<T> || base::is_enum_v<T>) {
       using RawT = typename detail::WireRawType<T>::type;
-      using UnsignedRawT = typename std::make_unsigned<RawT>::type;
+      using UnsignedRawT = base::make_unsigned_t<RawT>;
       UnsignedRawT bits = 0;
       const RawT raw_value = static_cast<RawT>(value);
-      std::memcpy(&bits, &raw_value, sizeof(bits));
+      memcpy(&bits, &raw_value, sizeof(bits));
       if constexpr (sizeof(UnsignedRawT) == 1) {
         buffer_[offset_] = static_cast<byte>(bits);
       } else if constexpr (sizeof(UnsignedRawT) == 2) {
@@ -86,45 +92,43 @@ class PacketWriter {
       } else if constexpr (sizeof(UnsignedRawT) == 8) {
         wire_le::StoreU64(buffer_ + offset_, static_cast<u64>(bits));
       } else {
-        std::memcpy(buffer_ + offset_, &value, sizeof(T));
+        memcpy(buffer_ + offset_, &value, sizeof(T));
       }
     } else {
-      std::memcpy(buffer_ + offset_, &value, sizeof(T));
+      memcpy(buffer_ + offset_, &value, sizeof(T));
     }
     offset_ += sizeof(T);
     return true;
   }
 
   template <typename T>
-  typename std::enable_if<!std::is_scalar<T>::value &&
-                              std::is_trivially_copyable<T>::value,
-                          bool>::type
+  base::enable_if_t<!detail::kIsWireScalar<T> && base::is_trivially_copyable_v<T>, bool>
   Put(const T& type) {
-    if (sizeof(T) > std::numeric_limits<mem_size>::max() - offset_ ||
+    if (sizeof(T) > static_cast<mem_size>(-1) - offset_ ||
         !EnsureCapacity(offset_ + sizeof(T))) {
       return false;
     }
-    std::memcpy(buffer_ + offset_, &type, sizeof(T));
+    memcpy(buffer_ + offset_, &type, sizeof(T));
     offset_ += sizeof(T);
     return true;
   }
 
   bool PutS(const base::Span<byte>& data) {
-    if (data.size() > std::numeric_limits<mem_size>::max() - offset_ ||
+    if (data.size() > static_cast<mem_size>(-1) - offset_ ||
         !EnsureCapacity(offset_ + data.size())) {
       return false;
     }
-    std::memcpy(buffer_ + offset_, data.data(), data.size());
+    memcpy(buffer_ + offset_, data.data(), data.size());
     offset_ += data.size();
     return true;
   }
 
   bool PutList(const base::Span<byte>& data) {
-    if (data.size() > std::numeric_limits<u16>::max()) {
+    if (data.size() > UINT16_MAX) {
       return false;
     }
-    if (sizeof(u16) > std::numeric_limits<mem_size>::max() - offset_ ||
-        data.size() > std::numeric_limits<mem_size>::max() - offset_ - sizeof(u16) ||
+    if (sizeof(u16) > static_cast<mem_size>(-1) - offset_ ||
+        data.size() > static_cast<mem_size>(-1) - offset_ - sizeof(u16) ||
         !EnsureCapacity(offset_ + sizeof(u16) + data.size())) {
       return false;
     }
@@ -152,13 +156,13 @@ class PacketReader {
       : buffer_(buffer), capacity_(size), offset_(0) {}
 
   template <typename T>
-  typename std::enable_if<std::is_scalar<T>::value, bool>::type Read(T& value) {
+  base::enable_if_t<detail::kIsWireScalar<T>, bool> Read(T& value) {
     if (sizeof(T) > capacity_ - offset_) {
       return false;
     }
-    if constexpr (std::is_integral<T>::value || std::is_enum<T>::value) {
+    if constexpr (base::is_integral_v<T> || base::is_enum_v<T>) {
       using RawT = typename detail::WireRawType<T>::type;
-      using UnsignedRawT = typename std::make_unsigned<RawT>::type;
+      using UnsignedRawT = base::make_unsigned_t<RawT>;
       UnsignedRawT bits = 0;
       if constexpr (sizeof(UnsignedRawT) == 1) {
         bits = static_cast<UnsignedRawT>(buffer_[offset_]);
@@ -169,30 +173,28 @@ class PacketReader {
       } else if constexpr (sizeof(UnsignedRawT) == 8) {
         bits = static_cast<UnsignedRawT>(wire_le::LoadU64(buffer_ + offset_));
       } else {
-        std::memcpy(&value, buffer_ + offset_, sizeof(T));
+        memcpy(&value, buffer_ + offset_, sizeof(T));
         offset_ += sizeof(T);
         return true;
       }
       RawT raw_value{};
-      std::memcpy(&raw_value, &bits, sizeof(raw_value));
+      memcpy(&raw_value, &bits, sizeof(raw_value));
       value = static_cast<T>(raw_value);
     } else {
-      std::memcpy(&value, buffer_ + offset_, sizeof(T));
+      memcpy(&value, buffer_ + offset_, sizeof(T));
     }
     offset_ += sizeof(T);
     return true;
   }
 
   template <typename T>
-  typename std::enable_if<!std::is_scalar<T>::value &&
-                              std::is_trivially_copyable<T>::value,
-                          bool>::type
+  base::enable_if_t<!detail::kIsWireScalar<T> && base::is_trivially_copyable_v<T>, bool>
   Read(T& type) {
     if (sizeof(T) > capacity_ - offset_) {
       return false;
     }
 
-    std::memcpy(&type, buffer_ + offset_, sizeof(T));
+    memcpy(&type, buffer_ + offset_, sizeof(T));
     offset_ += sizeof(T);
     return true;
   }
@@ -202,7 +204,7 @@ class PacketReader {
       return false;
     }
 
-    std::memcpy((void*)data.data(), buffer_ + offset_, data.size());
+    memcpy((void*)data.data(), buffer_ + offset_, data.size());
     offset_ += data.size();
     return true;
   }

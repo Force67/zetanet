@@ -2,19 +2,22 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_client.h"
+#include <stdint.h>
 #include "z_system_command.h"
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/time/time.h>
+#include <base/memory/move.h>
 #include <base/logging.h>
 #endif
 
 namespace tx::network {
 static constexpr char kLogTag[] = "z-client";
-static constexpr auto kClockSyncInterval = std::chrono::milliseconds(1000);
-static constexpr auto kClientHelloRetryInterval = std::chrono::milliseconds(500);
-static constexpr auto kHandshakeTimeout = std::chrono::seconds(8);
+static constexpr auto kClockSyncInterval = base::Milliseconds(1000);
+static constexpr auto kClientHelloRetryInterval = base::Milliseconds(500);
+static constexpr auto kHandshakeTimeout = base::Seconds(8);
 
 namespace {
 bool ReadListWithExpectedSize(PacketReader& reader,
@@ -63,10 +66,10 @@ bool ZClient::Connect(const base::StringRef address,
     handshake_failure_reason_ = HandshakeFailureReason::kNone;
     negotiated_protocol_version_ = 0;
     negotiated_feature_flags_ = 0;
-    handshake_start_time_ = base::Clock::now();
-    next_clock_sync_request_time_ = base::Clock::time_point{};
+    handshake_start_time_ = base::TimeTicks::Now();
+    next_clock_sync_request_time_ = base::TimeTicks();
     next_client_hello_retry_time_ =
-        base::Clock::now() + kClientHelloRetryInterval;
+        base::TimeTicks::Now() + kClientHelloRetryInterval;
   }
   return result;
 }
@@ -79,9 +82,9 @@ void ZClient::Disconnect() {
   } else if (handshake_phase_ == HandshakePhase::kConnected) {
     handshake_phase_ = HandshakePhase::kIdle;
   }
-  next_clock_sync_request_time_ = base::Clock::time_point{};
-  next_client_hello_retry_time_ = base::Clock::time_point{};
-  handshake_start_time_ = base::Clock::time_point{};
+  next_clock_sync_request_time_ = base::TimeTicks();
+  next_client_hello_retry_time_ = base::TimeTicks();
+  handshake_start_time_ = base::TimeTicks();
   negotiated_protocol_version_ = 0;
   negotiated_feature_flags_ = 0;
 }
@@ -105,8 +108,8 @@ void ZClient::Update() {
       break;
     case ZAsyncTransportLayer::State::kConnecting:
       {
-        const auto now = base::Clock::now();
-        if (handshake_start_time_.time_since_epoch().count() != 0 &&
+        const auto now = base::TimeTicks::Now();
+        if (!handshake_start_time_.is_null() &&
             now - handshake_start_time_ >= kHandshakeTimeout) {
           MarkHandshakeFailure(HandshakeFailureReason::kTimeout,
                                "Handshake timed out waiting for ServerHello");
@@ -115,8 +118,8 @@ void ZClient::Update() {
         }
       }
       if (!packet_queue_.outgoing_thread_running()) {
-        const auto now = base::Clock::now();
-        if (next_client_hello_retry_time_.time_since_epoch().count() == 0 ||
+        const auto now = base::TimeTicks::Now();
+        if (next_client_hello_retry_time_.is_null() ||
             now >= next_client_hello_retry_time_) {
           SendClientHelloDirect();
           next_client_hello_retry_time_ = now + kClientHelloRetryInterval;
@@ -131,8 +134,8 @@ void ZClient::Update() {
         break;
       }
       {
-        const auto now = base::Clock::now();
-        if (next_clock_sync_request_time_.time_since_epoch().count() == 0 ||
+        const auto now = base::TimeTicks::Now();
+        if (next_clock_sync_request_time_.is_null() ||
             now >= next_clock_sync_request_time_) {
           SendClockSyncRequest();
           next_clock_sync_request_time_ = now + kClockSyncInterval;
@@ -162,7 +165,7 @@ void ZClient::SendMessage(const ZPeerId id, const base::String& data) {
       id.id, PacketType::Message, PacketChannelType::Data, flags,
       base::Span<byte>(reinterpret_cast<const byte*>(data.data()),
                        data.size()));
-  Push(std::move(out));
+  Push(base::move(out));
 }
 
 void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
@@ -327,8 +330,8 @@ void ZClient::ProcessSystemMessage(const IncomingPacket& p) {
 
         state_ = State::kConnected;
         handshake_phase_ = HandshakePhase::kConnected;
-        next_client_hello_retry_time_ = base::Clock::time_point{};
-        handshake_start_time_ = base::Clock::time_point{};
+        next_client_hello_retry_time_ = base::TimeTicks();
+        handshake_start_time_ = base::TimeTicks();
       }
       break;
     }
@@ -445,7 +448,7 @@ void ZClient::SendClientHello() {
                            .reserved = 0};
   OutgoingPacket o(ZPeerId::to_server, PacketType::ClientHello,
                    PacketChannelType::Control, flags, writer.data());
-  Push(std::move(o));
+  Push(base::move(o));
 }
 
 void ZClient::SendClientHelloDirect() {
@@ -498,11 +501,11 @@ void ZClient::SendClientHelloDirect() {
                            .reserved = 0};
   OutgoingPacket o(ZPeerId::to_server, PacketType::ClientHello,
                    PacketChannelType::Control, flags, writer.data());
-  packet_queue_.PushDirect(std::move(o));
+  packet_queue_.PushDirect(base::move(o));
 }
 
 void ZClient::SendClientAuthProof(const base::String& proof) {
-  if (proof.size() > std::numeric_limits<u8>::max()) {
+  if (proof.size() > UINT8_MAX) {
     return;
   }
   system_commands::ClientAuthProof request{
@@ -521,7 +524,7 @@ void ZClient::SendClientAuthProof(const base::String& proof) {
                            .reserved = 0};
   OutgoingPacket o(ZPeerId::to_server, PacketType::ClientAuthProof,
                    PacketChannelType::Control, flags, writer.data());
-  Push(std::move(o));
+  Push(base::move(o));
 }
 
 void ZClient::SendClockSyncRequest() {
@@ -548,7 +551,7 @@ void ZClient::SendClockSyncRequest() {
                            .reserved = 0};
   OutgoingPacket out(ZPeerId::to_server, PacketType::ClockSyncRequest,
                      PacketChannelType::Control, flags, writer.data());
-  Push(std::move(out));
+  Push(base::move(out));
 }
 
 u32 ZClient::BuildSupportedFeatureFlags() const {

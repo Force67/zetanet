@@ -16,6 +16,9 @@
 #endif
 
 namespace base {
+#ifdef ZNET_USE_STL
+inline namespace znet_stl {
+#endif
 
 // Epoch-based reclamation. A node is freed only once every thread that could
 // hold a pointer to it has exited its read-side critical section.
@@ -640,4 +643,7 @@ class LockFreeOrderedHashMap {
   }
 };
 
+#ifdef ZNET_USE_STL
+}  // namespace znet_stl
+#endif
 }  // namespace base

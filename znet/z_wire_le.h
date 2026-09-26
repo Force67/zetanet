@@ -1,9 +1,7 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
-
-#include <cstddef>
-#include <cstring>
+#include <string.h>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -110,34 +108,34 @@ inline u64 LeToHost64(const u64 value) { return HostToLe64(value); }
 
 inline void StoreU16(byte* out, const u16 value) {
   const u16 encoded = HostToLe16(value);
-  std::memcpy(out, &encoded, sizeof(encoded));
+  memcpy(out, &encoded, sizeof(encoded));
 }
 
 inline void StoreU32(byte* out, const u32 value) {
   const u32 encoded = HostToLe32(value);
-  std::memcpy(out, &encoded, sizeof(encoded));
+  memcpy(out, &encoded, sizeof(encoded));
 }
 
 inline void StoreU64(byte* out, const u64 value) {
   const u64 encoded = HostToLe64(value);
-  std::memcpy(out, &encoded, sizeof(encoded));
+  memcpy(out, &encoded, sizeof(encoded));
 }
 
 inline u16 LoadU16(const byte* data) {
   u16 encoded = 0;
-  std::memcpy(&encoded, data, sizeof(encoded));
+  memcpy(&encoded, data, sizeof(encoded));
   return LeToHost16(encoded);
 }
 
 inline u32 LoadU32(const byte* data) {
   u32 encoded = 0;
-  std::memcpy(&encoded, data, sizeof(encoded));
+  memcpy(&encoded, data, sizeof(encoded));
   return LeToHost32(encoded);
 }
 
 inline u64 LoadU64(const byte* data) {
   u64 encoded = 0;
-  std::memcpy(&encoded, data, sizeof(encoded));
+  memcpy(&encoded, data, sizeof(encoded));
   return LeToHost64(encoded);
 }
 

@@ -2,8 +2,6 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <array>
-#include <map>
 #include <znet/z_packets.h>
 #include <znet/z_task_executor.h>
 #include <znet/z_clock.h>
@@ -11,6 +9,15 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/thread.h>
+#include <base/memory/unique_pointer.h>
+#include <base/time/time.h>
+#include <base/atomic.h>
+#include <base/memory/move.h>
+#include <base/containers/array.h>
 #include <base/memory/unique_pointer.h>
 #include <base/containers/mpsc_queue.h>
 #include <base/containers/lock_free_ordered_map.h>
@@ -23,10 +30,6 @@
 #include <znet/z_packet_dispatcher.h>
 #include <znet/z_packet_receiver.h>
 #include <znet/z_packet_priority_queue.h>
-
-#include <thread>
-#include <condition_variable>
-#include <mutex>
 
 namespace tx::network {
 
@@ -76,23 +79,23 @@ class ZPacketQueue {
     congestion_control_config_ = config;
   }
   mem_size GetCongestionScalePerMille() const {
-    return congestion_scale_per_mille_.load(std::memory_order_relaxed);
+    return congestion_scale_per_mille_.load(base::memory_order_relaxed);
   }
 
-  // Atomics rather than thread_.joinable(): those are read from the receive
-  // thread while another thread may be assigning or joining the std::thread
-  // object, which would race on its handle.
+  // Atomics rather than the thread pointers: those are read from the receive
+  // thread while another thread may be starting or joining the thread
+  // object, which would race on it.
   bool incoming_thread_running() const {
-    return incoming_thread_active_.load(std::memory_order_acquire);
+    return incoming_thread_active_.load(base::memory_order_acquire);
   }
 
   bool outgoing_thread_running() const {
-    return outgoing_thread_active_.load(std::memory_order_acquire);
+    return outgoing_thread_active_.load(base::memory_order_acquire);
   }
 
   void Push(OutgoingPacket&& package_move_in) {
     if (!outgoing_thread_running()) {
-      PushDirect(std::move(package_move_in));
+      PushDirect(base::move(package_move_in));
       return;
     }
     if (!CheckRateLimit(package_move_in.heap_data_size)) {
@@ -102,18 +105,18 @@ class ZPacketQueue {
     const mem_size payload_bytes = package_move_in.heap_data_size;
     auto& queue = GetChannelQueue(package_move_in.channel);
     PacketPriority priority = (PacketPriority)package_move_in.flags.priority;
-    queue.enqueue(std::move(package_move_in), priority);
+    queue.enqueue(base::move(package_move_in), priority);
     const mem_size channel_index = static_cast<mem_size>(channel);
     if (channel_index < channel_outgoing_bytes_.size()) {
       channel_outgoing_bytes_[channel_index].fetch_add(payload_bytes,
-                                                       std::memory_order_relaxed);
+                                                       base::memory_order_relaxed);
     }
     // Notify only while the outgoing thread is sleeping. Taking the mutex
     // closes the window between the consumer's last emptiness re-check and
     // its cv wait, so the wakeup cannot be lost.
-    if (outgoing_thread_sleeping_.load(std::memory_order_seq_cst)) {
-      std::lock_guard<std::mutex> lock(outgoing_wakeup_mutex_);
-      outgoing_wakeup_cv_.notify_one();
+    if (outgoing_thread_sleeping_.load(base::memory_order_seq_cst)) {
+      base::LockGuard<base::Mutex> lock(outgoing_wakeup_mutex_);
+      outgoing_wakeup_cv_.NotifyOne();
     }
   }
 
@@ -158,15 +161,15 @@ class ZPacketQueue {
     if (channel_index >= channel_outgoing_bytes_.size()) {
       return 0;
     }
-    return channel_outgoing_bytes_[channel_index].load(std::memory_order_relaxed);
+    return channel_outgoing_bytes_[channel_index].load(base::memory_order_relaxed);
   }
 
   mem_size GetApproxAwaitingAckPacketCount() const {
-    return awaiting_ack_packet_count_.load(std::memory_order_relaxed);
+    return awaiting_ack_packet_count_.load(base::memory_order_relaxed);
   }
 
   mem_size GetApproxAwaitingAckBytes() const {
-    return awaiting_ack_bytes_.load(std::memory_order_relaxed);
+    return awaiting_ack_bytes_.load(base::memory_order_relaxed);
   }
 
  private:
@@ -176,7 +179,7 @@ class ZPacketQueue {
   void OnReliablePacketAcknowledged();
   void OnReliablePacketRetransmit();
   void OnReliablePacketDrop();
-  void MaybeApplyCongestionRecovery(base::Clock::time_point now_tp);
+  void MaybeApplyCongestionRecovery(base::TimeTicks now_tp);
   void EnsureDispatchExecutor();
   void WaitForPendingDispatchTasks();
   void TrackDispatchTaskCompletion();
@@ -202,8 +205,9 @@ class ZPacketQueue {
   tx::network::ZPeerMapping& peer_list_;
   ZCryptoContext* crypto_context_{nullptr};
 
-  std::thread outgoing_thread_;
-  std::thread incoming_thread_;
+  // Null when not running. base::Thread is not movable, hence the pointer.
+  base::UniquePointer<base::Thread> outgoing_thread_;
+  base::UniquePointer<base::Thread> incoming_thread_;
 
   // Indexed by PacketChannelType.
   base::Array<PriorityMPSCQueue<OutgoingPacket>, kChannelCount>
@@ -223,11 +227,11 @@ class ZPacketQueue {
   mem_size built_in_dispatch_max_queued_tasks_{0};
 
   base::Atomic<mem_size> pending_dispatch_tasks_{0};
-  std::mutex dispatch_wait_mutex_;
-  std::condition_variable dispatch_wait_cv_;
+  base::Mutex dispatch_wait_mutex_;
+  base::ConditionVariable dispatch_wait_cv_;
 
-  std::mutex outgoing_wakeup_mutex_;
-  std::condition_variable outgoing_wakeup_cv_;
+  base::Mutex outgoing_wakeup_mutex_;
+  base::ConditionVariable outgoing_wakeup_cv_;
 
   base::Array<base::Atomic<mem_size>, 2> channel_outgoing_bytes_{};
   base::Atomic<mem_size> awaiting_ack_packet_count_{0};
@@ -240,15 +244,15 @@ class ZPacketQueue {
 
   RateLimitConfig rate_limit_config_;
   // Guards rate_limit_window_start_, shared by all producer threads.
-  std::mutex rate_limit_window_mutex_;
+  base::Mutex rate_limit_window_mutex_;
   base::Atomic<mem_size> packets_sent_this_second_{0};
   base::Atomic<mem_size> bytes_sent_this_second_{0};
   base::Atomic<mem_size> burst_tokens_{0};
   CongestionControlConfig congestion_control_config_;
   base::Atomic<mem_size> congestion_scale_per_mille_{1000};
   base::Atomic<mem_size> ack_events_since_adjust_{0};
-  base::Clock::time_point next_congestion_recovery_time_{};
-  base::Clock::time_point rate_limit_window_start_;
+  base::TimeTicks next_congestion_recovery_time_{};
+  base::TimeTicks rate_limit_window_start_;
   u32 gc_counter_{0};
 };
 }  // namespace tx::network

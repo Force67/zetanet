@@ -1,8 +1,7 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
-
-#include <limits>
+#include <limits.h>
 
 #include <lz4.h>
 
@@ -27,7 +26,7 @@ class ZCompressionContext {
       compressed.clear();
       return true;
     }
-    if (!input_data || input_size > static_cast<mem_size>(std::numeric_limits<int>::max())) {
+    if (!input_data || input_size > static_cast<mem_size>(INT_MAX)) {
       compressed.clear();
       return false;
     }
@@ -56,8 +55,8 @@ class ZCompressionContext {
                           mem_size original_size,
                           base::Vector<byte>& decompressed) {
     if (original_size > kMaxDecompressedSize ||
-        data_size > static_cast<mem_size>(std::numeric_limits<int>::max()) ||
-        original_size > static_cast<mem_size>(std::numeric_limits<int>::max())) {
+        data_size > static_cast<mem_size>(INT_MAX) ||
+        original_size > static_cast<mem_size>(INT_MAX)) {
       decompressed.clear();
       return false;
     }
@@ -70,9 +69,9 @@ class ZCompressionContext {
       return false;
     }
     const mem_size max_reasonable_output =
-        (data_size > (std::numeric_limits<mem_size>::max() - kExpansionSlackBytes) /
+        (data_size > (static_cast<mem_size>(-1) - kExpansionSlackBytes) /
                          kMaxExpansionRatio)
-            ? std::numeric_limits<mem_size>::max()
+            ? static_cast<mem_size>(-1)
             : data_size * kMaxExpansionRatio + kExpansionSlackBytes;
     if (original_size > max_reasonable_output) {
       decompressed.clear();

@@ -7,12 +7,12 @@
 #include <znet/z_file_write_interface.h>
 #include <znet/z_clock.h>
 
-#include <atomic>
-#include <chrono>
-
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
+#include <base/atomic.h>
 #include <base/containers/span.h>
 #include <base/containers/vector.h>
 #include <base/containers/map.h>
@@ -83,7 +83,7 @@ class ZFileTransporter {
   // Aborts any in-progress SendFile promptly (it returns false) and makes every
   // later SendFile a no-op. Lets an owner that drives SendFile on a worker thread
   // tear down without waiting out the backpressure timeout. One-way latch.
-  void RequestStopSending() { send_stop_requested_.store(true, std::memory_order_relaxed); }
+  void RequestStopSending() { send_stop_requested_.store(true, base::memory_order_relaxed); }
 
   bool BuildTransferChunkPayload(const TransferChunk& chunk,
                                  base::Vector<byte>& payload) const;
@@ -123,7 +123,7 @@ class ZFileTransporter {
     base::UniquePointer<IFileWriteHandle> temp_file;
     base::Vector<u8> received_chunks;
     u32 received_chunk_count{0};
-    base::Clock::time_point last_activity{};
+    base::TimeTicks last_activity{};
   };
 
   bool WaitForSendWindow(const TransferTuning& tuning) const;
@@ -142,6 +142,6 @@ class ZFileTransporter {
   IFileWriteFactory* file_write_factory_{nullptr};
   mutable base::Mutex stream_mutex_;
   base::Map<u64, StreamReceiveSession> active_streams_;
-  std::atomic<bool> send_stop_requested_{false};
+  base::Atomic<bool> send_stop_requested_{false};
 };
 }  // namespace tx::network

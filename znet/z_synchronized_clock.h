@@ -10,8 +10,6 @@
 #endif
 #include <znet/z_clock.h>
 
-#include <chrono>
-
 namespace tx::network {
 
 // Client-side monotonic estimate of a remote authority clock. Applies RTT/2

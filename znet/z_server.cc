@@ -2,12 +2,14 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_server.h"
-#include <cstring>
+#include <string.h>
 #include "z_system_command.h"
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/time/time.h>
+#include <base/memory/move.h>
 #include <base/logging.h>
 #endif
 
@@ -116,7 +118,7 @@ void ZServer::SendMessage(ZPeerId id, const base::String& data) {
       id.id, PacketType::Message, PacketChannelType::Data, flags,
       base::Span<byte>(reinterpret_cast<const byte*>(data.data()),
                        data.size()));
-  Push(std::move(out));
+  Push(base::move(out));
 }
 
 void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
@@ -124,14 +126,13 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
     case PacketType::ClientHello: {
       // Duplicate ClientHello can come from reliable retransmits; answer with
       // ServerHello again so a client that missed it can still finish.
-      if (handshaked_peers_.count(p.source_peer_id)) {
+      if (handshaked_peers_.contains(p.source_peer_id)) {
         u16 protocol_version = system_commands::kProtocolVersionCurrent;
         u32 negotiated_features =
             BuildSupportedFeatureFlags(crypto_context_ != nullptr, compression_enabled());
-        auto info_it = peer_handshake_info_.find(p.source_peer_id);
-        if (info_it != peer_handshake_info_.end()) {
-          protocol_version = info_it->second.protocol_version;
-          negotiated_features = info_it->second.negotiated_features;
+        if (const PeerHandshakeInfo* info = peer_handshake_info_.find(p.source_peer_id)) {
+          protocol_version = info->protocol_version;
+          negotiated_features = info->negotiated_features;
         }
         BASE_LOGI(kLogTag, "Re-sending ServerHello for duplicate ClientHello from peer {}",
                   p.source_peer_id);
@@ -241,7 +242,7 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
       }
 
       peer_handshake_info_[p.source_peer_id] = {
-          request.protocol_version, negotiated_features, base::Clock::now()};
+          request.protocol_version, negotiated_features, base::TimeTicks::Now()};
       handshaked_peers_.insert(p.source_peer_id);
       if (!crypto_context_) {
         authenticated_peers_.insert(p.source_peer_id);
@@ -266,7 +267,7 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
       if (!crypto_context_) {
         break;
       }
-      if (!handshaked_peers_.count(p.source_peer_id)) {
+      if (!handshaked_peers_.contains(p.source_peer_id)) {
         break;
       }
       PacketReader reader((byte*)p.data.data(), p.data.size());
@@ -298,16 +299,15 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
       break;
     }
     case PacketType::ClockSyncRequest: {
-      if (!handshaked_peers_.count(p.source_peer_id)) {
+      if (!handshaked_peers_.contains(p.source_peer_id)) {
         break;
       }
-      if (crypto_context_ && !authenticated_peers_.count(p.source_peer_id)) {
+      if (crypto_context_ && !authenticated_peers_.contains(p.source_peer_id)) {
         break;
       }
-      auto info_it = peer_handshake_info_.find(p.source_peer_id);
-      if (info_it != peer_handshake_info_.end() &&
-          (info_it->second.negotiated_features &
-           system_commands::kFeatureClockSync) == 0) {
+      const PeerHandshakeInfo* info = peer_handshake_info_.find(p.source_peer_id);
+      if (info &&
+          (info->negotiated_features & system_commands::kFeatureClockSync) == 0) {
         break;
       }
       const u64 server_receive_tick_ms = GetLocalClockTickMs();
@@ -328,9 +328,9 @@ void ZServer::ProcessSystemMessage(const IncomingPacket& p) {
 
 bool ZServer::IsPeerAuthorizedForData(u32 peer_id) const {
   if (crypto_context_) {
-    return authenticated_peers_.count(peer_id) != 0;
+    return authenticated_peers_.contains(peer_id);
   }
-  return handshaked_peers_.count(peer_id) != 0;
+  return handshaked_peers_.contains(peer_id);
 }
 
 void ZServer::SendServerHello(ZPeerId dest,
@@ -358,7 +358,7 @@ void ZServer::SendServerHello(ZPeerId dest,
       const auto key = crypto_context_->GetPublicKey();
       if (!key.empty()) {
         public_key_data.resize(key.length());
-        std::memcpy(public_key_data.data(), key.data(), key.length());
+        memcpy(public_key_data.data(), key.data(), key.length());
         pub_key_list_len = 1;
       }
       
@@ -407,7 +407,7 @@ void ZServer::SendServerHello(ZPeerId dest,
                            .reserved = 0};
   OutgoingPacket out(dest.id, PacketType::ServerHello,
                      PacketChannelType::Control, flags, writer.data());
-  Push(std::move(out));
+  Push(base::move(out));
 }
 
 void ZServer::SendServerGoodbye(ZPeerId dest,
@@ -425,7 +425,7 @@ void ZServer::SendServerGoodbye(ZPeerId dest,
                            .reserved = 0};
   OutgoingPacket out(dest.id, PacketType::ServerGoodbye,
                      PacketChannelType::Control, flags, writer.data());
-  packet_queue_.Push(std::move(out));
+  packet_queue_.Push(base::move(out));
 }
 
 void ZServer::SendClockSyncResponse(ZPeerId dest,
@@ -446,6 +446,6 @@ void ZServer::SendClockSyncResponse(ZPeerId dest,
                            .reserved = 0};
   OutgoingPacket out(dest.id, PacketType::ClockSyncResponse,
                      PacketChannelType::Control, flags, writer.data());
-  Push(std::move(out));
+  Push(base::move(out));
 }
 }  // namespace tx::network

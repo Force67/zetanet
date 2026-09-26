@@ -2,6 +2,10 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_public_api.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
 
 #include "z_client.h"
 #include "z_file_transporter.h"
@@ -12,16 +16,14 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/math/value_bounds.h>
+#include <base/memory/move.h>
+#include <base/containers/array.h>
 #include <base/logging.h>
 #ifndef ZNET_USE_STL
 #include <base/containers/queue.h>
 #endif
 #endif
-
-#include <array>
-#include <algorithm>
-#include <cstdio>
-#include <cstring>
 
 enum class ContextRole {
   kNone = 0,
@@ -69,7 +71,7 @@ base::StringRef MakeStringRef(const char* text) {
   if (!text) {
     return base::StringRef();
   }
-  return base::StringRef(text, std::strlen(text));
+  return base::StringRef(text, strlen(text));
 }
 
 ZNetConnectionState ToPublicState(ZAsyncTransportLayer::State state) {
@@ -218,9 +220,9 @@ void WriteCappedFileName(char* output, const base::String& file_name) {
     return;
   }
   const size_t copy_size =
-      std::min<size_t>(ZNET_MAX_FILE_NAME_LENGTH, file_name.size());
+      base::Min<size_t>(ZNET_MAX_FILE_NAME_LENGTH, file_name.size());
   if (copy_size > 0) {
-    std::memcpy(output, file_name.data(), copy_size);
+    memcpy(output, file_name.data(), copy_size);
   }
   output[copy_size] = '\0';
 }
@@ -281,7 +283,7 @@ const ZAsyncTransportLayer* ActiveTransport(const ZNetContext* context) {
 }
 
 void CopyDefaultTransportConfig(ZNetTransportConfig& config) {
-  std::memset(&config, 0, sizeof(config));
+  memset(&config, 0, sizeof(config));
   config.use_encryption = 0;
   config.pre_shared_key = nullptr;
   config.use_compression = 0;
@@ -779,6 +781,30 @@ ZNetRole ZNetGetRole(const ZNetContext* context) {
   return ZNET_ROLE_NONE;
 }
 
+ZNetResult ZNetGetPeerAddress(ZNetContext* context,
+                              uint32_t peer_id,
+                              char* ip_out,
+                              size_t ip_capacity,
+                              uint16_t* port_out) {
+  ZAsyncTransportLayer* transport = ActiveTransport(context);
+  if (!transport || !ip_out || ip_capacity == 0 || !port_out) {
+    return ZNET_RESULT_INVALID_ARGUMENT;
+  }
+  tx::network::ZSocket::Address address;
+  if (!transport->ResolvePeerAddress(peer_id, address)) {
+    return ZNET_RESULT_INVALID_ARGUMENT;
+  }
+  size_t length = 0;
+  while (length + 1 < ip_capacity && length < sizeof(address.ip) &&
+         address.ip[length] != '\0') {
+    ip_out[length] = address.ip[length];
+    ++length;
+  }
+  ip_out[length] = '\0';
+  *port_out = address.port;
+  return ZNET_RESULT_OK;
+}
+
 ZNetConnectionState ZNetGetConnectionState(const ZNetContext* context) {
   const ZAsyncTransportLayer* transport = ActiveTransport(context);
   if (!transport) {
@@ -1000,9 +1026,9 @@ ZNetResult ZNetSend(ZNetContext* context,
 
   bool enqueued = false;
   if (context->role == ContextRole::kP2P && context->p2p) {
-    enqueued = context->p2p->SendPacket(std::move(packet));
+    enqueued = context->p2p->SendPacket(base::move(packet));
   } else {
-    enqueued = transport->EnqueuePacket(std::move(packet));
+    enqueued = transport->EnqueuePacket(base::move(packet));
   }
   if (!enqueued) {
     return ReturnError(context, ZNET_RESULT_IO_ERROR, "Failed to enqueue packet");
@@ -1055,7 +1081,7 @@ ZNetResult ZNetPoll(ZNetContext* context,
 
   context->packet_payload_scratch.resize(packet.data.size());
   if (!packet.data.empty()) {
-    std::memcpy(context->packet_payload_scratch.data(), packet.data.data(),
+    memcpy(context->packet_payload_scratch.data(), packet.data.data(),
                 packet.data.size());
   }
 
@@ -1154,7 +1180,7 @@ ZNetResult ZNetReceiveFileChunk(ZNetContext* context,
   }
 
   if (out_status) {
-    std::memset(out_status, 0, sizeof(*out_status));
+    memset(out_status, 0, sizeof(*out_status));
     tx::network::ZFileTransporter::StreamProgress progress{};
     if (context->file_transporter->GetStreamProgress(chunk.transfer_id, progress)) {
       out_status->transfer_id = progress.transfer_id;
@@ -1259,7 +1285,7 @@ int ZNetGetPacketAllocatorStats(ZNetPacketAllocatorStats* out_stats) {
 void ZNetDumpPacketAllocatorStats(void) {
   ZNetPacketAllocatorStats stats{};
   if (!ZNetGetPacketAllocatorStats(&stats)) {
-    std::fprintf(stderr, "Allocator stats unavailable\n");
+    fprintf(stderr, "Allocator stats unavailable\n");
     return;
   }
   const double hit_rate =
@@ -1267,7 +1293,7 @@ void ZNetDumpPacketAllocatorStats(void) {
           ? 0.0
           : (100.0 * static_cast<double>(stats.pool_hits) /
              static_cast<double>(stats.total_requests));
-  std::fprintf(stderr,
+  fprintf(stderr,
                "PacketAllocator total=%zu hits=%zu hit_rate=%.2f%% fallback=%zu\n",
                stats.total_requests, stats.pool_hits, hit_rate,
                stats.fallback_allocations);
@@ -1278,7 +1304,7 @@ void ZNetDumpPacketAllocatorStats(void) {
     if (c.request_count == 0 && c.cached_free_blocks == 0) {
       continue;
     }
-    std::fprintf(stderr,
+    fprintf(stderr,
                  "  class[%zu] block=%zu req=%zu hit=%zu target=%zu free=%zu "
                  "ewma=%.2f\n",
                  i, c.block_size, c.request_count, c.hit_count,

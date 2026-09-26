@@ -1,19 +1,18 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
+#include <string.h>
+#include <math.h>
 
 // Mirror of BitWriter; see z_bit_writer.h for the wire format.
-
-#include <algorithm>
-#include <bit>
-#include <cmath>
-#include <cstring>
 
 #include <znet/z_wire_le.h>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/math/value_bounds.h>
+#include <base/math/math_helpers.h>
 #include <base/arch.h>
 #include <base/containers/span.h>
 #endif
@@ -53,14 +52,14 @@ class BitReader {
       if (byte_index + 8 <= byte_capacity) {
         // One unaligned LE load yields up to 64 - bit_in_byte bits.
         const u64 window = wire_le::LoadU64(buffer_ + byte_index) >> bit_in_byte;
-        const u32 take = std::min<u32>(bits - acc_bits, 64u - bit_in_byte);
+        const u32 take = base::Min<u32>(bits - acc_bits, 64u - bit_in_byte);
         const u64 mask =
             (take == 64) ? ~u64{0} : ((u64{1} << take) - 1);
         acc |= (window & mask) << acc_bits;
         acc_bits += take;
         bit_offset_ += take;
       } else {
-        const u32 take = std::min<u32>(bits - acc_bits, 8u - bit_in_byte);
+        const u32 take = base::Min<u32>(bits - acc_bits, 8u - bit_in_byte);
         const u8 mask = static_cast<u8>((1u << take) - 1);
         const u8 chunk = (buffer_[byte_index] >> bit_in_byte) & mask;
         acc |= static_cast<u64>(chunk) << acc_bits;
@@ -144,7 +143,7 @@ class BitReader {
       sum_sq += c[i] * c[i];
     }
     const f32 missing = 1.0f - sum_sq;
-    c[largest] = missing > 0.0f ? std::sqrt(missing) : 0.0f;
+    c[largest] = missing > 0.0f ? sqrtf(missing) : 0.0f;
     x = c[0]; y = c[1]; z = c[2]; w = c[3];
     return true;
   }
@@ -159,7 +158,7 @@ class BitReader {
       ok_ = false;
       return false;
     }
-    std::memcpy(dst, buffer_ + byte_index, n);
+    memcpy(dst, buffer_ + byte_index, n);
     bit_offset_ += n * 8;
     return true;
   }
@@ -181,7 +180,7 @@ class BitReader {
 
  private:
   static u32 BitsRequired(u32 max_value) {
-    return static_cast<u32>(std::bit_width(max_value));
+    return 32u - static_cast<u32>(base::CountLeadingZeros(max_value));
   }
 
   const unsigned char* buffer_{nullptr};

@@ -1,10 +1,9 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
+#include <stdint.h>
 
 #include <string.h>  // memcpy, where a payload is filled
-
-#include <limits>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
@@ -164,7 +163,7 @@ class OutgoingPacket {
         last_send_time(0),
         destination_peer_id(peer_id) {
     payload.data = nullptr;
-    if (data.size() > std::numeric_limits<u32>::max()) {
+    if (data.size() > UINT32_MAX) {
       payload.scalar = 0;
       return;
     }
@@ -211,7 +210,7 @@ class OutgoingPacket {
         last_send_time(0),
         destination_peer_id(peer_id) {
     payload.data = nullptr;
-    if (reserve_bytes > std::numeric_limits<u32>::max()) {
+    if (reserve_bytes > UINT32_MAX) {
       payload.scalar = 0;
     } else if (reserve_bytes > 0) {
       payload.data = reinterpret_cast<byte*>(
