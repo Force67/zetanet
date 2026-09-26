@@ -1,15 +1,12 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
+#include <string.h>
+#include <stdint.h>
 
 // 64-bit LSB-first bit writer. Flushes whole bytes once at least 56 bits
 // are queued. Targets game-state payloads: quantized ints, floats, unit
 // quaternions, packed booleans.
-
-#include <bit>
-#include <cstring>
-#include <limits>
-#include <utility>
 
 #include <znet/z_network_allocator.h>
 #include <znet/z_packets.h>
@@ -18,6 +15,7 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/math/math_helpers.h>
 #include <base/arch.h>
 #include <base/containers/span.h>
 #include <base/logging.h>
@@ -186,7 +184,7 @@ class BitWriter {
     if (!Reserve(byte_offset_ + n)) {
       return;
     }
-    std::memcpy(buffer_ + byte_offset_, data, n);
+    memcpy(buffer_ + byte_offset_, data, n);
     byte_offset_ += n;
   }
 
@@ -239,7 +237,7 @@ class BitWriter {
 
  private:
   static u32 BitsRequired(u32 max_value) {
-    return static_cast<u32>(std::bit_width(max_value));
+    return 32u - static_cast<u32>(base::CountLeadingZeros(max_value));
   }
 
   void FlushScratchBytes() {
@@ -281,13 +279,13 @@ class BitWriter {
       ok_ = false;
       return false;
     }
-    if (needed > std::numeric_limits<u32>::max()) {
+    if (needed > UINT32_MAX) {
       ok_ = false;
       return false;
     }
     mem_size new_capacity = capacity_ ? capacity_ : kDefaultReserveBytes;
     while (new_capacity < needed) {
-      if (new_capacity > std::numeric_limits<mem_size>::max() / 2) {
+      if (new_capacity > static_cast<mem_size>(-1) / 2) {
         new_capacity = needed;
         break;
       }
@@ -302,7 +300,7 @@ class BitWriter {
     const mem_size new_cap_actual =
         PacketBufferPool::Instance().GetCapacity(new_buf);
     if (buffer_ && byte_offset_ > 0) {
-      std::memcpy(new_buf, buffer_, byte_offset_);
+      memcpy(new_buf, buffer_, byte_offset_);
     }
     if (packet_) {
       unsigned char* old = reinterpret_cast<unsigned char*>(

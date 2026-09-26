@@ -2,16 +2,17 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <condition_variable>
-#include <functional>
-#include <mutex>
-#include <queue>
-#include <thread>
-#include <vector>
-
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/condition_variable.h>
+#include <base/threading/thread.h>
+#include <base/functional/function.h>
+#include <base/containers/queue.h>
+#include <base/containers/vector.h>
+#include <base/memory/unique_pointer.h>
 #include <base/arch.h>
 #endif
 
@@ -23,7 +24,7 @@ namespace tx::network {
 // into an existing job system, otherwise the built-in pool is used.
 class ZNET_API ITaskExecutor {
  public:
-  using Task = std::function<void()>;
+  using Task = base::Function<void()>;
 
   virtual ~ITaskExecutor() = default;
 
@@ -66,15 +67,16 @@ class ZNET_API ZThreadPoolTaskExecutor final : public ITaskExecutor {
   mem_size worker_count_{0};
   mem_size max_queued_tasks_{0};
 
-  std::vector<std::thread> workers_;
-  std::queue<Task> tasks_;
+  // base::Thread is not movable, hence the pointers.
+  base::Vector<base::UniquePointer<base::Thread>> workers_;
+  base::Queue<Task> tasks_;
   mem_size active_workers_{0};
   bool stopping_{false};
 
-  std::mutex mutex_;
-  std::condition_variable task_cv_;
-  std::condition_variable space_cv_;
-  std::condition_variable idle_cv_;
+  base::Mutex mutex_;
+  base::ConditionVariable task_cv_;
+  base::ConditionVariable space_cv_;
+  base::ConditionVariable idle_cv_;
 };
 
 }  // namespace tx::network

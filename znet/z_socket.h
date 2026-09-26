@@ -5,6 +5,7 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/threading/mutex.h>
 #include <base/arch.h>
 #include <base/containers/span.h>
 #include <base/containers/vector.h>
@@ -12,8 +13,6 @@
 #endif
 
 #include <string.h>  // memcmp, on the address comparisons below
-
-#include <mutex>
 
 // Platform-specific socket includes and typedefs
 #if defined(_WIN32)
@@ -137,7 +136,7 @@ class ZSocket {
   socklen_t server_len_{0};
   int address_family_{AF_INET};
   ChaosOptions chaos_options_{};
-  std::mutex chaos_mutex_;
+  base::Mutex chaos_mutex_;
   bool chaos_pending_{false};
   sockaddr_storage chaos_pending_target_{};
   socklen_t chaos_pending_len_{0};

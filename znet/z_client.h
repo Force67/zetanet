@@ -7,6 +7,8 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/time/time.h>
+#include <base/memory/move.h>
 #include <base/memory/unique_pointer.h>
 #endif
 
@@ -80,7 +82,7 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
     return false;
   }
 
-  inline void Push(OutgoingPacket&& p) { packet_queue_.Push(std::move(p)); }
+  inline void Push(OutgoingPacket&& p) { packet_queue_.Push(base::move(p)); }
 
   void ProcessSystemMessage(const IncomingPacket& p);
 
@@ -98,9 +100,9 @@ class ZNET_API ZClient final : public ZAsyncTransportLayer {
   HandshakeFailureReason handshake_failure_reason_{HandshakeFailureReason::kNone};
   u16 negotiated_protocol_version_{0};
   u32 negotiated_feature_flags_{0};
-  base::Clock::time_point handshake_start_time_{};
-  base::Clock::time_point next_clock_sync_request_time_{};
-  base::Clock::time_point next_client_hello_retry_time_{};
+  base::TimeTicks handshake_start_time_{};
+  base::TimeTicks next_clock_sync_request_time_{};
+  base::TimeTicks next_client_hello_retry_time_{};
   void (*file_transfer_sink_)(void*, const IncomingPacket&){nullptr};
   void* file_transfer_sink_context_{nullptr};
 };

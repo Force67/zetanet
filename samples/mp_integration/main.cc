@@ -19,24 +19,25 @@
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
+#else
+#include <base/algorithm.h>
+#include <base/atomic.h>
+#include <base/containers/map.h>
+#include <base/containers/unordered_set.h>
+#include <base/containers/vector.h>
+#include <base/filesystem/file.h>
+#include <base/filesystem/file_util.h>
+#include <base/filesystem/path.h>
+#include <base/memory/move.h>
+#include <base/strings/xstring.h>
+#include <base/threading/thread.h>
+#include <base/time/time.h>
 #endif
 
-#include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <random>
-#include <string>
-#include <thread>
-#include <unordered_set>
-#include <vector>
+#include <math.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
 
 namespace {
 
@@ -57,21 +58,38 @@ constexpr char kTestPsk[] = "0123456789abcdef0123456789abcdef";
 const base::StringRef kTestPskRef{kTestPsk, sizeof(kTestPsk) - 1};
 
 u16 NextPort() {
-  static std::atomic<u16> next_port{19050};
+  static base::Atomic<u16> next_port{19050};
   return static_cast<u16>(next_port.fetch_add(1));
 }
 
+// xorshift32: the tests need arbitrary data, reproducible from a seed, and
+// nothing about its distribution.
+class TestRng {
+ public:
+  explicit TestRng(u32 seed) : state_(seed != 0 ? seed : 1u) {}
+
+  u32 operator()() {
+    state_ ^= state_ << 13;
+    state_ ^= state_ >> 17;
+    state_ ^= state_ << 5;
+    return state_;
+  }
+
+ private:
+  u32 state_;
+};
+
 // LZ4 only shrinks redundant input; repeat a small alphabet so compression
 // triggers instead of falling into PacketBuilder's "didn't help" branch.
-std::string MakeCompressiblePayload(std::size_t bytes, std::uint32_t seed) {
-  std::string out;
+base::String MakeCompressiblePayload(mem_size bytes, u32 seed) {
+  base::String out;
   out.reserve(bytes);
-  std::mt19937 rng(seed);
+  TestRng rng(seed);
   static constexpr char kAlphabet[] = "abcdefghijklmnop";
   while (out.size() < bytes) {
-    const std::size_t run = 4 + (rng() % 12);
+    const mem_size run = 4 + (rng() % 12);
     const char ch = kAlphabet[rng() % (sizeof(kAlphabet) - 1)];
-    for (std::size_t i = 0; i < run && out.size() < bytes; ++i) {
+    for (mem_size i = 0; i < run && out.size() < bytes; ++i) {
       out.push_back(ch);
     }
   }
@@ -80,13 +98,13 @@ std::string MakeCompressiblePayload(std::size_t bytes, std::uint32_t seed) {
 
 template <typename Fn>
 bool WaitForCondition(int timeout_ms, Fn&& fn) {
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-  while (std::chrono::steady_clock::now() < deadline) {
+  const base::TimeTicks deadline =
+      base::TimeTicks::Now() + base::Milliseconds(timeout_ms);
+  while (base::TimeTicks::Now() < deadline) {
     if (fn()) {
       return true;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    base::SleepForMilliseconds(1);
   }
   return fn();
 }
@@ -98,7 +116,7 @@ struct CodecCase {
 };
 
 bool CodecRoundtripOnce(const CodecCase& c,
-                        const std::string& payload,
+                        const base::String& payload,
                         ZCryptoContext* tx_crypto,
                         ZCryptoContext* rx_crypto) {
   const PackageFlags flags{.reliable = static_cast<u8>(c.reliable ? 1 : 0),
@@ -116,29 +134,32 @@ bool CodecRoundtripOnce(const CodecCase& c,
   PacketBuilder builder(tx_crypto);
   base::Vector<byte> wire = builder.BuildPacket(out, /*sequence=*/42);
   if (wire.empty()) {
-    std::fprintf(stderr,
-                 "  build failed (reliable=%d encrypted=%d compressed=%d "
-                 "size=%zu)\n",
-                 c.reliable, c.encrypted, c.compressed, payload.size());
+    fprintf(stderr,
+            "  build failed (reliable=%d encrypted=%d compressed=%d "
+            "size=%zu)\n",
+            c.reliable, c.encrypted, c.compressed,
+            static_cast<size_t>(payload.size()));
     return false;
   }
 
   PacketUnpacker unpacker(rx_crypto);
   IncomingPacket in;
   if (!unpacker.UnpackPacket(wire.data(), wire.size(), in)) {
-    std::fprintf(stderr,
-                 "  unpack failed (reliable=%d encrypted=%d compressed=%d "
-                 "wire_size=%zu)\n",
-                 c.reliable, c.encrypted, c.compressed, wire.size());
+    fprintf(stderr,
+            "  unpack failed (reliable=%d encrypted=%d compressed=%d "
+            "wire_size=%zu)\n",
+            c.reliable, c.encrypted, c.compressed,
+            static_cast<size_t>(wire.size()));
     return false;
   }
   if (in.data.size() != payload.size() ||
-      std::memcmp(in.data.data(), payload.data(), payload.size()) != 0) {
-    std::fprintf(stderr,
-                 "  payload mismatch (reliable=%d encrypted=%d compressed=%d "
-                 "expected=%zu got=%zu)\n",
-                 c.reliable, c.encrypted, c.compressed, payload.size(),
-                 in.data.size());
+      memcmp(in.data.data(), payload.data(), payload.size()) != 0) {
+    fprintf(stderr,
+            "  payload mismatch (reliable=%d encrypted=%d compressed=%d "
+            "expected=%zu got=%zu)\n",
+            c.reliable, c.encrypted, c.compressed,
+            static_cast<size_t>(payload.size()),
+            static_cast<size_t>(in.data.size()));
     return false;
   }
   return true;
@@ -155,12 +176,12 @@ bool TestCodecRoundtrip() {
       {true, false, true},
   };
 
-  const std::size_t sizes[] = {32, 256, 4096, 32 * 1024};
+  const mem_size sizes[] = {32, 256, 4096, 32 * 1024};
 
   bool all_ok = true;
   for (const auto& c : cases) {
-    for (std::size_t size : sizes) {
-      const std::string payload =
+    for (mem_size size : sizes) {
+      const base::String payload =
           MakeCompressiblePayload(size, 0xABCDu ^ static_cast<u32>(size));
       if (!CodecRoundtripOnce(c, payload, nullptr, nullptr)) {
         all_ok = false;
@@ -170,8 +191,8 @@ bool TestCodecRoundtrip() {
 
   // Incompressible payload, hitting the branch that clears the compressed
   // flag when compression does not shrink the data.
-  std::string incompressible(2048, '\0');
-  std::mt19937 rng(0xDEAD);
+  base::String incompressible(2048, '\0');
+  TestRng rng(0xDEAD);
   for (auto& ch : incompressible) {
     ch = static_cast<char>(rng() & 0xFF);
   }
@@ -208,7 +229,7 @@ bool RoundtripOverNetwork(bool encryption, bool compression) {
   ZServer server;
   server.DisableAdaptiveThreading();
   if (!server.Begin(port, MakeServerOptions(encryption, compression))) {
-    std::fprintf(stderr, "  server.Begin failed\n");
+    fprintf(stderr, "  server.Begin failed\n");
     return false;
   }
 
@@ -216,7 +237,7 @@ bool RoundtripOverNetwork(bool encryption, bool compression) {
   client.DisableAdaptiveThreading();
   if (!client.Connect("127.0.0.1", port,
                        MakeClientOptions(encryption, compression))) {
-    std::fprintf(stderr, "  client.Connect failed\n");
+    fprintf(stderr, "  client.Connect failed\n");
     server.Deinit();
     return false;
   }
@@ -232,25 +253,24 @@ bool RoundtripOverNetwork(bool encryption, bool compression) {
     return client.handshake_phase() == ZClient::HandshakePhase::kConnected;
   });
   if (!connected) {
-    std::fprintf(stderr, "  handshake did not complete\n");
+    fprintf(stderr, "  handshake did not complete\n");
     client.Disconnect();
     server.Deinit();
     return false;
   }
 
-  std::vector<std::string> payloads;
+  base::Vector<base::String> payloads;
   payloads.push_back(MakeCompressiblePayload(64, 1));
   payloads.push_back(MakeCompressiblePayload(512, 2));
   payloads.push_back(MakeCompressiblePayload(2048, 3));
-  payloads.push_back(std::string(48, 'Q'));
+  payloads.push_back(base::String(48, 'Q'));
   payloads.push_back("hello multiplayer world");
 
   for (const auto& p : payloads) {
-    base::String s(p.data(), p.size());
-    client.SendMessage(ZPeerId(ZPeerId::to_server), s);
+    client.SendMessage(ZPeerId(ZPeerId::to_server), p);
   }
 
-  std::vector<std::string> received;
+  base::Vector<base::String> received;
   const bool got_all = WaitForCondition(5000, [&]() {
     IncomingPacket pkt;
     // Keep the server-side handshake state machine running (ClientAuthProof,
@@ -272,19 +292,21 @@ bool RoundtripOverNetwork(bool encryption, bool compression) {
   // multisets.
   bool ok = got_all;
   if (got_all) {
-    std::vector<std::string> expected = payloads;
-    std::vector<std::string> got = received;
-    std::sort(expected.begin(), expected.end());
-    std::sort(got.begin(), got.end());
+    base::Vector<base::String> expected = payloads;
+    base::Vector<base::String> got = received;
+    base::Sort(expected.data(), expected.data() + expected.size());
+    base::Sort(got.data(), got.data() + got.size());
     if (got.size() != expected.size() || got != expected) {
-      std::fprintf(stderr,
-                   "  contents differ (sent %zu, got %zu unique payloads)\n",
-                   expected.size(), got.size());
+      fprintf(stderr,
+              "  contents differ (sent %zu, got %zu unique payloads)\n",
+              static_cast<size_t>(expected.size()),
+              static_cast<size_t>(got.size()));
       ok = false;
     }
   } else {
-    std::fprintf(stderr, "  only received %zu/%zu packets\n", received.size(),
-                 payloads.size());
+    fprintf(stderr, "  only received %zu/%zu packets\n",
+            static_cast<size_t>(received.size()),
+            static_cast<size_t>(payloads.size()));
   }
 
   client.Disconnect();
@@ -313,13 +335,13 @@ using tx::network::ZUintMax;
 #define BIT_CHECK(cond, msg)                                          \
   do {                                                                \
     if (!(cond)) {                                                    \
-      std::fprintf(stderr, "  %s:%d: %s\n", __FILE__, __LINE__, msg); \
+      fprintf(stderr, "  %s:%d: %s\n", __FILE__, __LINE__, msg);      \
       return false;                                                   \
     }                                                                 \
   } while (0)
 
 bool TestBitPrimitives() {
-  std::vector<byte> backing(64, byte{0});
+  base::Vector<byte> backing(64, byte{0});
   BitWriter w(base::Span<byte>(backing.data(), backing.size()));
   w.WriteBool(true);
   w.WriteBool(false);
@@ -345,9 +367,9 @@ bool TestBitPrimitives() {
   BIT_CHECK(r.ReadBits(raw_20, 20) && raw_20 == 0x12345, "20-bit raw");
   BIT_CHECK(r.ReadUint(u, 100u) && u == 7u, "uint");
   BIT_CHECK(r.ReadInt(i, -100, 100) && i == -37, "int range");
-  BIT_CHECK(r.ReadFloat(f, 0.0f, 1.0f, 16) && std::abs(f - 0.25f) < 1e-3f,
+  BIT_CHECK(r.ReadFloat(f, 0.0f, 1.0f, 16) && fabsf(f - 0.25f) < 1e-3f,
             "float quant");
-  BIT_CHECK(r.ReadUnitQuat(qx, qy, qz, qw) && std::abs(qw - 1.0f) < 1e-2f,
+  BIT_CHECK(r.ReadUnitQuat(qx, qy, qz, qw) && fabsf(qw - 1.0f) < 1e-2f,
             "unit quat");
   return r.ok();
 }
@@ -380,7 +402,7 @@ namespace {
 
 bool TestBitTraitStruct() {
   PlayerSnapshot src{77, 12.5f, -300.25f, true};
-  std::vector<byte> backing(32, byte{0});
+  base::Vector<byte> backing(32, byte{0});
   BitWriter w(base::Span<byte>(backing.data(), backing.size()));
   w.Push(src);
   w.Finalize();
@@ -390,8 +412,8 @@ bool TestBitTraitStruct() {
   PlayerSnapshot dst{};
   BIT_CHECK(r.Pop(dst), "pop");
   BIT_CHECK(dst.health == src.health, "health");
-  BIT_CHECK(std::abs(dst.pos_x - src.pos_x) < 0.1f, "pos_x");
-  BIT_CHECK(std::abs(dst.pos_y - src.pos_y) < 0.1f, "pos_y");
+  BIT_CHECK(fabsf(dst.pos_x - src.pos_x) < 0.1f, "pos_x");
+  BIT_CHECK(fabsf(dst.pos_y - src.pos_y) < 0.1f, "pos_y");
   BIT_CHECK(dst.alive == src.alive, "alive");
   return true;
 }
@@ -437,7 +459,7 @@ bool TestZBitFieldStruct() {
   src.py = 250.125f;
   src.alive = true;
 
-  std::vector<byte> backing(32, byte{0});
+  base::Vector<byte> backing(32, byte{0});
   BitWriter w(base::Span<byte>(backing.data(), backing.size()));
   w.Push(src);
   w.Finalize();
@@ -448,8 +470,8 @@ bool TestZBitFieldStruct() {
   BIT_CHECK(r.Pop(dst), "pop");
   BIT_CHECK(static_cast<i32>(dst.health) == 88, "health");
   BIT_CHECK(static_cast<u32>(dst.team) == 5u, "team");
-  BIT_CHECK(std::abs(static_cast<f32>(dst.px) - src.px) < 0.1f, "px");
-  BIT_CHECK(std::abs(static_cast<f32>(dst.py) - src.py) < 0.1f, "py");
+  BIT_CHECK(fabsf(static_cast<f32>(dst.px) - src.px) < 0.1f, "px");
+  BIT_CHECK(fabsf(static_cast<f32>(dst.py) - src.py) < 0.1f, "py");
   BIT_CHECK(static_cast<bool>(dst.alive) == true, "alive");
   return true;
 }
@@ -503,9 +525,9 @@ bool TestBitWriterIntoPacketEndToEnd() {
     w.Finalize();
     BIT_CHECK(w.ok(), "bit writer ok");
   }
-  client.Push(std::move(pkt));
+  client.Push(base::move(pkt));
 
-  std::vector<std::string> received;
+  base::Vector<base::String> received;
   const bool got = WaitForCondition(5000, [&]() {
     IncomingPacket inc;
     while (server.Poll(PacketChannelType::Control, inc)) {
@@ -526,8 +548,8 @@ bool TestBitWriterIntoPacketEndToEnd() {
       ok = false;
     } else {
       ok = (dst.health == src.health) &&
-           (std::abs(dst.pos_x - src.pos_x) < 0.1f) &&
-           (std::abs(dst.pos_y - src.pos_y) < 0.1f) && (dst.alive == src.alive);
+           (fabsf(dst.pos_x - src.pos_x) < 0.1f) &&
+           (fabsf(dst.pos_y - src.pos_y) < 0.1f) && (dst.alive == src.alive);
     }
   }
 
@@ -545,7 +567,7 @@ bool TestBitWriter64BitAtOffset() {
 
   for (u32 prefix_bits = 0; prefix_bits <= 16; ++prefix_bits) {
     for (const u64 value : kValues) {
-      std::vector<byte> backing(64, byte{0});
+      base::Vector<byte> backing(64, byte{0});
       BitWriter w(base::Span<byte>(backing.data(), backing.size()));
       const u32 prefix_value = prefix_bits == 0 ? 0u : 0x5u;
       if (prefix_bits > 0) {
@@ -565,18 +587,18 @@ bool TestBitWriter64BitAtOffset() {
       u64 value_back = 0;
       BIT_CHECK(r.ReadBits(value_back, 64), "read u64");
       if (value_back != value) {
-        std::fprintf(stderr,
-                     "  u64 mismatch at prefix_bits=%u: wrote %016llx got "
-                     "%016llx\n",
-                     prefix_bits, static_cast<unsigned long long>(value),
-                     static_cast<unsigned long long>(value_back));
+        fprintf(stderr,
+                "  u64 mismatch at prefix_bits=%u: wrote %016llx got "
+                "%016llx\n",
+                prefix_bits, static_cast<unsigned long long>(value),
+                static_cast<unsigned long long>(value_back));
         return false;
       }
     }
   }
 
   // BitTraits<u64> after an odd-width field, the shape that triggered the bug.
-  std::vector<byte> backing(32, byte{0});
+  base::Vector<byte> backing(32, byte{0});
   BitWriter w(base::Span<byte>(backing.data(), backing.size()));
   w.WriteBool(true);
   BitTraits<u64>::Write(w, 0xA5A5A5A5A5A5A5A5ull);
@@ -591,33 +613,25 @@ bool TestBitWriter64BitAtOffset() {
   return true;
 }
 
-base::Path MakeBasePath(const std::string& path) {
-#ifdef ZNET_USE_STL
-  return base::Path(path);
-#else
-  return base::Path(path.c_str());
-#endif
-}
-
 // In-process file transfer over a loopback ZP2PNode pair, covering chunking,
 // reassembly, the memory-mapped writer, and the p2p control plane.
 bool TestFileTransferEndToEnd() {
-  namespace fs = std::filesystem;
-  std::error_code ec;
   // Relative work directory: absolute output paths are rejected by the
   // transporter, and relative paths keep the rename on one filesystem.
-  const fs::path work_dir =
-      fs::path("znet_ft_" +
-               std::to_string(static_cast<unsigned long long>(NextPort())));
-  fs::create_directories(work_dir, ec);
-  const fs::path input_path = work_dir / "source.bin";
-  const fs::path temp_dir = work_dir / "tmp";
-  const fs::path output_path = work_dir / "received.bin";
-  fs::create_directories(temp_dir, ec);
+  char work_dir_name[32];
+  snprintf(work_dir_name, sizeof(work_dir_name), "znet_ft_%u",
+           static_cast<unsigned>(NextPort()));
+  const base::String work_dir(work_dir_name);
+  const base::String input_path = work_dir + "/source.bin";
+  const base::String temp_dir = work_dir + "/tmp";
+  const base::String output_path = work_dir + "/received.bin";
+  base::CreateDirectory(base::Path(temp_dir));
 
-  std::string content;
+  auto cleanup = [&]() { base::DeletePathRecursively(base::Path(work_dir)); };
+
+  base::String content;
   {
-    std::mt19937 rng(0xF11E);
+    TestRng rng(0xF11E);
     content.reserve(15000u);
     while (content.size() < 15000u) {
       const char ch = static_cast<char>(rng() & 0xFF);
@@ -625,21 +639,23 @@ bool TestFileTransferEndToEnd() {
     }
   }
   {
-    std::ofstream out(input_path, std::ios::binary);
-    out.write(content.data(), static_cast<std::streamsize>(content.size()));
+    base::File out(base::Path(input_path),
+                   base::File::FLAG_CREATE_ALWAYS | base::File::FLAG_WRITE);
+    if (!out.IsValid() ||
+        out.Write(0, content.data(), content.size()) !=
+            static_cast<int>(content.size())) {
+      fprintf(stderr, "  writing %s failed\n", input_path.c_str());
+      cleanup();
+      return false;
+    }
   }
-
-  auto cleanup = [&]() {
-    std::error_code rm_ec;
-    fs::remove_all(work_dir, rm_ec);
-  };
 
   const u16 host_port = NextPort();
   const u16 sender_port = NextPort();
 
   tx::network::ZP2PNode receiver_node;
   if (!receiver_node.Begin(host_port)) {
-    std::fprintf(stderr, "  receiver Begin failed\n");
+    fprintf(stderr, "  receiver Begin failed\n");
     cleanup();
     return false;
   }
@@ -650,7 +666,7 @@ bool TestFileTransferEndToEnd() {
   tx::network::ZP2PNode sender_node;
   if (!sender_node.Connect(base::StringRef("127.0.0.1", 9), host_port,
                            sender_port)) {
-    std::fprintf(stderr, "  sender Connect failed\n");
+    fprintf(stderr, "  sender Connect failed\n");
     cleanup();
     return false;
   }
@@ -666,9 +682,9 @@ bool TestFileTransferEndToEnd() {
   };
 
   // Warm up the p2p connection before sending.
-  const auto warmup_end =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(800);
-  while (std::chrono::steady_clock::now() < warmup_end) {
+  const base::TimeTicks warmup_end =
+      base::TimeTicks::Now() + base::Milliseconds(800);
+  while (base::TimeTicks::Now() < warmup_end) {
     pump();
     tx::network::IncomingPacket ignored;
     receiver_node.Update();
@@ -677,15 +693,15 @@ bool TestFileTransferEndToEnd() {
     }
     while (receiver_node.Poll(tx::network::PacketChannelType::Data, ignored)) {
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    base::SleepForMilliseconds(1);
   }
 
   tx::network::ZFileTransporter::TransferTuning tuning;
   tuning.chunk_size = 1024;
-  if (!sender.SendFile(MakeBasePath(input_path.string()),
+  if (!sender.SendFile(base::Path(input_path),
                        tx::network::ZPeerId(tx::network::ZPeerId::to_server),
                        tuning)) {
-    std::fprintf(stderr, "  SendFile failed\n");
+    fprintf(stderr, "  SendFile failed\n");
     cleanup();
     return false;
   }
@@ -693,31 +709,32 @@ bool TestFileTransferEndToEnd() {
   // The session exists only after the file-name-bearing chunk 0 arrives, and
   // received chunks are ACKed so they are never retransmitted. Buffer early
   // chunks and stream them once the session exists.
-  std::map<u32, tx::network::ZFileTransporter::TransferChunk> pending;
-  std::unordered_set<u32> streamed;
+  base::Map<u32, tx::network::ZFileTransporter::TransferChunk> pending;
+  base::UnorderedSet<u32> streamed;
   bool have_transfer = false;
   u64 transfer_id = 0;
   bool completed = false;
 
   auto drain_pending = [&]() -> bool {
-    if (pending.find(0) == pending.end()) {
+    if (!pending.contains(0)) {
       return true;  // wait for chunk 0 to bootstrap the session
     }
-    for (auto& [index, chunk] : pending) {
-      if (streamed.count(index)) {
+    for (auto& entry : pending) {
+      const u32 index = entry.first;
+      if (streamed.contains(index)) {
         continue;
       }
       bool chunk_completed = false;
-      if (!receiver.StreamChunkToFile(chunk, MakeBasePath(temp_dir.string()),
+      if (!receiver.StreamChunkToFile(entry.second, base::Path(temp_dir),
                                       &chunk_completed)) {
-        std::fprintf(stderr, "  StreamChunkToFile failed for chunk %u\n", index);
+        fprintf(stderr, "  StreamChunkToFile failed for chunk %u\n", index);
         return false;
       }
       streamed.insert(index);
       if (chunk_completed) {
         if (!receiver.FinalizeStreamedFile(
-                transfer_id, MakeBasePath(output_path.string()))) {
-          std::fprintf(stderr, "  FinalizeStreamedFile failed\n");
+                transfer_id, base::Path(output_path))) {
+          fprintf(stderr, "  FinalizeStreamedFile failed\n");
           return false;
         }
         completed = true;
@@ -727,9 +744,8 @@ bool TestFileTransferEndToEnd() {
     return true;
   };
 
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(20);
-  while (!completed && std::chrono::steady_clock::now() < deadline) {
+  const base::TimeTicks deadline = base::TimeTicks::Now() + base::Seconds(20);
+  while (!completed && base::TimeTicks::Now() < deadline) {
     pump();
     receiver_node.Update();
 
@@ -751,7 +767,7 @@ bool TestFileTransferEndToEnd() {
         continue;
       }
       const u32 index = chunk.chunk_index;
-      pending.emplace(index, std::move(chunk));
+      pending.emplace(index, base::move(chunk));
     }
     while (receiver_node.Poll(tx::network::PacketChannelType::Data, packet)) {
     }
@@ -760,28 +776,35 @@ bool TestFileTransferEndToEnd() {
       cleanup();
       return false;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    base::SleepForMilliseconds(1);
   }
 
   if (!completed) {
-    std::fprintf(stderr, "  transfer did not complete (%zu/%zu chunks buffered)\n",
-                 streamed.size(), pending.size());
+    fprintf(stderr, "  transfer did not complete (%zu/%zu chunks buffered)\n",
+            static_cast<size_t>(streamed.size()),
+            static_cast<size_t>(pending.size()));
     cleanup();
     return false;
   }
 
-  std::string received;
+  // A missing or short output file leaves |received| short of |content|.
+  base::String received;
   {
-    std::ifstream in(output_path, std::ios::binary);
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    received = ss.str();
+    base::File in(base::Path(output_path),
+                  base::File::FLAG_OPEN | base::File::FLAG_READ);
+    const i64 length = in.IsValid() ? in.GetLength() : 0;
+    if (length > 0) {
+      received.resize(static_cast<mem_size>(length));
+      const int read = in.Read(0, received.data(), static_cast<int>(length));
+      received.resize(read > 0 ? static_cast<mem_size>(read) : 0u);
+    }
   }
 
   const bool ok = received.size() == content.size() && received == content;
   if (!ok) {
-    std::fprintf(stderr, "  content mismatch (sent %zu, got %zu bytes)\n",
-                 content.size(), received.size());
+    fprintf(stderr, "  content mismatch (sent %zu, got %zu bytes)\n",
+            static_cast<size_t>(content.size()),
+            static_cast<size_t>(received.size()));
   }
   cleanup();
   return ok;
@@ -790,6 +813,10 @@ bool TestFileTransferEndToEnd() {
 }  // namespace
 
 int main(int /*argc*/, char** /*argv*/) {
+  // Results interleave with the library's stderr logs; line buffering keeps
+  // them in order when stdout is a pipe.
+  setvbuf(stdout, nullptr, _IOLBF, 0);
+
   struct TestCase {
     const char* name;
     bool (*fn)();
@@ -812,15 +839,15 @@ int main(int /*argc*/, char** /*argv*/) {
   int failures = 0;
   for (const auto& t : tests) {
     const bool ok = t.fn();
-    std::cout << (ok ? "[PASS] " : "[FAIL] ") << t.name << std::endl;
+    printf("%s%s\n", ok ? "[PASS] " : "[FAIL] ", t.name);
     if (!ok) {
       ++failures;
     }
   }
   if (failures > 0) {
-    std::cerr << "MP integration failures: " << failures << std::endl;
+    fprintf(stderr, "MP integration failures: %d\n", failures);
     return 1;
   }
-  std::cout << "All MP integration tests passed." << std::endl;
+  printf("All MP integration tests passed.\n");
   return 0;
 }

@@ -1,13 +1,12 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
-#include <mutex>
-
-#include <shared_mutex>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
 #include <base/containers/vector.h>
 #include <base/containers/id_set.h>
 #endif
@@ -24,7 +23,7 @@ class ZPeerMapping {
   ~ZPeerMapping() = default;
 
   ZPeer* CreatePeer(const ZSocket::Address& addr) {
-    std::unique_lock lock(mutex_);
+    base::LockGuard<base::SharedMutex> lock(mutex_);
     if (peer_list_.size() >= kMaxPeers) {
       return nullptr;
     }
@@ -36,7 +35,7 @@ class ZPeerMapping {
   }
 
   bool DestroyPeer(ZPeerId id) {
-    std::unique_lock lock(mutex_);
+    base::LockGuard<base::SharedMutex> lock(mutex_);
     for (mem_size i = 0; i < peer_list_.size(); ++i) {
       if (peer_list_[i].identifier == id) {
         z_peer_ids_.ReleaseId(id.id);
@@ -48,7 +47,7 @@ class ZPeerMapping {
   }
 
   ZPeer* GetPeer(ZPeerId id) {
-    std::shared_lock lock(mutex_);
+    base::SharedLockGuard<base::SharedMutex> lock(mutex_);
     for (auto& peer : peer_list_) {
       if (peer.identifier == id) {
         return &peer;
@@ -61,14 +60,14 @@ class ZPeerMapping {
     // Peer almost always exists; take only the shared lock so concurrent
     // receivers scan in parallel.
     {
-      std::shared_lock lock(mutex_);
+      base::SharedLockGuard<base::SharedMutex> lock(mutex_);
       for (auto& peer : peer_list_) {
         if (peer.address == addr) {
           return &peer;
         }
       }
     }
-    std::unique_lock lock(mutex_);
+    base::LockGuard<base::SharedMutex> lock(mutex_);
     // Re-scan: another thread may have created the peer in between.
     for (auto& peer : peer_list_) {
       if (peer.address == addr) {
@@ -88,7 +87,7 @@ class ZPeerMapping {
   // Copies the address out under the lock; a concurrent GetOrCreatePeer can
   // reallocate peer_list_ and invalidate ZPeer* handles.
   bool ResolvePeerAddress(ZPeerId id, ZSocket::Address& out_address) {
-    std::shared_lock lock(mutex_);
+    base::SharedLockGuard<base::SharedMutex> lock(mutex_);
     for (auto& peer : peer_list_) {
       if (peer.identifier == id) {
         out_address = peer.address;
@@ -99,7 +98,7 @@ class ZPeerMapping {
   }
 
   ZPeer* GetPeerByAddress(const ZSocket::Address& addr) {
-    std::shared_lock lock(mutex_);
+    base::SharedLockGuard<base::SharedMutex> lock(mutex_);
     for (auto& peer : peer_list_) {
       if (peer.address == addr) {
         return &peer;
@@ -109,24 +108,24 @@ class ZPeerMapping {
   }
 
   base::Vector<ZPeer> GetPeerList() {
-    std::shared_lock lock(mutex_);
+    base::SharedLockGuard<base::SharedMutex> lock(mutex_);
     return peer_list_;
   }
 
   // Copy-assignment reuses capacity, making broadcast fanout
   // allocation-free in steady state.
   void CopyPeerList(base::Vector<ZPeer>& out) const {
-    std::shared_lock lock(mutex_);
+    base::SharedLockGuard<base::SharedMutex> lock(mutex_);
     out = peer_list_;
   }
 
   mem_size PeerCount() const {
-    std::shared_lock lock(mutex_);
+    base::SharedLockGuard<base::SharedMutex> lock(mutex_);
     return peer_list_.size();
   }
 
  private:
-  mutable std::shared_mutex mutex_;
+  mutable base::SharedMutex mutex_;
   base::IdSet<ZPeerId::id_type, ZPeerId::invalid_id, ZPeerId::max_id>
       z_peer_ids_;
   base::Vector<ZPeer> peer_list_;

@@ -2,16 +2,13 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <array>
-#include <atomic>
-#include <string>
-
 #include <znet/z_crypto_backend.h>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
 #include <base/arch.h>
+#include <base/atomic.h>
 #include <base/containers/array.h>
 #include <base/containers/vector.h>
 #include <base/containers/span.h>
@@ -62,13 +59,13 @@ class ZCryptoContext {
   bool keys_initialized_{false};
   // Release/acquire pairs with the unpacker thread so key material written
   // before the flip is visible to readers.
-  std::atomic<bool> authenticated_{false};
+  base::Atomic<bool> authenticated_{false};
   base::String local_nonce_;
   base::String local_challenge_;
   base::String server_nonce_;
   base::String server_challenge_;
-  std::atomic<u32> nonce_prefix_{0};
-  std::atomic<u64> nonce_counter_{0};
+  base::Atomic<u32> nonce_prefix_{0};
+  base::Atomic<u64> nonce_counter_{0};
   base::String pre_shared_key_{};
 };
 

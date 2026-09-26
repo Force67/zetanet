@@ -1,13 +1,12 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
-
-#include <cstddef>
-#include <chrono>
+#include <stddef.h>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/time/time.h>
 #include <base/atomic.h>
 #include <base/memory/unique_pointer.h>
 #endif
@@ -140,8 +139,8 @@ class ZAsyncTransportLayer {
   ITaskExecutor* task_executor_override_{nullptr};
   mem_size built_in_executor_worker_count_{0};
   mem_size built_in_executor_max_queued_tasks_{0};
-  base::Clock::time_point local_clock_epoch_{
-      base::Clock::now()};
+  base::TimeTicks local_clock_epoch_{
+      base::TimeTicks::Now()};
   ZSynchronizedClock synchronized_clock_{};
 
  protected:

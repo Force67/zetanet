@@ -1,14 +1,14 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
-#include <cstdint>
-#include <bit>
-#include <limits>
-#include <mutex>  // libc++ does not leak lock_guard transitively
+#include <stdint.h>
+#include <stddef.h>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/math/math_helpers.h>
+#include <base/threading/lock_guard.h>
 #include <base/atomic.h>
 #include <base/containers/array.h>
 #include <base/containers/vector.h>
@@ -50,32 +50,32 @@ class PacketBufferPool {
     if (requested_size == 0) {
       return nullptr;
     }
-    if (requested_size > std::numeric_limits<std::uint32_t>::max()) {
+    if (requested_size > UINT32_MAX) {
       return nullptr;
     }
 
     const mem_size class_index = SizeToClassIndex(requested_size);
-    total_requests_.fetch_add(1, std::memory_order_relaxed);
+    total_requests_.fetch_add(1, base::memory_order_relaxed);
 
     if (class_index == kInvalidClassIndex) {
-      fallback_allocations_.fetch_add(1, std::memory_order_relaxed);
+      fallback_allocations_.fetch_add(1, base::memory_order_relaxed);
       return AllocateNewBlock(requested_size, kInvalidClassIndex, false);
     }
 
     ClassBucket& bucket = classes_[class_index];
-    bucket.requests.fetch_add(1, std::memory_order_relaxed);
-    bucket.total_requests.fetch_add(1, std::memory_order_relaxed);
+    bucket.requests.fetch_add(1, base::memory_order_relaxed);
+    bucket.total_requests.fetch_add(1, base::memory_order_relaxed);
 
     {
-      std::lock_guard<base::Mutex> lock(bucket.mutex);
+      base::LockGuard<base::Mutex> lock(bucket.mutex);
       if (!bucket.free_list.empty()) {
-        pool_hits_.fetch_add(1, std::memory_order_relaxed);
-        bucket.hits.fetch_add(1, std::memory_order_relaxed);
-        bucket.total_hits.fetch_add(1, std::memory_order_relaxed);
+        pool_hits_.fetch_add(1, base::memory_order_relaxed);
+        bucket.hits.fetch_add(1, base::memory_order_relaxed);
+        bucket.total_hits.fetch_add(1, base::memory_order_relaxed);
         BlockHeader* header = bucket.free_list.back();
         bucket.free_list.erase(bucket.free_list.size() - 1);
-        header->ref_count.store(1, std::memory_order_relaxed);
-        header->requested_size = static_cast<std::uint32_t>(requested_size);
+        header->ref_count.store(1, base::memory_order_relaxed);
+        header->requested_size = static_cast<uint32_t>(requested_size);
         return BlockData(header);
       }
     }
@@ -87,7 +87,7 @@ class PacketBufferPool {
     if (!data) {
       return;
     }
-    HeaderFromData(data)->ref_count.fetch_add(1, std::memory_order_relaxed);
+    HeaderFromData(data)->ref_count.fetch_add(1, base::memory_order_relaxed);
   }
 
   void Release(unsigned char* data) {
@@ -96,8 +96,8 @@ class PacketBufferPool {
     }
 
     BlockHeader* header = HeaderFromData(data);
-    const std::uint32_t previous =
-        header->ref_count.fetch_sub(1, std::memory_order_acq_rel);
+    const uint32_t previous =
+        header->ref_count.fetch_sub(1, base::memory_order_acq_rel);
     if (previous != 1) {
       return;
     }
@@ -109,10 +109,10 @@ class PacketBufferPool {
 
     ClassBucket& bucket = classes_[header->size_class_index];
     const mem_size target =
-        bucket.target_cached_blocks.load(std::memory_order_relaxed);
+        bucket.target_cached_blocks.load(base::memory_order_relaxed);
     bool keep = false;
     {
-      std::lock_guard<base::Mutex> lock(bucket.mutex);
+      base::LockGuard<base::Mutex> lock(bucket.mutex);
       if (bucket.free_list.size() < target) {
         bucket.free_list.push_back(header);
         keep = true;
@@ -134,10 +134,10 @@ class PacketBufferPool {
 
   Stats GetStats() const {
     Stats stats;
-    stats.total_requests = total_requests_.load(std::memory_order_relaxed);
-    stats.pool_hits = pool_hits_.load(std::memory_order_relaxed);
+    stats.total_requests = total_requests_.load(base::memory_order_relaxed);
+    stats.pool_hits = pool_hits_.load(base::memory_order_relaxed);
     stats.fallback_allocations =
-        fallback_allocations_.load(std::memory_order_relaxed);
+        fallback_allocations_.load(base::memory_order_relaxed);
     return stats;
   }
 
@@ -145,29 +145,29 @@ class PacketBufferPool {
     for (mem_size i = 0; i < kClassCount; ++i) {
       const ClassBucket& bucket = classes_[i];
       out[i].block_size = bucket.block_size;
-      out[i].request_count = bucket.total_requests.load(std::memory_order_relaxed);
-      out[i].hit_count = bucket.total_hits.load(std::memory_order_relaxed);
+      out[i].request_count = bucket.total_requests.load(base::memory_order_relaxed);
+      out[i].hit_count = bucket.total_hits.load(base::memory_order_relaxed);
       out[i].target_cached_blocks =
-          bucket.target_cached_blocks.load(std::memory_order_relaxed);
-      out[i].ewma_demand = bucket.ewma_demand.load(std::memory_order_relaxed);
+          bucket.target_cached_blocks.load(base::memory_order_relaxed);
+      out[i].ewma_demand = bucket.ewma_demand.load(base::memory_order_relaxed);
       {
-        std::lock_guard<base::Mutex> lock(bucket.mutex);
+        base::LockGuard<base::Mutex> lock(bucket.mutex);
         out[i].cached_free_blocks = bucket.free_list.size();
       }
     }
   }
 
   void ResetStats() {
-    total_requests_.store(0, std::memory_order_relaxed);
-    pool_hits_.store(0, std::memory_order_relaxed);
-    fallback_allocations_.store(0, std::memory_order_relaxed);
+    total_requests_.store(0, base::memory_order_relaxed);
+    pool_hits_.store(0, base::memory_order_relaxed);
+    fallback_allocations_.store(0, base::memory_order_relaxed);
     for (mem_size i = 0; i < kClassCount; ++i) {
       ClassBucket& bucket = classes_[i];
-      bucket.requests.store(0, std::memory_order_relaxed);
-      bucket.hits.store(0, std::memory_order_relaxed);
-      bucket.total_requests.store(0, std::memory_order_relaxed);
-      bucket.total_hits.store(0, std::memory_order_relaxed);
-      bucket.ewma_demand.store(0.0, std::memory_order_relaxed);
+      bucket.requests.store(0, base::memory_order_relaxed);
+      bucket.hits.store(0, base::memory_order_relaxed);
+      bucket.total_requests.store(0, base::memory_order_relaxed);
+      bucket.total_hits.store(0, base::memory_order_relaxed);
+      bucket.ewma_demand.store(0.0, base::memory_order_relaxed);
     }
   }
 
@@ -180,18 +180,18 @@ class PacketBufferPool {
       return;
     }
     ClassBucket& bucket = classes_[class_index];
-    mem_size current_target = bucket.target_cached_blocks.load(std::memory_order_relaxed);
+    mem_size current_target = bucket.target_cached_blocks.load(base::memory_order_relaxed);
     while (current_target < min_target_blocks &&
            !bucket.target_cached_blocks.compare_exchange_weak(
-               current_target, min_target_blocks, std::memory_order_relaxed)) {
+               current_target, min_target_blocks, base::memory_order_relaxed)) {
     }
   }
 
  private:
-  struct alignas(std::max_align_t) BlockHeader {
-    base::Atomic<std::uint32_t> ref_count;
-    std::uint32_t requested_size;
-    std::uint32_t size_class_index;
+  struct alignas(max_align_t) BlockHeader {
+    base::Atomic<uint32_t> ref_count;
+    uint32_t requested_size;
+    uint32_t size_class_index;
     bool pooled;
     unsigned char reserved[3];
     mem_size capacity;
@@ -209,21 +209,21 @@ class PacketBufferPool {
     mutable base::Mutex mutex;
   };
 
-  static constexpr std::uint32_t kInvalidClassIndex = 0xFFFFFFFFu;
+  static constexpr uint32_t kInvalidClassIndex = 0xFFFFFFFFu;
 
   PacketBufferPool() {
     mem_size block_size = kMinClassSize;
     for (mem_size i = 0; i < kClassCount; ++i) {
       classes_[i].block_size = block_size;
       classes_[i].target_cached_blocks.store(kMinTargetPerClass,
-                                             std::memory_order_relaxed);
+                                             base::memory_order_relaxed);
       block_size <<= 1;
     }
   }
 
   ~PacketBufferPool() {
     for (ClassBucket& bucket : classes_) {
-      std::lock_guard<base::Mutex> lock(bucket.mutex);
+      base::LockGuard<base::Mutex> lock(bucket.mutex);
       for (BlockHeader* header : bucket.free_list) {
         ::operator delete(header);
       }
@@ -244,7 +244,7 @@ class PacketBufferPool {
     // ceil(log2(requested_size)) - log2(kMinClassSize)
     const unsigned min_bits = 6u;
     const unsigned ceil_log2 =
-        static_cast<unsigned>(std::bit_width(requested_size - 1));
+        64u - static_cast<unsigned>(base::CountLeadingZeros(static_cast<u64>(requested_size - 1)));
     const unsigned index = ceil_log2 - min_bits;
     return index < kClassCount ? index : kInvalidClassIndex;
   }
@@ -267,14 +267,14 @@ class PacketBufferPool {
     const mem_size capacity =
         (class_index == kInvalidClassIndex) ? requested_size
                                             : classes_[class_index].block_size;
-    if (capacity > std::numeric_limits<mem_size>::max() - sizeof(BlockHeader)) {
+    if (capacity > static_cast<mem_size>(-1) - sizeof(BlockHeader)) {
       return nullptr;
     }
     BlockHeader* header = reinterpret_cast<BlockHeader*>(
         ::operator new(sizeof(BlockHeader) + capacity));
-    header->ref_count.store(1, std::memory_order_relaxed);
-    header->requested_size = static_cast<std::uint32_t>(requested_size);
-    header->size_class_index = static_cast<std::uint32_t>(class_index);
+    header->ref_count.store(1, base::memory_order_relaxed);
+    header->requested_size = static_cast<uint32_t>(requested_size);
+    header->size_class_index = static_cast<uint32_t>(class_index);
     header->pooled = pooled;
     header->reserved[0] = 0;
     header->reserved[1] = 0;
@@ -284,7 +284,7 @@ class PacketBufferPool {
   }
 
   void MaybeRetune() {
-    const mem_size requests = total_requests_.load(std::memory_order_relaxed);
+    const mem_size requests = total_requests_.load(base::memory_order_relaxed);
     if (requests < kRetunePeriod || (requests % kRetunePeriod) != 0) {
       return;
     }
@@ -299,10 +299,10 @@ class PacketBufferPool {
     double demand_sum = 0.0;
     for (mem_size i = 0; i < kClassCount; ++i) {
       const mem_size requests =
-          classes_[i].requests.exchange(0, std::memory_order_relaxed);
-      const double old = classes_[i].ewma_demand.load(std::memory_order_relaxed);
+          classes_[i].requests.exchange(0, base::memory_order_relaxed);
+      const double old = classes_[i].ewma_demand.load(base::memory_order_relaxed);
       const double updated = old * 0.8 + static_cast<double>(requests) * 0.2;
-      classes_[i].ewma_demand.store(updated, std::memory_order_relaxed);
+      classes_[i].ewma_demand.store(updated, base::memory_order_relaxed);
       demand_sum += updated;
     }
 
@@ -311,7 +311,7 @@ class PacketBufferPool {
     }
 
     for (mem_size i = 0; i < kClassCount; ++i) {
-      const double demand = classes_[i].ewma_demand.load(std::memory_order_relaxed);
+      const double demand = classes_[i].ewma_demand.load(base::memory_order_relaxed);
       const double weight = demand / demand_sum;
       mem_size target = static_cast<mem_size>(
           (weight * static_cast<double>(kCacheBudgetBytes)) /
@@ -320,7 +320,7 @@ class PacketBufferPool {
         target = kMinTargetPerClass;
       }
 
-      classes_[i].target_cached_blocks.store(target, std::memory_order_relaxed);
+      classes_[i].target_cached_blocks.store(target, base::memory_order_relaxed);
       TrimClassCache(i, target);
     }
   }
@@ -329,7 +329,7 @@ class PacketBufferPool {
     ClassBucket& bucket = classes_[class_index];
     base::Vector<BlockHeader*> overflow;
     {
-      std::lock_guard<base::Mutex> lock(bucket.mutex);
+      base::LockGuard<base::Mutex> lock(bucket.mutex);
       if (bucket.free_list.size() <= target) {
         return;
       }

@@ -2,10 +2,8 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_file_write_interface.h"
+#include <string.h>
 #include "z_file_transporter.h"
-
-#include <cstring>
-#include <limits>
 
 #if !defined(_WIN32)
 #include <fcntl.h>
@@ -37,7 +35,7 @@ class MMapFileWriteHandle final : public IFileWriteHandle {
     if (static_cast<u64>(size) > remaining) {
       return false;
     }
-    std::memcpy(static_cast<char*>(mapping_) + offset, data, size);
+    memcpy(static_cast<char*>(mapping_) + offset, data, size);
     return true;
   }
 
@@ -81,7 +79,9 @@ class MemoryMappedFileWriteFactory final : public IFileWriteFactory {
       return {};
     }
 
-    if (expected_size > static_cast<u64>(std::numeric_limits<off_t>::max())) {
+    // off_t's maximum, whatever its width: all bits below the sign bit.
+    constexpr u64 kMaxOffset = ~u64{0} >> (65 - 8 * sizeof(off_t));
+    if (expected_size > kMaxOffset) {
       close(fd);
       return {};
     }
@@ -95,7 +95,7 @@ class MemoryMappedFileWriteFactory final : public IFileWriteFactory {
           new MMapFileWriteHandle(fd, nullptr, 0));
     }
 
-    if (expected_size > static_cast<u64>(std::numeric_limits<mem_size>::max())) {
+    if (expected_size > static_cast<u64>(static_cast<mem_size>(-1))) {
       close(fd);
       return {};
     }

@@ -2,8 +2,6 @@
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
 
-#include <cstddef>
-
 #include <znet/z_socket.h>
 #include <znet/z_packets.h>
 #include <znet/z_peer_mapping.h>
@@ -14,6 +12,7 @@
 #include <znet/fancy_queue.h>
 #include <znet/z_stl_compat.h>
 #else
+#include <base/memory/move.h>
 #include <base/containers/lock_free_ordered_map.h>
 #include <base/atomic.h>
 #include <base/logging.h>
@@ -76,7 +75,7 @@ class PacketDispatcher {
 
     if (packet.destination_peer_id == ZPeerId::to_server) {
       const u32 sequence_number =
-          next_outgoing_sequence_number_.fetch_add(1, std::memory_order_relaxed);
+          next_outgoing_sequence_number_.fetch_add(1, base::memory_order_relaxed);
       DispatchToServer(packet, builder, receipt_queue, sequence_number);
     } else if (packet.destination_peer_id == ZPeerId::to_all) {
       base::Vector<ZPeer>& peers = PeerSnapshotScratch();
@@ -84,7 +83,7 @@ class PacketDispatcher {
       for (auto& peer : peers) {
         OutgoingPacket fanout_packet = packet;
         const u32 sequence_number = next_outgoing_sequence_number_.fetch_add(
-            1, std::memory_order_relaxed);
+            1, base::memory_order_relaxed);
         DispatchToOne(peer.address, peer.identifier.id, fanout_packet, builder,
                       receipt_queue, sequence_number);
       }
@@ -92,7 +91,7 @@ class PacketDispatcher {
       ZSocket::Address address;
       if (peer_list_.ResolvePeerAddress(packet.destination_peer_id, address)) {
         const u32 sequence_number = next_outgoing_sequence_number_.fetch_add(
-            1, std::memory_order_relaxed);
+            1, base::memory_order_relaxed);
         DispatchToOne(address, packet.destination_peer_id, packet, builder,
                       receipt_queue, sequence_number);
       } else {
@@ -164,20 +163,20 @@ class PacketDispatcher {
       // interval dwarfs the cache staleness.
       {
         static thread_local u32 tl_cached_ts = 0;
-        static thread_local base::Clock::time_point tl_ts_refresh{};
-        auto now_tp = base::Clock::now();
-        if (now_tp - tl_ts_refresh > std::chrono::milliseconds(100)) {
+        static thread_local base::TimeTicks tl_ts_refresh{};
+        auto now_tp = base::TimeTicks::Now();
+        if (now_tp - tl_ts_refresh > base::Milliseconds(100)) {
           tl_cached_ts = static_cast<u32>(base::GetUnixTimeStamp());
           tl_ts_refresh = now_tp;
         }
         packet.last_send_time = tl_cached_ts;
       }
-      if (receipt_queue.insert(sequence_number, std::move(packet))) {
+      if (receipt_queue.insert(sequence_number, base::move(packet))) {
         if (awaiting_ack_packet_count_) {
-          awaiting_ack_packet_count_->fetch_add(1, std::memory_order_relaxed);
+          awaiting_ack_packet_count_->fetch_add(1, base::memory_order_relaxed);
         }
         if (awaiting_ack_bytes_) {
-          awaiting_ack_bytes_->fetch_add(payload_bytes, std::memory_order_relaxed);
+          awaiting_ack_bytes_->fetch_add(payload_bytes, base::memory_order_relaxed);
         }
       }
     }

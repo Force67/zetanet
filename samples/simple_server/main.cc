@@ -5,14 +5,17 @@
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
+#else
+#include <base/memory/move.h>
+#include <base/strings/xstring.h>
+#include <base/threading/thread.h>
+#include <base/time/time.h>
 #endif
 
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <iostream>
-#include <string>
-#include <thread>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 namespace {
 struct Options {
@@ -30,35 +33,35 @@ struct Options {
 Options ParseArgs(int argc, char** argv) {
   Options options;
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--duration-seconds") == 0 && i + 1 < argc) {
-      options.duration_seconds = std::atoi(argv[++i]);
-    } else if (std::strcmp(argv[i], "--dump-every-seconds") == 0 &&
+    if (strcmp(argv[i], "--duration-seconds") == 0 && i + 1 < argc) {
+      options.duration_seconds = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--dump-every-seconds") == 0 &&
                i + 1 < argc) {
-      options.dump_interval_seconds = std::atoi(argv[++i]);
-    } else if (std::strcmp(argv[i], "--summary-every-seconds") == 0 &&
+      options.dump_interval_seconds = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--summary-every-seconds") == 0 &&
                i + 1 < argc) {
-      options.summary_interval_seconds = std::atoi(argv[++i]);
-    } else if (std::strcmp(argv[i], "--quiet-data") == 0) {
+      options.summary_interval_seconds = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--quiet-data") == 0) {
       options.quiet_data = true;
-    } else if (std::strcmp(argv[i], "--verbose-data") == 0) {
+    } else if (strcmp(argv[i], "--verbose-data") == 0) {
       options.quiet_data = false;
-    } else if (std::strcmp(argv[i], "--rebroadcast-every-packets") == 0 &&
+    } else if (strcmp(argv[i], "--rebroadcast-every-packets") == 0 &&
                i + 1 < argc) {
-      options.rebroadcast_every_packets = std::atoi(argv[++i]);
-    } else if (std::strcmp(argv[i], "--rebroadcast-bytes") == 0 &&
+      options.rebroadcast_every_packets = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--rebroadcast-bytes") == 0 &&
                i + 1 < argc) {
-      options.rebroadcast_bytes = std::atoi(argv[++i]);
-    } else if (std::strcmp(argv[i], "--dispatch-executor") == 0 &&
+      options.rebroadcast_bytes = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--dispatch-executor") == 0 &&
                i + 1 < argc) {
       const char* mode = argv[++i];
       options.use_inline_dispatch_executor =
-          (std::strcmp(mode, "inline") == 0);
-    } else if (std::strcmp(argv[i], "--dispatch-workers") == 0 &&
+          (strcmp(mode, "inline") == 0);
+    } else if (strcmp(argv[i], "--dispatch-workers") == 0 &&
                i + 1 < argc) {
-      options.dispatch_workers = std::atoi(argv[++i]);
-    } else if (std::strcmp(argv[i], "--dispatch-max-queued") == 0 &&
+      options.dispatch_workers = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--dispatch-max-queued") == 0 &&
                i + 1 < argc) {
-      options.dispatch_max_queued = std::atoi(argv[++i]);
+      options.dispatch_max_queued = atoi(argv[++i]);
     }
   }
 
@@ -91,14 +94,14 @@ void LogHandler(void* user_pointer,
                 const char* channel_name,
                 int level,
                 const char* msg) {
-  std::fprintf(stderr, "[%s] %s: %s\n", channel_name,
-               base::LogLevelToName(static_cast<base::LogLevel>(level)), msg);
+  fprintf(stderr, "[%s] %s: %s\n", channel_name,
+          base::LogLevelToName(static_cast<base::LogLevel>(level)), msg);
 #if defined(_WIN32)
   char buffer[256];
-  std::snprintf(buffer, sizeof(buffer), "[%s] %s: %s\n", channel_name,
-                base::LogLevelToName(static_cast<base::LogLevel>(level)), msg);
+  snprintf(buffer, sizeof(buffer), "[%s] %s: %s\n", channel_name,
+           base::LogLevelToName(static_cast<base::LogLevel>(level)), msg);
   ::OutputDebugStringA(buffer);
-  std::cout << buffer;
+  fputs(buffer, stdout);
 #endif
 }
 }  // namespace
@@ -107,7 +110,10 @@ int main(int argc, char** argv) {
   const Options options = ParseArgs(argc, argv);
 
   tx::network::SetBaseLogHandlerFwd(nullptr, LogHandler);
-  std::cout << "Log handler set!" << std::endl;
+  // Progress lines interleave with the library's stderr logs; line buffering
+  // keeps them in order when stdout is a pipe.
+  setvbuf(stdout, nullptr, _IOLBF, 0);
+  printf("Log handler set!\n");
 
   tx::network::ZServer server;
   tx::network::ZInlineTaskExecutor inline_executor;
@@ -119,23 +125,23 @@ int main(int argc, char** argv) {
         static_cast<mem_size>(options.dispatch_max_queued));
   }
   if (!server.Begin(1337)) {
-    std::cerr << "Failed to start server" << std::endl;
+    fprintf(stderr, "Failed to start server\n");
     return -1;
   }
-  std::cout << "Server is up on port 1337" << std::endl;
+  printf("Server is up on port 1337\n");
 
-  const auto start_time = std::chrono::steady_clock::now();
-  auto next_dump = start_time;
-  auto next_summary = start_time;
+  const base::TimeTicks start_time = base::TimeTicks::Now();
+  base::TimeTicks next_dump = start_time;
+  base::TimeTicks next_summary = start_time;
 
-  std::size_t total_data_packets = 0;
-  std::size_t total_data_bytes = 0;
-  std::size_t total_system_packets = 0;
-  std::size_t total_rebroadcast_packets = 0;
-  std::size_t total_rebroadcast_bytes = 0;
+  size_t total_data_packets = 0;
+  size_t total_data_bytes = 0;
+  size_t total_system_packets = 0;
+  size_t total_rebroadcast_packets = 0;
+  size_t total_rebroadcast_bytes = 0;
 
-  std::size_t window_packets = 0;
-  std::size_t window_bytes = 0;
+  size_t window_packets = 0;
+  size_t window_bytes = 0;
 
   tx::network::IncomingPacket packet;
   while (true) {
@@ -149,23 +155,23 @@ int main(int argc, char** argv) {
         continue;
       }
 
-      const std::size_t payload_size = packet.data.size();
+      const size_t payload_size = packet.data.size();
       ++total_data_packets;
       total_data_bytes += payload_size;
       ++window_packets;
       window_bytes += payload_size;
 
       if (!options.quiet_data && (total_data_packets % 50 == 0)) {
-        std::cout << "[server] sample data packet size=" << payload_size
-                  << " total_packets=" << total_data_packets << std::endl;
+        printf("[server] sample data packet size=%zu total_packets=%zu\n",
+               payload_size, total_data_packets);
       }
 
       if (options.rebroadcast_every_packets > 0 &&
           (total_data_packets %
-           static_cast<std::size_t>(options.rebroadcast_every_packets)) == 0) {
-        const std::size_t payload_len =
-            static_cast<std::size_t>(options.rebroadcast_bytes);
-        std::string rebroadcast_payload(payload_len, 's');
+           static_cast<size_t>(options.rebroadcast_every_packets)) == 0) {
+        const size_t payload_len =
+            static_cast<size_t>(options.rebroadcast_bytes);
+        base::String rebroadcast_payload(payload_len, 's');
         const tx::network::PackageFlags flags{
             .reliable = 0,
             .encrypted = 0,
@@ -180,53 +186,47 @@ int main(int argc, char** argv) {
             base::Span<byte>(
                 reinterpret_cast<const byte*>(rebroadcast_payload.data()),
                 rebroadcast_payload.size()));
-        server.Push(std::move(out));
+        server.Push(base::move(out));
         ++total_rebroadcast_packets;
         total_rebroadcast_bytes += payload_len;
       }
     }
 
-    const auto now = std::chrono::steady_clock::now();
+    const base::TimeTicks now = base::TimeTicks::Now();
 
     if (options.summary_interval_seconds > 0 && now >= next_summary) {
       const double mbps =
           (static_cast<double>(window_bytes) * 8.0) /
           (static_cast<double>(options.summary_interval_seconds) *
            1024.0 * 1024.0);
-      std::cout << "[server] window packets=" << window_packets
-                << " window_bytes=" << window_bytes
-                << " approx_mbps=" << mbps
-                << " total_packets=" << total_data_packets
-                << " system_packets=" << total_system_packets
-                << " rebroadcast_packets=" << total_rebroadcast_packets
-                << std::endl;
+      // %g matches the iostream default the output format was written for.
+      printf(
+          "[server] window packets=%zu window_bytes=%zu approx_mbps=%g "
+          "total_packets=%zu system_packets=%zu rebroadcast_packets=%zu\n",
+          window_packets, window_bytes, mbps, total_data_packets,
+          total_system_packets, total_rebroadcast_packets);
       window_packets = 0;
       window_bytes = 0;
-      next_summary = now + std::chrono::seconds(options.summary_interval_seconds);
+      next_summary = now + base::Seconds(options.summary_interval_seconds);
     }
 
     if (options.dump_interval_seconds > 0 && now >= next_dump) {
       tx::network::ZDumpPacketAllocatorStats();
-      next_dump = now + std::chrono::seconds(options.dump_interval_seconds);
+      next_dump = now + base::Seconds(options.dump_interval_seconds);
     }
 
     if (options.duration_seconds > 0) {
-      const auto elapsed =
-          std::chrono::duration_cast<std::chrono::seconds>(now - start_time);
-      if (elapsed.count() >= options.duration_seconds) {
-        std::cout << "Duration reached, exiting server loop." << std::endl;
+      if ((now - start_time).InSeconds() >= options.duration_seconds) {
+        printf("Duration reached, exiting server loop.\n");
         break;
       }
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    base::SleepForMilliseconds(1);
   }
 
-  const auto end_time = std::chrono::steady_clock::now();
   const double total_seconds =
-      std::chrono::duration_cast<std::chrono::duration<double>>(end_time -
-                                                                 start_time)
-          .count();
+      (base::TimeTicks::Now() - start_time).InSecondsF();
   const double packets_per_sec =
       total_seconds > 0.0 ? static_cast<double>(total_data_packets) / total_seconds
                           : 0.0;
@@ -236,14 +236,13 @@ int main(int argc, char** argv) {
                 (total_seconds * 1024.0 * 1024.0)
           : 0.0;
 
-  std::cout << "[server] final total_packets=" << total_data_packets
-            << " total_bytes=" << total_data_bytes
-            << " duration_s=" << total_seconds
-            << " avg_pps=" << packets_per_sec
-            << " avg_mbps=" << mbps
-            << " system_packets=" << total_system_packets
-            << " rebroadcast_packets=" << total_rebroadcast_packets
-            << " rebroadcast_bytes=" << total_rebroadcast_bytes << std::endl;
+  printf(
+      "[server] final total_packets=%zu total_bytes=%zu duration_s=%g "
+      "avg_pps=%g avg_mbps=%g system_packets=%zu rebroadcast_packets=%zu "
+      "rebroadcast_bytes=%zu\n",
+      total_data_packets, total_data_bytes, total_seconds, packets_per_sec,
+      mbps, total_system_packets, total_rebroadcast_packets,
+      total_rebroadcast_bytes);
 
   tx::network::ZDumpPacketAllocatorStats();
   server.Deinit();

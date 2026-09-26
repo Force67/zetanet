@@ -1,24 +1,28 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #include "z_p2p_node.h"
-#include <mutex>
+#include <string.h>
+#include <stdint.h>
 #include "z_wire_le.h"
 
+#ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
-
-#include <chrono>
-#include <cstring>
-#include <limits>
-#include <thread>
+#else
+#include <base/memory/move.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
+#include <base/time/time.h>
+#endif
 
 namespace tx::network {
 namespace {
 constexpr char kLogTag[] = "z-p2p-node";
-constexpr auto kPunchProbeInterval = std::chrono::milliseconds(120);
+constexpr auto kPunchProbeInterval = base::Milliseconds(120);
 constexpr u32 kMaxPunchProbeAttempts = 12;
-constexpr auto kPeerKeepAliveInterval = std::chrono::seconds(10);
-constexpr auto kHostKeepAliveInterval = std::chrono::seconds(2);
-constexpr auto kPeerLivenessTimeout = std::chrono::seconds(25);
+constexpr auto kPeerKeepAliveInterval = base::Seconds(10);
+constexpr auto kHostKeepAliveInterval = base::Seconds(2);
+constexpr auto kPeerLivenessTimeout = base::Seconds(25);
 
 u8 PackRelayFlags(const PackageFlags& flags) {
   return static_cast<u8>((flags.reliable ? 1u : 0u) |
@@ -60,7 +64,7 @@ bool ZP2PNode::Begin(u16 port, const StartOptions& options) {
   start_options_ = options;
   local_port_ = port;
   has_public_endpoint_ = false;
-  std::memset(&public_endpoint_, 0, sizeof(public_endpoint_));
+  memset(&public_endpoint_, 0, sizeof(public_endpoint_));
   return InitAsHost(port);
 }
 
@@ -100,13 +104,13 @@ bool ZP2PNode::Update() {
 }
 
 bool ZP2PNode::Poll(PacketChannelType channel, IncomingPacket& packet) {
-  std::lock_guard<base::Mutex> lock(incoming_mutex_);
+  base::LockGuard<base::Mutex> lock(incoming_mutex_);
   auto& queue =
       channel == PacketChannelType::Control ? incoming_control_ : incoming_data_;
   if (queue.empty()) {
     return false;
   }
-  packet = std::move(queue.front());
+  packet = base::move(queue.front());
   queue.pop();
   return true;
 }
@@ -128,7 +132,7 @@ void ZP2PNode::SendMessage(ZPeerId id, const base::String& data) {
   OutgoingPacket out(
       id.id, PacketType::Message, PacketChannelType::Data, flags,
       base::Span<byte>(reinterpret_cast<const byte*>(data.data()), data.size()));
-  SendPacket(std::move(out));
+  SendPacket(base::move(out));
 }
 
 bool ZP2PNode::SendPacket(OutgoingPacket&& packet) {
@@ -154,12 +158,12 @@ bool ZP2PNode::SendPacket(OutgoingPacket&& packet) {
     }
   }
 
-  packet_queue_.Push(std::move(packet));
+  packet_queue_.Push(base::move(packet));
   return true;
 }
 
 bool ZP2PNode::PollPeerEvent(PeerEvent& event) {
-  std::lock_guard<base::Mutex> lock(event_mutex_);
+  base::LockGuard<base::Mutex> lock(event_mutex_);
   if (peer_events_.empty()) {
     return false;
   }
@@ -181,7 +185,7 @@ bool ZP2PNode::InitAsHost(u16 port) {
   recently_seen_peers_.clear();
   announced_peer_presence_.clear();
   {
-    std::lock_guard<base::Mutex> lock(incoming_mutex_);
+    base::LockGuard<base::Mutex> lock(incoming_mutex_);
     while (!incoming_control_.empty()) {
       incoming_control_.pop();
     }
@@ -190,7 +194,7 @@ bool ZP2PNode::InitAsHost(u16 port) {
     }
   }
   {
-    std::lock_guard<base::Mutex> lock(event_mutex_);
+    base::LockGuard<base::Mutex> lock(event_mutex_);
     while (!peer_events_.empty()) {
       peer_events_.pop();
     }
@@ -224,7 +228,7 @@ bool ZP2PNode::InitAsHost(u16 port) {
   SetHostEndpoint(endpoint);
   type_ = Type::Host;
   state_ = State::kConnected;
-  last_host_keepalive_time_ = base::Clock::now();
+  last_host_keepalive_time_ = base::TimeTicks::Now();
   return true;
 }
 
@@ -237,9 +241,9 @@ bool ZP2PNode::InitAsClient(const base::StringRef host_ip,
   recently_seen_peers_.clear();
   announced_peer_presence_.clear();
   has_public_endpoint_ = false;
-  std::memset(&public_endpoint_, 0, sizeof(public_endpoint_));
+  memset(&public_endpoint_, 0, sizeof(public_endpoint_));
   {
-    std::lock_guard<base::Mutex> lock(incoming_mutex_);
+    base::LockGuard<base::Mutex> lock(incoming_mutex_);
     while (!incoming_control_.empty()) {
       incoming_control_.pop();
     }
@@ -248,7 +252,7 @@ bool ZP2PNode::InitAsClient(const base::StringRef host_ip,
     }
   }
   {
-    std::lock_guard<base::Mutex> lock(event_mutex_);
+    base::LockGuard<base::Mutex> lock(event_mutex_);
     while (!peer_events_.empty()) {
       peer_events_.pop();
     }
@@ -278,7 +282,7 @@ bool ZP2PNode::InitAsClient(const base::StringRef host_ip,
   SetHostEndpoint(endpoint);
   type_ = Type::Client;
   state_ = State::kConnected;
-  last_host_keepalive_time_ = base::Clock::now();
+  last_host_keepalive_time_ = base::TimeTicks::Now();
   return true;
 }
 
@@ -310,7 +314,7 @@ bool ZP2PNode::PromoteToHost(bool announce_transition) {
     }
 
     BroadcastHostTransition(new_host);
-    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    base::SleepForMilliseconds(120);
   }
 
   if (!InitAsHost(local_port_)) {
@@ -354,10 +358,10 @@ bool ZP2PNode::ReconnectToHost(const ZSocket::Address& endpoint) {
 }
 
 void ZP2PNode::ProcessIncomingPacket(const IncomingPacket& packet) {
-  recently_seen_peers_[packet.source_peer_id] = base::Clock::now();
+  recently_seen_peers_[packet.source_peer_id] = base::TimeTicks::Now();
   if (ZPeer* source_peer = peer_mapping_.GetPeer(ZPeerId(packet.source_peer_id))) {
     auto& state = GetOrCreatePunchPeerState(source_peer->address);
-    state.last_keepalive_time = base::Clock::now();
+    state.last_keepalive_time = base::TimeTicks::Now();
   }
   if (packet.channel == PacketChannelType::Control &&
       packet.type == PacketType::NetworkControl) {
@@ -454,7 +458,7 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
         if (!peer) {
           continue;
         }
-        recently_seen_peers_[peer->identifier.id] = base::Clock::now();
+        recently_seen_peers_[peer->identifier.id] = base::TimeTicks::Now();
         if (announced_peer_presence_.find(peer->identifier.id) ==
             announced_peer_presence_.end()) {
           announced_peer_presence_[peer->identifier.id] = true;
@@ -495,7 +499,7 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
       }
       if (!IsSelfAddress(source_peer->address)) {
         auto& state = GetOrCreatePunchPeerState(source_peer->address);
-        state.last_keepalive_time = base::Clock::now();
+        state.last_keepalive_time = base::TimeTicks::Now();
       }
       break;
     }
@@ -505,7 +509,7 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
       }
       if (!IsSelfAddress(source_peer->address)) {
         auto& state = GetOrCreatePunchPeerState(source_peer->address);
-        state.last_keepalive_time = base::Clock::now();
+        state.last_keepalive_time = base::TimeTicks::Now();
         ArmPunchProbe(source_peer->address);
         SendPunchAck(source_peer->address);
       }
@@ -519,7 +523,7 @@ void ZP2PNode::ProcessControlPacket(const IncomingPacket& packet) {
         auto& state = GetOrCreatePunchPeerState(source_peer->address);
         state.acknowledged = true;
         state.relay_mode = false;
-        state.last_keepalive_time = base::Clock::now();
+        state.last_keepalive_time = base::TimeTicks::Now();
         relay_announcement_state_[source_peer->identifier.id] = false;
       }
       break;
@@ -750,7 +754,7 @@ bool ZP2PNode::SerializeRelayEnvelope(ControlKind kind,
   if (kind != ControlKind::RelayRequest && kind != ControlKind::RelayDelivery) {
     return false;
   }
-  if (envelope.payload.size() > std::numeric_limits<u32>::max()) {
+  if (envelope.payload.size() > UINT32_MAX) {
     return false;
   }
 
@@ -856,7 +860,7 @@ bool ZP2PNode::ShouldUseRelayForPeer(u32 peer_id) {
 }
 
 void ZP2PNode::EmitPeerEvent(PeerEventType type, u32 peer_id, u32 detail) {
-  std::lock_guard<base::Mutex> lock(event_mutex_);
+  base::LockGuard<base::Mutex> lock(event_mutex_);
   peer_events_.push(PeerEvent{type, peer_id, detail});
 }
 
@@ -865,10 +869,10 @@ void ZP2PNode::TickNatPunchthrough() {
     return;
   }
 
-  const auto now = base::Clock::now();
+  const auto now = base::TimeTicks::Now();
 
   if (type_ == Type::Client && !IsSelfAddress(host_endpoint_)) {
-    if (last_host_keepalive_time_.time_since_epoch().count() == 0 ||
+    if (last_host_keepalive_time_.is_null() ||
         now - last_host_keepalive_time_ >= kHostKeepAliveInterval) {
       SendKeepAlive(host_endpoint_);
       last_host_keepalive_time_ = now;
@@ -886,7 +890,7 @@ void ZP2PNode::TickNatPunchthrough() {
       continue;
     }
 
-    if (punch_peer.last_keepalive_time.time_since_epoch().count() != 0 &&
+    if (!punch_peer.last_keepalive_time.is_null() &&
         now - punch_peer.last_keepalive_time >= kPeerLivenessTimeout) {
       ZPeer* stale_peer = peer_mapping_.GetPeerByAddress(punch_peer.address);
       if (stale_peer) {
@@ -923,7 +927,7 @@ void ZP2PNode::TickNatPunchthrough() {
       continue;
     }
 
-    if (punch_peer.last_keepalive_time.time_since_epoch().count() == 0 ||
+    if (punch_peer.last_keepalive_time.is_null() ||
         now - punch_peer.last_keepalive_time >= kPeerKeepAliveInterval) {
       SendKeepAlive(punch_peer.address);
       punch_peer.last_keepalive_time = now;
@@ -950,7 +954,7 @@ ZP2PNode::PunchPeerState& ZP2PNode::GetOrCreatePunchPeerState(
 
   PunchPeerState state{};
   state.address = endpoint;
-  state.next_probe_time = base::Clock::now();
+  state.next_probe_time = base::TimeTicks::Now();
   state.last_keepalive_time = state.next_probe_time;
   punch_peers_.push_back(state);
   return punch_peers_.back();
@@ -973,7 +977,7 @@ void ZP2PNode::ArmPunchProbe(const ZSocket::Address& endpoint) {
     state.attempts_sent = 0;
   }
   state.relay_mode = false;
-  state.next_probe_time = base::Clock::now();
+  state.next_probe_time = base::TimeTicks::Now();
 }
 
 bool ZP2PNode::IsSelfAddress(const ZSocket::Address& address) const {
@@ -985,9 +989,9 @@ bool ZP2PNode::IsSelfAddress(const ZSocket::Address& address) const {
     return false;
   }
 
-  if (std::strcmp(address.ip, "127.0.0.1") == 0 ||
-      std::strcmp(address.ip, "0.0.0.0") == 0 ||
-      std::strcmp(address.ip, "::1") == 0) {
+  if (strcmp(address.ip, "127.0.0.1") == 0 ||
+      strcmp(address.ip, "0.0.0.0") == 0 ||
+      strcmp(address.ip, "::1") == 0) {
     return true;
   }
 
@@ -1010,7 +1014,7 @@ void ZP2PNode::PushControlPacket(u32 destination_peer_id,
   OutgoingPacket out(destination_peer_id, PacketType::NetworkControl,
                      PacketChannelType::Control, flags,
                      base::Span<byte>(payload.data(), payload.size()));
-  packet_queue_.Push(std::move(out));
+  packet_queue_.Push(base::move(out));
 }
 
 void ZP2PNode::PushControlPacketToAddress(const ZSocket::Address& destination,
@@ -1058,9 +1062,9 @@ bool ZP2PNode::DeserializeAddress(const byte* data,
     return false;
   }
 
-  std::memset(&address, 0, sizeof(address));
+  memset(&address, 0, sizeof(address));
   address.address_family = addr_family;
-  std::memcpy(address.ip, data + cursor, ip_len);
+  memcpy(address.ip, data + cursor, ip_len);
   cursor += ip_len;
 
   u16 port = 0;
@@ -1072,7 +1076,7 @@ bool ZP2PNode::DeserializeAddress(const byte* data,
 }
 
 void ZP2PNode::QueueIncoming(const IncomingPacket& packet) {
-  std::lock_guard<base::Mutex> lock(incoming_mutex_);
+  base::LockGuard<base::Mutex> lock(incoming_mutex_);
   auto& queue = packet.channel == PacketChannelType::Control ? incoming_control_
                                                               : incoming_data_;
   queue.push(packet);

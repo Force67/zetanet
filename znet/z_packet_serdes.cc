@@ -2,14 +2,15 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_packet_serdes.h"
-#include <cstring>
-
-#include <limits>
+#include <string.h>
+#include <stdint.h>
 
 #include <znet/z_clock.h>
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/time/time.h>
+#include <base/memory/move.h>
 #include <base/logging.h>
 #endif
 
@@ -24,11 +25,11 @@ static constexpr u32 kTimeshift =
 
 // Coarse thread-local timestamp cache.
 static thread_local u32 g_cached_shifted_timestamp{0};
-static thread_local base::Clock::time_point g_timestamp_refresh{};
+static thread_local base::TimeTicks g_timestamp_refresh{};
 
 inline u32 GetCachedShiftedTimestamp() {
-  const auto now = base::Clock::now();
-  if (now - g_timestamp_refresh > std::chrono::milliseconds(250)) {
+  const auto now = base::TimeTicks::Now();
+  if (now - g_timestamp_refresh > base::Milliseconds(250)) {
     g_cached_shifted_timestamp =
         static_cast<u32>(base::GetUnixTimeStamp() - kTimeshift);
     g_timestamp_refresh = now;
@@ -122,7 +123,7 @@ u32 ComputeChecksum32(const byte* data, mem_size size) {
 
 u16 ComputePacketHeaderChecksum(const byte* header_wire) {
   byte header_copy[kPacketHeaderWireSize];
-  std::memcpy(header_copy, header_wire, kPacketHeaderWireSize);
+  memcpy(header_copy, header_wire, kPacketHeaderWireSize);
   wire_le::StoreU16(header_copy + kHeaderChecksumOffset, 0);
   return static_cast<u16>(
       ComputeChecksum32(header_copy, kPacketHeaderWireSize) & 0xFFFFu);
@@ -171,7 +172,7 @@ bool PacketBuilder::BuildPacketInto(OutgoingPacket& packet_info,
   base::Vector<byte> encrypted_payload;
   if (packet_info.flags.encrypted) {
     if (payload_size >
-        std::numeric_limits<u32>::max() - ZCryptoContext::kNonceSize -
+        UINT32_MAX - ZCryptoContext::kNonceSize -
             ZCryptoContext::kGcmTagSize) {
       BASE_LOGE(kLogTag, "Encrypted payload size overflow");
       return false;
@@ -181,7 +182,7 @@ bool PacketBuilder::BuildPacketInto(OutgoingPacket& packet_info,
                                         ZCryptoContext::kGcmTagSize);
     encrypted_payload.resize(payload_size);
     if (payload_size > 0) {
-      std::memcpy(encrypted_payload.data(), payload_source, payload_size);
+      memcpy(encrypted_payload.data(), payload_source, payload_size);
     }
     if (!EncryptPayloadIfNeeded(packet_info, next_sequence_number,
                                 encrypted_wire_payload_size,
@@ -190,7 +191,7 @@ bool PacketBuilder::BuildPacketInto(OutgoingPacket& packet_info,
       BASE_LOGE(kLogTag, "Failed to encrypt outgoing payload");
       return false;
     }
-    if (encrypted_payload.size() > std::numeric_limits<u32>::max()) {
+    if (encrypted_payload.size() > UINT32_MAX) {
       BASE_LOGE(kLogTag, "Payload exceeds protocol size limit");
       return false;
     }
@@ -203,7 +204,7 @@ bool PacketBuilder::BuildPacketInto(OutgoingPacket& packet_info,
       (packet_info.flags.reliable ? static_cast<u32>(kReliableHeaderWireSize) : 0u) +
       (packet_info.flags.compressed ? static_cast<u32>(kCompressedHeaderWireSize)
                                     : static_cast<u32>(kUncompressedHeaderWireSize));
-  if (size_of_headers > std::numeric_limits<u32>::max() - payload_size) {
+  if (size_of_headers > UINT32_MAX - payload_size) {
     BASE_LOGE(kLogTag, "Packet size overflow");
     return false;
   }
@@ -213,7 +214,7 @@ bool PacketBuilder::BuildPacketInto(OutgoingPacket& packet_info,
                    payload_size, original_payload_size, next_sequence_number);
 
   if (payload_size > 0) {
-    std::memcpy(out.data() + size_of_headers, payload_source, payload_size);
+    memcpy(out.data() + size_of_headers, payload_source, payload_size);
   }
 
   if (out.size() < kPacketHeaderWireSize) {
@@ -453,7 +454,7 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
   } else {
     base::Vector<byte> payload_data(payload_size);
     if (payload_size > 0) {
-      std::memcpy(payload_data.data(), in_buffer + offset, payload_size);
+      memcpy(payload_data.data(), in_buffer + offset, payload_size);
     }
 
     if (header.flags.is_encrypted) {
@@ -483,7 +484,7 @@ bool PacketUnpacker::UnpackPacket(const byte* in_buffer,
         BASE_LOGE(kLogTag, "Decompression failed");
         return false;
       }
-      payload_data = std::move(decompressed);
+      payload_data = base::move(decompressed);
     }
 
     if (payload_data.empty()) {

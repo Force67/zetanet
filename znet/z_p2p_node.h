@@ -7,15 +7,12 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/threading/mutex.h>
+#include <base/time/time.h>
 #include <base/containers/map.h>
 #include <base/containers/queue.h>
 #endif
 #include <znet/z_transport.h>
-
-#include <chrono>
-#include <mutex>
-#include <queue>
-#include <string>
 
 namespace tx::network {
 
@@ -83,8 +80,8 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
     u32 attempts_sent{0};
     bool acknowledged{false};
     bool relay_mode{false};
-    base::Clock::time_point next_probe_time{};
-    base::Clock::time_point last_keepalive_time{};
+    base::TimeTicks next_probe_time{};
+    base::TimeTicks last_keepalive_time{};
   };
 
   struct RelayEnvelope {
@@ -162,10 +159,10 @@ class ZNET_API ZP2PNode final : public ZAsyncTransportLayer {
   ZSocket::Address host_endpoint_{};
   ZSocket::Address public_endpoint_{};
   bool has_public_endpoint_{false};
-  base::Clock::time_point last_host_keepalive_time_{};
+  base::TimeTicks last_host_keepalive_time_{};
   base::Vector<PunchPeerState> punch_peers_;
   base::Map<u32, bool> relay_announcement_state_{};
-  base::Map<u32, base::Clock::time_point> recently_seen_peers_{};
+  base::Map<u32, base::TimeTicks> recently_seen_peers_{};
   base::Map<u32, bool> announced_peer_presence_{};
 
   base::Mutex incoming_mutex_;

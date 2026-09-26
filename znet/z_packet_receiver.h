@@ -1,7 +1,7 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
-#include <algorithm>
+#include <string.h>
 
 #include <znet/z_socket.h>
 #include <znet/z_packets.h>
@@ -13,6 +13,7 @@
 #include <znet/z_stl_compat.h>
 #else
 #include <base/atomic.h>
+#include <base/math/value_bounds.h>
 #include <base/logging.h>
 #include <base/time/time.h>
 #include <base/containers/vector.h>
@@ -135,12 +136,12 @@ class PacketReceiver {
     UpdateAveragePacketSize(packet_size);
 
     if (packet_size > incoming_buffer_.size()) {
-      incoming_buffer_.resize(std::min(packet_size, MaxBufferSize));
+      incoming_buffer_.resize(base::Min<mem_size>(packet_size, MaxBufferSize));
       memset(incoming_buffer_.data(), 0, incoming_buffer_.size());
     } else if (average_packet_size_ <
                    incoming_buffer_.size() * ResizeDownThreshold &&
                incoming_buffer_.size() > MinimumBufferSize) {
-      incoming_buffer_.resize(std::max(
+      incoming_buffer_.resize(base::Max<mem_size>(
           static_cast<mem_size>(average_packet_size_), MinimumBufferSize));
       memset(incoming_buffer_.data(), 0, incoming_buffer_.size());
     }

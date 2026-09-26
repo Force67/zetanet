@@ -1,7 +1,7 @@
 // Copyright (C) 2023-2026 Vincent Hengel
 // For licensing information see LICENSE at the root of this distribution.
 #pragma once
-#include <cstring>
+#include <string.h>
 
 // Trait-based dispatch for BitWriter::Push / BitReader::Pop. User types opt
 // in by specializing BitTraits<T>; per-field members can be wrapped in
@@ -70,14 +70,14 @@ template <>
 struct BitTraits<i32> {
   static void Write(BitWriter& w, i32 v) {
     u32 raw;
-    std::memcpy(&raw, &v, 4);
+    memcpy(&raw, &v, 4);
     w.WriteBits(raw, 32);
   }
   static bool Read(BitReader& r, i32& v) {
     u64 raw = 0;
     if (!r.ReadBits(raw, 32)) return false;
     const u32 truncated = static_cast<u32>(raw);
-    std::memcpy(&v, &truncated, 4);
+    memcpy(&v, &truncated, 4);
     return true;
   }
 };
@@ -86,14 +86,14 @@ template <>
 struct BitTraits<f32> {
   static void Write(BitWriter& w, f32 v) {
     u32 raw;
-    std::memcpy(&raw, &v, 4);
+    memcpy(&raw, &v, 4);
     w.WriteBits(raw, 32);
   }
   static bool Read(BitReader& r, f32& v) {
     u64 raw = 0;
     if (!r.ReadBits(raw, 32)) return false;
     const u32 truncated = static_cast<u32>(raw);
-    std::memcpy(&v, &truncated, 4);
+    memcpy(&v, &truncated, 4);
     return true;
   }
 };

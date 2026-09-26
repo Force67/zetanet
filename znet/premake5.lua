@@ -37,6 +37,8 @@ project("zetanet")
           "fmtlib",
           "lz4",
       })
+      -- The equilibrium configuration follows base's rules, exceptions included.
+      exceptionhandling("Off")
     end
 
     apply_znet_crypto_links()

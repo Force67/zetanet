@@ -2,12 +2,12 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_file_write_interface.h"
-
-#include <utility>
+#include <stdint.h>
 
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/memory/move.h>
 #include <base/filesystem/file.h>
 #endif
 
@@ -17,7 +17,7 @@ namespace {
 class PositionalFileWriteHandle final : public IFileWriteHandle {
  public:
   explicit PositionalFileWriteHandle(base::UniquePointer<base::File> file)
-      : file_(std::move(file)) {}
+      : file_(base::move(file)) {}
 
   bool WriteAt(u64 offset, const char* data, mem_size size) override {
     if (!file_) {
@@ -60,7 +60,7 @@ class PositionalFileWriteFactory final : public IFileWriteFactory {
       return {};
     }
     return base::UniquePointer<IFileWriteHandle>(
-        new PositionalFileWriteHandle(std::move(file)));
+        new PositionalFileWriteHandle(base::move(file)));
   }
 };
 

@@ -6,6 +6,7 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/memory/move.h>
 #include <base/containers/vector.h>
 #include <base/time/time.h>
 #include <base/logging.h>
@@ -76,7 +77,7 @@ class PacketBuilder {
             encrypted_payload)) {
       return false;
     }
-    payload = std::move(encrypted_payload);
+    payload = base::move(encrypted_payload);
     return true;
   }
 };
@@ -147,7 +148,7 @@ class PacketUnpacker {
             base::Span<byte>(aad, sizeof(aad)), plaintext)) {
       return false;
     }
-    payload = std::move(plaintext);
+    payload = base::move(plaintext);
     return true;
   }
 };

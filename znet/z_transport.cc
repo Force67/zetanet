@@ -7,6 +7,7 @@
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/memory/move.h>
 #include <base/containers/vector.h>
 #include <base/logging.h>
 #include <base/time/time.h>
@@ -19,7 +20,7 @@ ZAsyncTransportLayer::ZAsyncTransportLayer()
     : socket_(),
       stop_threads(false),
       packet_queue_(socket_, peer_mapping_, stop_threads) {
-  local_clock_epoch_ = base::Clock::now();
+  local_clock_epoch_ = base::TimeTicks::Now();
 }
 
 ZAsyncTransportLayer::~ZAsyncTransportLayer() {
@@ -28,7 +29,7 @@ ZAsyncTransportLayer::~ZAsyncTransportLayer() {
 
 bool ZAsyncTransportLayer::Init(const InitOptions& options) {
   state_ = State::kConnecting;
-  local_clock_epoch_ = base::Clock::now();
+  local_clock_epoch_ = base::TimeTicks::Now();
   ResetSynchronizedClock();
   socket_.SetChaosOptions(options.chaos);
 
@@ -116,7 +117,7 @@ bool ZAsyncTransportLayer::EnqueuePacket(OutgoingPacket&& packet) {
     BASE_LOGW(kLogTag, "Dropping packet while disconnected");
     return false;
   }
-  packet_queue_.Push(std::move(packet));
+  packet_queue_.Push(base::move(packet));
   return true;
 }
 
@@ -137,9 +138,8 @@ ZAsyncTransportLayer::OutboundPressure ZAsyncTransportLayer::GetOutboundPressure
 }
 
 u64 ZAsyncTransportLayer::GetLocalClockTickMs() const {
-  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-      base::Clock::now() - local_clock_epoch_);
-  return elapsed.count() > 0 ? static_cast<u64>(elapsed.count()) : 0;
+  const i64 elapsed_ms = (base::TimeTicks::Now() - local_clock_epoch_).InMilliseconds();
+  return elapsed_ms > 0 ? static_cast<u64>(elapsed_ms) : 0;
 }
 
 u64 ZAsyncTransportLayer::GetSynchronizedClockTickMs() const {

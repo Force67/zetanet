@@ -2,23 +2,24 @@
 // For licensing information see LICENSE at the root of this distribution.
 
 #include "z_file_transporter.h"
-#include <mutex>
+#include <stdio.h>
+#include <ctype.h>
+#include <stdint.h>
 #include "z_crypto_backend.h"
 #include "z_file_write_interface.h"
 #include "z_transport.h"
 #include "z_wire_le.h"
 
-#include <algorithm>
-#include <atomic>
-#include <cctype>
-#include <chrono>
-#include <cstdio>
-#include <limits>
-#include <thread>
-
 #ifdef ZNET_USE_STL
 #include <znet/z_stl_compat.h>
 #else
+#include <base/math/value_bounds.h>
+#include <base/threading/lock_guard.h>
+#include <base/threading/mutex.h>
+#include <base/threading/thread.h>
+#include <base/time/time.h>
+#include <base/atomic.h>
+#include <base/memory/move.h>
 #include <base/containers/vector.h>
 #include <base/filesystem/file.h>
 #include <base/logging.h>
@@ -95,7 +96,7 @@ bool ContainsPathTraversal(const base::String& path) {
   if (path[0] == '/' || path[0] == '\\') {
     return true;
   }
-  if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
+  if (path.size() >= 2 && isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
     return true;
   }
   return ContainsParentDirTraversal(path);
@@ -159,7 +160,7 @@ u64 SafeReadChunk(base::File& file,
 
 u64 GenerateTransferId() {
   static base::Atomic<u64> counter{1};
-  return counter.fetch_add(1u, std::memory_order_relaxed);
+  return counter.fetch_add(1u, base::memory_order_relaxed);
 }
 }  // namespace
 
@@ -172,7 +173,7 @@ ZFileTransporter::~ZFileTransporter() {}
 
 void ZFileTransporter::SetFileWriteFactory(
     IFileWriteFactory* file_write_factory) {
-  std::lock_guard<base::Mutex> lock(stream_mutex_);
+  base::LockGuard<base::Mutex> lock(stream_mutex_);
   file_write_factory_ = file_write_factory ? file_write_factory
                                            : &GetDefaultFileWriteFactory();
 }
@@ -205,7 +206,7 @@ bool ZFileTransporter::SendFile(const base::Path& path,
     return false;
   }
   if (tuning.chunk_size == 0 ||
-      tuning.chunk_size > static_cast<mem_size>(std::numeric_limits<u32>::max())) {
+      tuning.chunk_size > static_cast<mem_size>(UINT32_MAX)) {
     BASE_LOGE(kLogTag, "Invalid chunk_size in transfer tuning");
     return false;
   }
@@ -216,7 +217,7 @@ bool ZFileTransporter::SendFile(const base::Path& path,
   }
   const mem_size total_chunks_64 = CalculateTotalChunks(file_size, chunk_size);
   if (total_chunks_64 == 0 ||
-      total_chunks_64 > static_cast<mem_size>(std::numeric_limits<u32>::max())) {
+      total_chunks_64 > static_cast<mem_size>(UINT32_MAX)) {
     BASE_LOGE(kLogTag, "Unsupported chunk count for file {}", path.ToAsciiString());
     return false;
   }
@@ -227,7 +228,7 @@ bool ZFileTransporter::SendFile(const base::Path& path,
 
   const base::String file_name = path.BaseName().ToAsciiString();
   if (!IsSafeTransferFileName(file_name) ||
-      file_name.size() > std::numeric_limits<u16>::max()) {
+      file_name.size() > UINT16_MAX) {
     BASE_LOGE(kLogTag, "Unsupported file name for transfer");
     return false;
   }
@@ -249,16 +250,16 @@ bool ZFileTransporter::SendFile(const base::Path& path,
             path.ToAsciiString(), file_size, total_chunks, transfer_id);
 
   for (u32 chunk_index = 0; chunk_index < total_chunks; ++chunk_index) {
-    if (send_stop_requested_.load(std::memory_order_relaxed)) {
+    if (send_stop_requested_.load(base::memory_order_relaxed)) {
       BASE_LOGI(kLogTag, "Transfer {} aborted by stop request", transfer_id);
       return false;
     }
     const u64 remaining = (file_size > file_offset) ? (file_size - file_offset) : 0;
     const u32 target_chunk_bytes =
-        static_cast<u32>(std::min<u64>(remaining, static_cast<u64>(chunk_size)));
+        static_cast<u32>(base::Min<u64>(remaining, static_cast<u64>(chunk_size)));
     const u64 bytes_read_u64 =
         SafeReadChunk(file, file_offset, read_buffer.data(), target_chunk_bytes);
-    if (bytes_read_u64 > std::numeric_limits<u32>::max()) {
+    if (bytes_read_u64 > UINT32_MAX) {
       BASE_LOGE(kLogTag, "Read size overflow while sending file chunk");
       return false;
     }
@@ -330,13 +331,13 @@ bool ZFileTransporter::SendFile(const base::Path& path,
     OutgoingPacket packet(destination.id, PacketType::FileTransfer,
                           PacketChannelType::Control, flags,
                           base::Span<byte>(payload.data(), payload.size()));
-    if (!transport_layer_.EnqueuePacket(std::move(packet))) {
+    if (!transport_layer_.EnqueuePacket(base::move(packet))) {
       BASE_LOGE(kLogTag, "Failed to enqueue file transfer chunk {}", chunk_index);
       return false;
     }
 
     if (((chunk_index + 1) % kDispatchBatchSize) == 0) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      base::SleepForMilliseconds(1);
     }
   }
 
@@ -355,7 +356,7 @@ bool ZFileTransporter::AssembleFileFromChunks(
     const base::Map<u32, base::String>& chunks,
     u32 total_chunks) {
   return AssembleFileFromChunks(output_path, chunks, total_chunks,
-                                std::numeric_limits<u64>::max(), 0);
+                                UINT64_MAX, 0);
 }
 
 bool ZFileTransporter::AssembleFileFromChunks(
@@ -409,7 +410,7 @@ bool ZFileTransporter::AssembleFileFromChunks(
                        chunk_data.size(), file_checksum);
   }
 
-  if (expected_file_size != std::numeric_limits<u64>::max() &&
+  if (expected_file_size != UINT64_MAX &&
       bytes_written != expected_file_size) {
     BASE_LOGE(kLogTag, "Reassembled size mismatch: got {} expected {}",
               bytes_written, expected_file_size);
@@ -439,7 +440,7 @@ bool ZFileTransporter::BuildTransferChunkPayload(
   if (chunk.has_file_name && !IsSafeTransferFileName(chunk.file_name)) {
     return false;
   }
-  if (chunk.file_name.size() > std::numeric_limits<u16>::max()) {
+  if (chunk.file_name.size() > UINT16_MAX) {
     return false;
   }
   if (!chunk.has_file_name && !chunk.file_name.empty()) {
@@ -463,7 +464,7 @@ bool ZFileTransporter::BuildTransferChunkPayload(
     return false;
   }
   const u64 remaining = chunk.file_size - chunk_start;
-  const u64 expected_chunk_bytes = std::min<u64>(remaining, chunk.chunk_size);
+  const u64 expected_chunk_bytes = base::Min<u64>(remaining, chunk.chunk_size);
   if (chunk.file_size == 0 && chunk.chunk_index == 0 && chunk.total_chunks == 1) {
     if (!chunk.data.empty()) {
       return false;
@@ -605,7 +606,7 @@ bool ZFileTransporter::ParseTransferChunkPayload(const base::Span<byte>& payload
     return false;
   }
   const u64 remaining = chunk.file_size - chunk_start;
-  const u64 expected_chunk_bytes = std::min<u64>(remaining, chunk.chunk_size);
+  const u64 expected_chunk_bytes = base::Min<u64>(remaining, chunk.chunk_size);
   if (chunk.file_size == 0 && chunk.chunk_index == 0 && chunk.total_chunks == 1) {
     if (chunk_data_size != 0 || !chunk.is_last_chunk) {
       return false;
@@ -642,11 +643,10 @@ bool ZFileTransporter::WaitForSendWindow(const TransferTuning& tuning) const {
     return true;
   }
 
-  const auto start = base::Clock::now();
-  const auto sleep_duration = std::chrono::milliseconds(
-      std::max<u32>(1, tuning.backpressure_sleep_ms));
+  const auto start = base::TimeTicks::Now();
+  const u32 sleep_ms = base::Max<u32>(1, tuning.backpressure_sleep_ms);
   while (true) {
-    if (send_stop_requested_.load(std::memory_order_relaxed)) {
+    if (send_stop_requested_.load(base::memory_order_relaxed)) {
       return false;
     }
     if (transport_layer_.state() != ZAsyncTransportLayer::State::kConnected) {
@@ -667,13 +667,12 @@ bool ZFileTransporter::WaitForSendWindow(const TransferTuning& tuning) const {
     }
 
     if (tuning.backpressure_timeout_ms > 0) {
-      const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
-          base::Clock::now() - start);
-      if (waited.count() >= tuning.backpressure_timeout_ms) {
+      const i64 waited_ms = (base::TimeTicks::Now() - start).InMilliseconds();
+      if (waited_ms >= tuning.backpressure_timeout_ms) {
         return false;
       }
     }
-    std::this_thread::sleep_for(sleep_duration);
+    base::SleepForMilliseconds(sleep_ms);
   }
 }
 
@@ -722,7 +721,7 @@ bool ZFileTransporter::ValidateIncomingChunkLimits(
     return false;
   }
   if (chunk.total_chunks >
-      static_cast<u64>(std::numeric_limits<mem_size>::max())) {
+      static_cast<u64>(static_cast<mem_size>(-1))) {
     BASE_LOGE(kLogTag, "Rejected transfer {}: chunk bitmap overflow",
               chunk.transfer_id);
     return false;
@@ -733,8 +732,8 @@ bool ZFileTransporter::ValidateIncomingChunkLimits(
 u64 ZFileTransporter::ComputeActiveIncomingBytesLocked() const {
   u64 total = 0;
   for (const auto& [_, session] : active_streams_) {
-    if (session.file_size > std::numeric_limits<u64>::max() - total) {
-      return std::numeric_limits<u64>::max();
+    if (session.file_size > UINT64_MAX - total) {
+      return UINT64_MAX;
     }
     total += session.file_size;
   }
@@ -744,12 +743,12 @@ u64 ZFileTransporter::ComputeActiveIncomingBytesLocked() const {
 void ZFileTransporter::PruneExpiredStreamsLocked(
     base::Vector<base::String>& expired_temp_paths) {
   expired_temp_paths.clear();
-  const auto now = base::Clock::now();
+  const auto now = base::TimeTicks::Now();
   const auto idle_timeout =
-      std::chrono::milliseconds(kIncomingTransferIdleTimeoutMs);
+      base::Milliseconds(kIncomingTransferIdleTimeoutMs);
   for (auto it = active_streams_.begin(); it != active_streams_.end();) {
     StreamReceiveSession& session = it->second;
-    if (session.last_activity.time_since_epoch().count() != 0 &&
+    if (!session.last_activity.is_null() &&
         now - session.last_activity < idle_timeout) {
       ++it;
       continue;
@@ -769,7 +768,7 @@ bool ZFileTransporter::EnsureStreamSession(const TransferChunk& chunk,
   if (!ValidateIncomingChunkLimits(chunk)) {
     return false;
   }
-  const auto now = base::Clock::now();
+  const auto now = base::TimeTicks::Now();
   auto it = active_streams_.find(chunk.transfer_id);
   if (it != active_streams_.end()) {
     StreamReceiveSession& session = it->second;
@@ -806,7 +805,9 @@ bool ZFileTransporter::EnsureStreamSession(const TransferChunk& chunk,
   if (!temp_dir.empty() && temp_dir.back() != '/' && temp_dir.back() != '\\') {
     temp_dir.push_back('/');
   }
-  base::String temp_name = "znet-transfer-" + std::to_string(chunk.transfer_id) + ".part";
+  char temp_name[64];
+  snprintf(temp_name, sizeof(temp_name), "znet-transfer-%llu.part",
+           static_cast<unsigned long long>(chunk.transfer_id));
   const base::Path temp_path(temp_dir + temp_name);
 
   StreamReceiveSession session;
@@ -827,7 +828,7 @@ bool ZFileTransporter::EnsureStreamSession(const TransferChunk& chunk,
   session.received_chunks.resize(chunk.total_chunks, 0);
 
   auto [inserted, ok] =
-      active_streams_.emplace(chunk.transfer_id, std::move(session));
+      active_streams_.emplace(chunk.transfer_id, base::move(session));
   if (!ok) {
     return false;
   }
@@ -845,12 +846,12 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
     return false;
   }
 
-  std::lock_guard<base::Mutex> lock(stream_mutex_);
+  base::LockGuard<base::Mutex> lock(stream_mutex_);
   base::Vector<base::String> expired_temp_paths;
   PruneExpiredStreamsLocked(expired_temp_paths);
   for (const base::String& temp_path : expired_temp_paths) {
     if (!temp_path.empty()) {
-      std::remove(temp_path.c_str());
+      remove(temp_path.c_str());
     }
   }
   StreamReceiveSession* session = nullptr;
@@ -860,7 +861,7 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
   }
 
   if (session->received_chunks[chunk.chunk_index] != 0) {
-    session->last_activity = base::Clock::now();
+    session->last_activity = base::TimeTicks::Now();
     if (out_completed) {
       *out_completed = session->received_chunk_count == session->total_chunks &&
                        session->has_expected_file_checksum;
@@ -875,7 +876,7 @@ bool ZFileTransporter::StreamChunkToFile(const TransferChunk& chunk,
     return false;
   }
 
-  session->last_activity = base::Clock::now();
+  session->last_activity = base::TimeTicks::Now();
   session->received_chunks[chunk.chunk_index] = 1;
   session->received_chunk_count++;
   if (chunk.is_last_chunk) {
@@ -901,7 +902,7 @@ bool ZFileTransporter::FinalizeStreamedFile(u64 transfer_id,
   base::Path temp_path;
   u32 expected_checksum = 0;
   {
-    std::lock_guard<base::Mutex> lock(stream_mutex_);
+    base::LockGuard<base::Mutex> lock(stream_mutex_);
     const auto it = active_streams_.find(transfer_id);
     if (it == active_streams_.end()) {
       return false;
@@ -931,12 +932,12 @@ bool ZFileTransporter::FinalizeStreamedFile(u64 transfer_id,
   }
 
   const base::String tmp_path = temp_path.ToAsciiString();
-  std::remove(out_path.c_str());
-  if (std::rename(tmp_path.c_str(), out_path.c_str()) != 0) {
+  remove(out_path.c_str());
+  if (rename(tmp_path.c_str(), out_path.c_str()) != 0) {
     return false;
   }
 
-  std::lock_guard<base::Mutex> lock(stream_mutex_);
+  base::LockGuard<base::Mutex> lock(stream_mutex_);
   active_streams_.erase(transfer_id);
   return true;
 }
@@ -944,7 +945,7 @@ bool ZFileTransporter::FinalizeStreamedFile(u64 transfer_id,
 void ZFileTransporter::AbortStreamedFile(u64 transfer_id) {
   base::String temp_path;
   {
-    std::lock_guard<base::Mutex> lock(stream_mutex_);
+    base::LockGuard<base::Mutex> lock(stream_mutex_);
     const auto it = active_streams_.find(transfer_id);
     if (it == active_streams_.end()) {
       return;
@@ -957,13 +958,13 @@ void ZFileTransporter::AbortStreamedFile(u64 transfer_id) {
     active_streams_.erase(it);
   }
   if (!temp_path.empty()) {
-    std::remove(temp_path.c_str());
+    remove(temp_path.c_str());
   }
 }
 
 bool ZFileTransporter::GetStreamProgress(u64 transfer_id,
                                          StreamProgress& out_progress) const {
-  std::lock_guard<base::Mutex> lock(stream_mutex_);
+  base::LockGuard<base::Mutex> lock(stream_mutex_);
   const auto it = active_streams_.find(transfer_id);
   if (it == active_streams_.end()) {
     return false;
